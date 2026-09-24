@@ -31,6 +31,9 @@
 #define SC_WDT		0x1a
 #define SC_WDT_KICK	0x1b
 #define SC_OTG_EN	0x1d
+#define MUIC_DEVICE_TYPE1 0x4a
+#define MUIC_DCP	BIT(6)
+#define MUIC_CDP	BIT(5)
 
 struct s2mu005_charger {
 	struct device *dev;
@@ -239,6 +242,7 @@ static int s2mu005_sink_current(struct s2mu005_charger *chg)
 {
 	union power_supply_propval val;
 	struct power_supply *source;
+	unsigned int device_type;
 	int ret, ua = 0;
 
 	/* Lazy lookup avoids the Type-C controller/VBUS regulator probe cycle. */
@@ -253,8 +257,13 @@ static int s2mu005_sink_current(struct s2mu005_charger *chg)
 	if (ret || val.intval != 5000000)
 		goto out;
 	ret = power_supply_get_property(source, POWER_SUPPLY_PROP_CURRENT_MAX, &val);
-	if (!ret)
+	if (!ret) {
 		ua = min(val.intval, 1500000);
+		/* The MUIC identifies BC1.2 chargers independently of Type-C Rp. */
+		ret = regmap_read(chg->map, MUIC_DEVICE_TYPE1, &device_type);
+		if (!ret && (device_type & (MUIC_DCP | MUIC_CDP)))
+			ua = 1500000;
+	}
 out:
 	power_supply_put(source);
 	return ua;
@@ -264,8 +273,8 @@ static void s2mu005_charge_work(struct work_struct *work)
 {
 	struct s2mu005_charger *chg = container_of(to_delayed_work(work),
 						struct s2mu005_charger, work);
-	unsigned int status, event, input_status;
-	int adc, ua, ret;
+	unsigned int status = 0, event = 0, input_status = 0;
+	int adc = 0, ua, ret;
 
 	mutex_lock(&chg->lock);
 	if (chg->stopping || chg->suspended)
@@ -292,23 +301,41 @@ static void s2mu005_charge_work(struct work_struct *work)
 	if (ret)
 		goto disable;
 	chg->online = ua > 0 && (status & BIT(7));
-	/* Thermal, VSYS, watchdog and input-overvoltage events inhibit charge. */
+	if (!chg->online || chg->thermal_block || ua < 100000)
+		goto disable;
+	/* Only thermal shutdown and VSYS overvoltage are persistent faults. */
+	switch (event & 0x0f) {
+	case 1:
+	case 3:
+		chg->health = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+		goto disable;
+	case 5:
+		/* A watchdog suspension needs a full charger restart. */
+		ret = s2mu005_charge_off(chg);
+		if (ret)
+			goto disable;
+		break;
+	default:
+		break;
+	}
 	ret = regmap_read(chg->map, 0x09, &input_status);
 	if (ret)
 		goto disable;
-	if ((event & 0x0f) ||
-	    ((input_status & 0x70) != 0x30 && (input_status & 0x70) != 0x50)) {
+	if ((input_status & 0x70) != 0x30 &&
+	    (input_status & 0x70) != 0x50) {
 		chg->health = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
 		goto disable;
 	}
-	if (!chg->online || chg->thermal_block || ua < 100000)
-		goto disable;
 	ret = s2mu005_charge_on(chg, ua);
 	if (ret)
 		goto disable;
 	chg->input_ua = ua;
 	goto requeue;
 disable:
+	if (ua > 0)
+		dev_info_ratelimited(chg->dev,
+			"charge blocked: adc=%d status0=%#x status1=%#x status3=%#x current=%d\n",
+			adc, status, input_status, event, ua);
 	if (s2mu005_charge_off(chg))
 		dev_err_ratelimited(chg->dev, "failed to disable charging\n");
 	chg->input_ua = 0;
