@@ -49,6 +49,7 @@ struct s2mm005 {
 	int supply_ua;
 	int supply_uv;
 	u32 last_func;
+	u32 last_lp;
 };
 
 static int s2mm005_read(struct s2mm005 *s, u16 reg, void *data, u16 len)
@@ -73,10 +74,18 @@ static int s2mm005_read(struct s2mm005 *s, u16 reg, void *data, u16 len)
 static int s2mm005_command(struct s2mm005 *s, const u8 *data, size_t len)
 {
 	u8 buf[7] = { 0, S2MM005_CMD };
-	int ret;
+	u8 wake;
+	int ret, i;
 
 	if (len > sizeof(buf) - 2)
 		return -EINVAL;
+	/* The controller may be in auto-LPM; wake it before every command. */
+	for (i = 0; i < 5; i++) {
+		ret = s2mm005_read(s, 0x0008, &wake, sizeof(wake));
+		if (ret)
+			return ret;
+	}
+	udelay(10);
 	memcpy(buf + 2, data, len);
 	ret = i2c_master_send(s->client, buf, len + 2);
 	return ret == len + 2 ? 0 : ret < 0 ? ret : -EIO;
@@ -211,13 +220,15 @@ static int s2mm005_update(struct s2mm005 *s)
 	if (func & S2MM005_RESET)
 		s->drp_restored = false;
 	state = s2mm005_decode(func, lp);
-	if (func != s->last_func) {
-		dev_info(&s->client->dev, "state=%u data=%s power=%s status=%#x\n",
+	if (func != s->last_func || lp != s->last_lp) {
+		dev_info(&s->client->dev,
+			 "state=%u data=%s power=%s status=%#x lp=%#x\n",
 			 (unsigned int)FIELD_GET(S2MM005_STATE, func),
 			 state.role == USB_ROLE_HOST ? "host" :
 			 state.role == USB_ROLE_DEVICE ? "device" : "none",
-			 state.source ? "source" : "sink", func);
+			 state.source ? "source" : "sink", func, lp);
 		s->last_func = func;
+		s->last_lp = lp;
 	}
 	if (state.role == USB_ROLE_NONE) {
 		ret = s2mm005_disconnect(s);
