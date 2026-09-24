@@ -162,6 +162,15 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	if (ret)
 		return ret;
 
+	/* Immediate readback: the START bit auto-clears on UP, which takes
+	 * longer than this, so 1 here means the write landed.
+	 */
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_CTRL_S, &val);
+	if (ret)
+		return ret;
+
+	dev_info(scsc->dev, "WIFI_CTRL_S immediate readback 0x%08x\n", val);
+
 	usleep_range(10000, 20000);
 
 	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &val);
