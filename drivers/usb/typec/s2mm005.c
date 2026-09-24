@@ -244,6 +244,11 @@ static int s2mm005_update(struct s2mm005 *s)
 		return ret;
 	}
 	s->drp_restored = false;
+	if (FIELD_GET(S2MM005_STATE, func) == 29) {
+		/* A prior PD contract no longer applies after error recovery. */
+		s->pd = false;
+		s->five_volt_requested = false;
+	}
 
 	/* Invalidate the previous sink grant before changing any power role. */
 	if (state.source || FIELD_GET(S2MM005_STATE, func) == 52 ||
