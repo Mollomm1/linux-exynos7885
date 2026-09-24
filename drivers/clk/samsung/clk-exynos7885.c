@@ -18,7 +18,7 @@
 
 /* NOTE: Must be equal to the last clock ID increased by one */
 #define CLKS_NR_TOP			(CLK_MOUT_SHARED1_PLL + 1)
-#define CLKS_NR_CORE			(CLK_GOUT_TREX_P_CORE_PCLK_P_CORE + 1)
+#define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
 
@@ -601,6 +601,9 @@ CLK_OF_DECLARE(exynos7885_cmu_peri, "samsung,exynos7885-cmu-peri",
 #define CLK_CON_GAT_GOUT_CORE_TREX_P_CORE_PCLK		0x2170
 #define CLK_CON_GAT_GOUT_CORE_TREX_P_CORE_PCLK_P_CORE	0x2174
 
+#define CLK_CON_GAT_GOUT_CORE_ADC_S0			0x2178
+#define CLK_CON_GAT_GOUT_CORE_ADC_S1			0x217c
+
 static const unsigned long core_clk_regs[] __initconst = {
 	PLL_CON0_MUX_CLKCMU_CORE_BUS_USER,
 	PLL_CON0_MUX_CLKCMU_CORE_CCI_USER,
@@ -616,6 +619,8 @@ static const unsigned long core_clk_regs[] __initconst = {
 	CLK_CON_GAT_GOUT_CORE_TREX_P_CORE_CCLK_P_CORE,
 	CLK_CON_GAT_GOUT_CORE_TREX_P_CORE_PCLK,
 	CLK_CON_GAT_GOUT_CORE_TREX_P_CORE_PCLK_P_CORE,
+	CLK_CON_GAT_GOUT_CORE_ADC_S0,
+	CLK_CON_GAT_GOUT_CORE_ADC_S1,
 };
 
 /* List of parent clocks for Muxes in CMU_CORE */
@@ -641,6 +646,10 @@ static const struct samsung_div_clock core_div_clks[] __initconst = {
 };
 
 static const struct samsung_gate_clock core_gate_clks[] __initconst = {
+	GATE(CLK_GOUT_ADC_S0, "gout_adc_s0", "dout_core_busp",
+	     CLK_CON_GAT_GOUT_CORE_ADC_S0, 21, 0, 0),
+	GATE(CLK_GOUT_ADC_S1, "gout_adc_s1", "dout_core_busp",
+	     CLK_CON_GAT_GOUT_CORE_ADC_S1, 21, 0, 0),
 	/* CCI (interconnect) clock must be always running */
 	GATE(CLK_GOUT_CCI_ACLK, "gout_cci_aclk", "mout_core_cci_user",
 	     CLK_CON_GAT_GOUT_CORE_CCI_550_ACLK, 21, CLK_IS_CRITICAL, 0),

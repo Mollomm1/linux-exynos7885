@@ -18,6 +18,7 @@ properties:
           - samsung,exynos3250-adc
           - samsung,exynos4212-adc                # Exynos4212 and Exynos4412
           - samsung,exynos7-adc
+          - samsung,exynos7885-adc
           - samsung,s3c2410-adc
           - samsung,s3c2416-adc
           - samsung,s3c2440-adc
@@ -34,7 +35,8 @@ properties:
 
   clocks:
     description:
-      Phandle to ADC bus clock. For Exynos3250 additional clock is needed.
+      Phandle to ADC bus clock. Exynos3250 needs a second clock; Exynos7885
+      needs both ADC interface bus clocks.
     minItems: 1
     maxItems: 2
 
@@ -99,6 +101,7 @@ allOf:
           contains:
             enum:
               - samsung,exynos3250-adc
+              - samsung,exynos7885-adc
     then:
       properties:
         clocks:

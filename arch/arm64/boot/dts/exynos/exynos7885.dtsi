@@ -417,6 +417,17 @@
 			status = "disabled";
 		};
 
+		adc: adc@120a0000 {
+			compatible = "samsung,exynos7885-adc";
+			reg = <0x120a0000 0x100>;
+			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cmu_core CLK_GOUT_ADC_S0>,
+				 <&cmu_core CLK_GOUT_ADC_S1>;
+			clock-names = "adc", "sclk";
+			#io-channel-cells = <1>;
+			status = "disabled";
+		};
+
 		i2c_0: i2c@13830000 {
 			compatible = "samsung,exynos7885-i2c",
 				     "samsung,s3c2440-i2c";

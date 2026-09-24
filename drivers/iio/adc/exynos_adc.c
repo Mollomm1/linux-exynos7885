@@ -156,6 +156,7 @@ struct exynos_adc {
 struct exynos_adc_data {
 	int num_channels;
 	bool needs_sclk;
+	bool is_v3;
 	bool needs_adc_phy;
 	int phy_offset;
 	u32 mask;
@@ -484,7 +485,36 @@ static const struct exynos_adc_data exynos7_adc_data = {
 	.start_conv	= exynos_adc_v2_start_conv,
 };
 
+/* Exynos7885 ADCv3 uses the v2 control registers and data at 0x08. */
+static void exynos_adc_v3_init_hw(struct exynos_adc *info)
+{
+	writel(ADC_V2_CON1_SOFT_RESET, ADC_V2_CON1(info->regs));
+	writel(BIT(1), ADC_V2_CON1(info->regs));
+	writel(ADC_V2_CON2_C_TIME(6), ADC_V2_CON2(info->regs));
+	writel(1, ADC_V2_INT_EN(info->regs));
+}
+
+static void exynos_adc_v3_exit_hw(struct exynos_adc *info)
+{
+	u32 con = readl(ADC_V2_CON2(info->regs));
+
+	writel(con & ~ADC_V2_CON2_C_TIME(7), ADC_V2_CON2(info->regs));
+	writel(0, ADC_V2_INT_EN(info->regs));
+}
+
+static const struct exynos_adc_data exynos7885_adc_data = {
+	.num_channels = 12,
+	.mask = ADC_DATX_MASK,
+	.needs_sclk = true,
+	.is_v3 = true,
+	.init_hw = exynos_adc_v3_init_hw,
+	.exit_hw = exynos_adc_v3_exit_hw,
+	.clear_irq = exynos_adc_v2_clear_irq,
+	.start_conv = exynos_adc_v2_start_conv,
+};
+
 static const struct of_device_id exynos_adc_match[] = {
+	{ .compatible = "samsung,exynos7885-adc", .data = &exynos7885_adc_data },
 	{
 		.compatible = "samsung,s3c2410-adc",
 		.data = &exynos_adc_s3c24xx_data,
@@ -627,7 +657,8 @@ static irqreturn_t exynos_adc_isr(int irq, void *dev_id)
 		info->ts_y = readl(ADC_V1_DATY(info->regs));
 		writel(ADC_TSC_WAIT4INT | ADC_S3C2443_TSC_UD_SEN, ADC_V1_TSC(info->regs));
 	} else {
-		info->value = readl(ADC_V1_DATX(info->regs)) & mask;
+		info->value = readl(info->regs +
+				    (info->data->is_v3 ? 0x08 : 0x0c)) & mask;
 	}
 
 	/* clear irq */
@@ -719,6 +750,8 @@ static const struct iio_chan_spec exynos_adc_iio_channels[] = {
 	ADC_CHANNEL(7, "adc7"),
 	ADC_CHANNEL(8, "adc8"),
 	ADC_CHANNEL(9, "adc9"),
+	ADC_CHANNEL(10, "adc10"),
+	ADC_CHANNEL(11, "adc11"),
 };
 
 static int exynos_adc_remove_devices(struct device *dev, void *c)
