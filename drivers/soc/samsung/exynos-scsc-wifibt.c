@@ -14,6 +14,7 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/crc32.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
@@ -76,6 +77,9 @@
 #define SCSC_FW_LEN_OFF			16
 #define SCSC_FW_API_MINOR_OFF		20
 #define SCSC_FW_API_MAJOR_OFF		22
+#define SCSC_FW_CRC_OFF			24
+#define SCSC_FW_CONST_LEN_OFF		28
+#define SCSC_FW_CONST_CRC_OFF		32
 #define SCSC_FW_ENTRY_OFF		40
 #define SCSC_FW_BUILD_ID_OFF		48
 #define SCSC_FW_BUILD_ID_SZ		128
@@ -168,6 +172,7 @@ static void scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 {
 	u16 ver_major, ver_minor, api_major, api_minor;
 	u32 hdr_len, entry, runtime_len, const_len;
+	u32 fw_crc, const_crc, hdr_crc;
 	char build_id[SCSC_FW_BUILD_ID_SZ + 1];
 
 	if (fw->size < SCSC_FW_BUILD_ID_OFF + SCSC_FW_BUILD_ID_SZ ||
@@ -193,6 +198,23 @@ static void scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 		 ver_major, ver_minor, api_major, api_minor, entry,
 		 runtime_len, const_len);
 	dev_info(scsc->dev, "firmware build %s\n", build_id);
+
+	/* Integrity checks over the image, same layout as downstream fwimage. */
+	fw_crc = get_unaligned_le32(fw->data + SCSC_FW_CRC_OFF);
+	const_crc = get_unaligned_le32(fw->data + SCSC_FW_CONST_CRC_OFF);
+	hdr_crc = get_unaligned_le32(fw->data + hdr_len - sizeof(u32));
+
+	if (hdr_len > fw->size || const_len > fw->size) {
+		dev_err(scsc->dev, "firmware lengths out of range\n");
+		return;
+	}
+
+	if (ether_crc(hdr_len - sizeof(u32), fw->data) != hdr_crc ||
+	    ether_crc(const_len - hdr_len, fw->data + hdr_len) != const_crc ||
+	    ether_crc(fw->size - hdr_len, fw->data + hdr_len) != fw_crc)
+		dev_err(scsc->dev, "firmware CRC mismatch\n");
+	else
+		dev_info(scsc->dev, "firmware CRCs OK\n");
 }
 
 static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
