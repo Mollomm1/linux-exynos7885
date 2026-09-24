@@ -92,6 +92,7 @@ struct scsc_wifibt {
 	struct regmap	*pmureg;
 	phys_addr_t	mem_start;
 	size_t		mem_size;
+	u32		fw_entry;
 	atomic_t	irq_count;
 };
 
@@ -167,8 +168,8 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	return 0;
 }
 
-static void scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
-				   const struct firmware *fw)
+static int scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
+				  const struct firmware *fw)
 {
 	u16 ver_major, ver_minor, api_major, api_minor;
 	u32 hdr_len, entry, runtime_len, const_len;
@@ -179,7 +180,7 @@ static void scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 	    memcmp(fw->data + SCSC_FW_MAGIC_OFF, SCSC_FW_MAGIC,
 		   strlen(SCSC_FW_MAGIC))) {
 		dev_err(scsc->dev, "firmware has no Maxwell header\n");
-		return;
+		return -EINVAL;
 	}
 
 	ver_minor = get_unaligned_le16(fw->data + SCSC_FW_VER_MINOR_OFF);
@@ -199,6 +200,8 @@ static void scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 		 runtime_len, const_len);
 	dev_info(scsc->dev, "firmware build %s\n", build_id);
 
+	scsc->fw_entry = entry;
+
 	/* Integrity checks over the image, same layout as downstream fwimage. */
 	fw_crc = get_unaligned_le32(fw->data + SCSC_FW_CRC_OFF);
 	const_crc = get_unaligned_le32(fw->data + SCSC_FW_CONST_CRC_OFF);
@@ -206,15 +209,49 @@ static void scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 
 	if (hdr_len > fw->size || const_len > fw->size) {
 		dev_err(scsc->dev, "firmware lengths out of range\n");
-		return;
+		return -EINVAL;
 	}
 
 	if (ether_crc(hdr_len - sizeof(u32), fw->data) != hdr_crc ||
 	    ether_crc(const_len - hdr_len, fw->data + hdr_len) != const_crc ||
-	    ether_crc(fw->size - hdr_len, fw->data + hdr_len) != fw_crc)
+	    ether_crc(fw->size - hdr_len, fw->data + hdr_len) != fw_crc) {
 		dev_err(scsc->dev, "firmware CRC mismatch\n");
-	else
-		dev_info(scsc->dev, "firmware CRCs OK\n");
+		return -EINVAL;
+	}
+
+	dev_info(scsc->dev, "firmware CRCs OK\n");
+
+	return 0;
+}
+
+static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
+				const struct firmware *fw)
+{
+	void *dram;
+
+	if (fw->size > scsc->mem_size) {
+		dev_err(scsc->dev, "firmware %zu larger than shared memory %zu\n",
+			fw->size, scsc->mem_size);
+		return -EINVAL;
+	}
+
+	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	if (!dram)
+		return -ENOMEM;
+
+	memcpy(dram, fw->data, fw->size);
+
+	if (memcmp(dram, fw->data, fw->size)) {
+		dev_err(scsc->dev, "firmware DRAM readback mismatch\n");
+		memunmap(dram);
+		return -EIO;
+	}
+
+	memunmap(dram);
+
+	dev_info(scsc->dev, "firmware staged in shared memory, verified\n");
+
+	return 0;
 }
 
 static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
@@ -328,16 +365,26 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to request MBOX irq\n");
 
-	/* Validate the firmware packaging; the boot itself comes later. */
+	/* Load, verify and stage the firmware image in shared DRAM before
+	 * releasing the block from reset (downstream mxman order).
+	 */
 	ret = request_firmware(&fw, SCSC_FW_NAME, dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "firmware %s not available\n",
+				     SCSC_FW_NAME);
+
+	dev_info(dev, "firmware %s size %zu\n", SCSC_FW_NAME, fw->size);
+
+	ret = scsc_wifibt_fw_parse(scsc, fw);
 	if (ret) {
-		dev_info(dev, "firmware %s not available yet: %d\n",
-			 SCSC_FW_NAME, ret);
-	} else {
-		dev_info(dev, "firmware %s size %zu\n", SCSC_FW_NAME, fw->size);
-		scsc_wifibt_fw_parse(scsc, fw);
 		release_firmware(fw);
+		return dev_err_probe(dev, ret, "firmware rejected\n");
 	}
+
+	ret = scsc_wifibt_fw_stage(scsc, fw);
+	release_firmware(fw);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to stage firmware\n");
 
 	ret = scsc_wifibt_power_on(scsc);
 	if (ret)
