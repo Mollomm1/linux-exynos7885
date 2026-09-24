@@ -65,15 +65,18 @@ module_param(null_mxconf, bool, 0644);
 MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the fabricated one");
 
 /* R4 execution probe: Thumb-2 payload that writes MARKER to DRAM offset
- * MARK_OFF, placed at PROBE_OFF and entered via MBOX_0 = PROBE_OFF + 1
- * (odd = Thumb, same convention as the firmware entry 0x1a9).
+ * MARK_OFF, staged at the probe entry (masked to even) and entered via
+ * MBOX_0 (odd = Thumb, same convention as the firmware entry 0x1a9).
  */
-#define SCSC_PROBE_OFF		0x200000
 #define SCSC_PROBE_MARK_OFF	0x1000
 #define SCSC_PROBE_MARKER	0xdeadbeef
 static bool r4_probe;
 module_param(r4_probe, bool, 0644);
 MODULE_PARM_DESC(r4_probe, "Point the R4 at a marker-writing probe payload instead of the firmware");
+
+static uint probe_entry = 0x200001;
+module_param(probe_entry, uint, 0644);
+MODULE_PARM_DESC(probe_entry, "DRAM offset used as R4 entry (and payload location) when r4_probe is set");
 
 /* PMU (system-controller syscon) register offsets */
 #define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
@@ -396,19 +399,22 @@ static const u8 scsc_probe_payload[] = {
 
 static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 {
+	u32 off = probe_entry & ~1u;
 	void *dram;
 
-	if (SCSC_PROBE_OFF + sizeof(scsc_probe_payload) > scsc->mem_size)
+	if (!(probe_entry & 1u) || off + sizeof(scsc_probe_payload) > scsc->mem_size) {
+		dev_err(scsc->dev, "probe entry 0x%x out of range\n",
+			probe_entry);
 		return -EINVAL;
+	}
 
 	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
 	if (!dram)
 		return -ENOMEM;
 
-	memcpy(dram + SCSC_PROBE_OFF, scsc_probe_payload,
-	       sizeof(scsc_probe_payload));
+	memcpy(dram + off, scsc_probe_payload, sizeof(scsc_probe_payload));
 
-	if (memcmp(dram + SCSC_PROBE_OFF, scsc_probe_payload,
+	if (memcmp(dram + off, scsc_probe_payload,
 		   sizeof(scsc_probe_payload))) {
 		dev_err(scsc->dev, "probe payload DRAM readback mismatch\n");
 		memunmap(dram);
@@ -417,10 +423,10 @@ static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 
 	memunmap(dram);
 
-	scsc->sig_entry = SCSC_PROBE_OFF + 1;
+	scsc->sig_entry = probe_entry;
 	scsc->sig_mbox1 = 0;
-	dev_info(scsc->dev, "R4 probe payload staged, entry 0x%x\n",
-		 scsc->sig_entry);
+	dev_info(scsc->dev, "R4 probe payload staged at 0x%x, entry 0x%x\n",
+		 off, scsc->sig_entry);
 
 	return 0;
 }
