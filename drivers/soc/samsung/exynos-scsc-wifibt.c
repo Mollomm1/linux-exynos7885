@@ -56,6 +56,14 @@
 /* TZASC: allow the firmware block DRAM access (downstream SMC cmd) */
 #define SCSC_SMC_WLBT_TZASC	0x82000710
 
+static bool signal_r4 = true;
+module_param(signal_r4, bool, 0444);
+MODULE_PARM_DESC(signal_r4, "Write the R4 boot handshake (TZASC, MBOX regs) before reset release");
+
+static bool null_mxconf;
+module_param(null_mxconf, bool, 0444);
+MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the fabricated one");
+
 /* PMU (system-controller syscon) register offsets */
 #define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
 #define SCSC_PMU_WIFI_PWRON		BIT(1)
@@ -376,7 +384,8 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 
 	/* Tell the R4 ROM where the staged image is, then release it. */
 	writel(scsc->fw_entry, scsc->base + SCSC_MBOX_ISSR(0));
-	writel(scsc->mxconf_off, scsc->base + SCSC_MBOX_ISSR(1));
+	writel(null_mxconf ? 0 : scsc->mxconf_off,
+	       scsc->base + SCSC_MBOX_ISSR(1));
 	writel(SCSC_MBOX_MAGIC, scsc->base + SCSC_MBOX_ISSR(2));
 	writel(SCSC_MBOX_FW_FLAGS, scsc->base + SCSC_MBOX_ISSR(3));
 	/* CPU memory barrier: registers must land before reset release. */
@@ -645,11 +654,18 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to stage firmware\n");
 
-	ret = scsc_wifibt_mxconf(scsc);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to write mxconf\n");
+	if (!signal_r4) {
+		dev_info(dev, "R4 signalling disabled by parameter\n");
+	} else {
+		if (!null_mxconf) {
+			ret = scsc_wifibt_mxconf(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to write mxconf\n");
+		}
 
-	scsc_wifibt_signal(scsc);
+		scsc_wifibt_signal(scsc);
+	}
 
 	ret = scsc_wifibt_power_on(scsc);
 	if (ret)
