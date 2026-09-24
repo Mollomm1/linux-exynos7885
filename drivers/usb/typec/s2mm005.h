@@ -16,6 +16,8 @@
 #define S2MM005_RESET		BIT(31)
 #define S2MM005_WATER		BIT(3)
 #define S2MM005_DRY		BIT(5)
+#define S2MM005_SLEEP_CABLE_DETECT	BIT(8)
+#define S2MM005_SRC_WAIT_NEW_CAPABILITIES	14
 
 struct s2mm005_state {
 	enum usb_role role;

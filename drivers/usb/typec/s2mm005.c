@@ -194,6 +194,7 @@ static int s2mm005_update(struct s2mm005 *s)
 	u8 func_buf[4], lp_buf[4], irq_buf[48];
 	const u8 ack[] = { 0x01 };
 	const u8 auto_lp[] = { 0x0f, 0x06 };
+	const u8 wake_cable[] = { 0x0f, 0x0d };
 	const u8 drp[] = { 0x02, 0x01, 0x00, 0x50, 0x03 };
 	u32 func, lp;
 	int ret, ua = 0;
@@ -230,6 +231,12 @@ static int s2mm005_update(struct s2mm005 *s)
 		s->last_func = func;
 		s->last_lp = lp;
 	}
+	/* Keep the current source role while waking cable detection. */
+	if (FIELD_GET(S2MM005_STATE, func) ==
+	    S2MM005_SRC_WAIT_NEW_CAPABILITIES &&
+	    (lp & S2MM005_SLEEP_CABLE_DETECT) &&
+	    (lp & S2MM005_DRY) && !(lp & S2MM005_WATER))
+		return s2mm005_command(s, wake_cable, sizeof(wake_cable));
 	if (state.role == USB_ROLE_NONE) {
 		ret = s2mm005_disconnect(s);
 		if (ret)
