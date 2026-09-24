@@ -95,6 +95,7 @@ static int s2mu005_boost_off(struct s2mu005_charger *chg)
 static int s2mu005_vbus_enable(struct regulator_dev *rdev)
 {
 	struct s2mu005_charger *chg = rdev_get_drvdata(rdev);
+	unsigned int status = 0;
 	int ret;
 
 	mutex_lock(&chg->lock);
@@ -135,10 +136,17 @@ static int s2mu005_vbus_enable(struct regulator_dev *rdev)
 	ret = regmap_update_bits(chg->map, SC_OCP, 0x3c, 0x2c);
 	if (ret)
 		goto fail;
-	ret = regmap_update_bits(chg->map, SC_BOOST_V, 0x1f, 0x16);
+	/* Samsung clears bits 6:5 before programming the 5.1 V boost target. */
+	ret = regmap_update_bits(chg->map, SC_BOOST_V, 0x7f, 0x16);
 	if (ret)
 		goto fail;
 	chg->boost = true;
+	ret = regmap_read_poll_timeout(chg->map, SC_STATUS0, status,
+				       status & BIT(5), 5000, 100000);
+	if (ret)
+		dev_warn(chg->dev, "OTG boost lacks VMID: status0=%#x, error=%d\n",
+			 status, ret);
+	ret = 0;
 	goto out;
 fail:
 	if (s2mu005_boost_off(chg))
