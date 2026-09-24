@@ -53,6 +53,7 @@ struct s2mu005_charger {
 	bool stopping;
 	int health;
 	int input_ua;
+	int gadget_ua;
 	int charge_code;
 };
 
@@ -263,6 +264,8 @@ static int s2mu005_sink_current(struct s2mu005_charger *chg)
 		ret = regmap_read(chg->map, MUIC_DEVICE_TYPE1, &device_type);
 		if (!ret && (device_type & (MUIC_DCP | MUIC_CDP)))
 			ua = 1500000;
+		else if (chg->gadget_ua > 100000)
+			ua = max(ua, chg->gadget_ua);
 	}
 out:
 	power_supply_put(source);
@@ -282,6 +285,8 @@ static void s2mu005_charge_work(struct work_struct *work)
 	if (chg->boost)
 		goto requeue;
 	ua = s2mu005_sink_current(chg);
+	if (!ua)
+		chg->gadget_ua = 0;
 	ret = iio_read_channel_raw(chg->thermistor, &adc);
 	chg->online = ua > 0;
 	if (ret < 0) {
@@ -399,12 +404,37 @@ static int s2mu005_get_property(struct power_supply *psy,
 	return ret;
 }
 
+static int s2mu005_set_property(struct power_supply *psy,
+			       enum power_supply_property prop,
+			       const union power_supply_propval *val)
+{
+	struct s2mu005_charger *chg = power_supply_get_drvdata(psy);
+
+	if (prop != POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT)
+		return -EINVAL;
+	if (val->intval < 0 || val->intval > 500000)
+		return -EINVAL;
+	mutex_lock(&chg->lock);
+	chg->gadget_ua = val->intval;
+	mutex_unlock(&chg->lock);
+	mod_delayed_work(system_wq, &chg->work, 0);
+	return 0;
+}
+
+static int s2mu005_property_is_writeable(struct power_supply *psy,
+					 enum power_supply_property prop)
+{
+	return prop == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT;
+}
+
 static const struct power_supply_desc s2mu005_psy_desc = {
 	.name = "s2mu005-charger",
 	.type = POWER_SUPPLY_TYPE_USB,
 	.properties = s2mu005_properties,
 	.num_properties = ARRAY_SIZE(s2mu005_properties),
 	.get_property = s2mu005_get_property,
+	.set_property = s2mu005_set_property,
+	.property_is_writeable = s2mu005_property_is_writeable,
 };
 
 static void s2mu005_stop(void *data)

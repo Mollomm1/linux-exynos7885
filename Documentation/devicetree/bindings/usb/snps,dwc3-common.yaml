@@ -28,6 +28,10 @@ allOf:
       $ref: usb-xhci.yaml#
 
 properties:
+  usb-psy-name:
+    description: Name of the power supply used to report configured USB current.
+    $ref: /schemas/types.yaml#/definitions/string
+
   extcon:
     maxItems: 1
     deprecated: true
