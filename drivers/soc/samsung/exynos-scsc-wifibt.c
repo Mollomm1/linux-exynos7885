@@ -14,6 +14,7 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/arm-smccc.h>
 #include <linux/crc32.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
@@ -32,6 +33,15 @@
 #define SCSC_MBOX_INTMSR0	0x018 /* Interrupt mask status, upper half is FROM R4/M4 */
 #define SCSC_MBOX_INTCR0	0x00c /* Interrupt clear, write 1 to clear */
 #define SCSC_MBOX_IS_VERSION	0x050 /* Firmware block version information */
+#define SCSC_MBOX_ISSR_BASE	0x080 /* Shared registers, 4 bytes each */
+#define SCSC_MBOX_ISSR(i)	(SCSC_MBOX_ISSR_BASE + 4 * (i))
+
+/* Boot handshake values (downstream mbox_init, documentation only) */
+#define SCSC_MBOX_MAGIC		0xbcdeedcb
+#define SCSC_MBOX_FW_FLAGS	0x0 /* Bit 0 = spin at start of CRT0 */
+
+/* TZASC: allow the firmware block DRAM access (downstream SMC cmd) */
+#define SCSC_SMC_WLBT_TZASC	0x82000710
 
 /* PMU (system-controller syscon) register offsets */
 #define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
@@ -224,6 +234,49 @@ static int scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 	return 0;
 }
 
+static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
+{
+	struct arm_smccc_res res;
+
+	/* Let the firmware block access DRAM (ignored on failure,
+	 * like downstream).
+	 */
+	arm_smccc_smc(SCSC_SMC_WLBT_TZASC, 0, scsc->mem_start, scsc->mem_size,
+		      0, 0, 0, 0, &res);
+	dev_info(scsc->dev, "TZASC config result 0x%lx\n", res.a0);
+
+	/* Tell the R4 ROM where the staged image is, then release it.
+	 * MBOX_1 (mxconf transport config) stays 0 until the transport
+	 * layer exists.
+	 */
+	writel(scsc->fw_entry, scsc->base + SCSC_MBOX_ISSR(0));
+	writel(0, scsc->base + SCSC_MBOX_ISSR(1));
+	writel(SCSC_MBOX_MAGIC, scsc->base + SCSC_MBOX_ISSR(2));
+	writel(SCSC_MBOX_FW_FLAGS, scsc->base + SCSC_MBOX_ISSR(3));
+	/* CPU memory barrier: registers must land before reset release. */
+	wmb();
+}
+
+static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
+{
+	unsigned int i, status = 0;
+
+	for (i = 0; i < 10; i++) {
+		msleep(100);
+		status = readl(scsc->base + SCSC_MBOX_INTMSR0) >> 16;
+		if (status)
+			break;
+	}
+
+	dev_info(scsc->dev, "R4 response status 0x%04x, MBOX IRQs seen %d\n",
+		 status, atomic_read(&scsc->irq_count));
+	dev_info(scsc->dev, "MBOX regs %08x %08x %08x %08x\n",
+		 readl(scsc->base + SCSC_MBOX_ISSR(0)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(1)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(2)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(3)));
+}
+
 static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 				const struct firmware *fw)
 {
@@ -386,9 +439,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to stage firmware\n");
 
+	scsc_wifibt_signal(scsc);
+
 	ret = scsc_wifibt_power_on(scsc);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to power on\n");
+
+	scsc_wifibt_observe(scsc);
 
 	dev_info(dev, "probed\n");
 
