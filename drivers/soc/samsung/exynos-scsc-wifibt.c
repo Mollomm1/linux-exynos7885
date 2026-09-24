@@ -64,6 +64,17 @@ static bool null_mxconf;
 module_param(null_mxconf, bool, 0444);
 MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the fabricated one");
 
+/* R4 execution probe: Thumb-2 payload that writes MARKER to DRAM offset
+ * MARK_OFF, placed at PROBE_OFF and entered via MBOX_0 = PROBE_OFF + 1
+ * (odd = Thumb, same convention as the firmware entry 0x1a9).
+ */
+#define SCSC_PROBE_OFF		0x200000
+#define SCSC_PROBE_MARK_OFF	0x1000
+#define SCSC_PROBE_MARKER	0xdeadbeef
+static bool r4_probe;
+module_param(r4_probe, bool, 0444);
+MODULE_PARM_DESC(r4_probe, "Point the R4 at a marker-writing probe payload instead of the firmware");
+
 /* PMU (system-controller syscon) register offsets */
 #define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
 #define SCSC_PMU_WIFI_PWRON		BIT(1)
@@ -128,6 +139,8 @@ struct scsc_wifibt {
 	u32		fw_entry;
 	u32		fw_runtime;
 	u32		mxconf_off;
+	u32		sig_entry;
+	u32		sig_mbox1;
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -371,6 +384,47 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+/* ldr.w r0, [pc, #4] / ldr.w r1, [pc, #4] / .word MARK_TARGET /
+ * .word MARKER / str r1, [r0] / b .
+ * Writes MARKER to DRAM offset MARK_OFF through the R4's view.
+ */
+static const u8 scsc_probe_payload[] = {
+	0xf8, 0xdf, 0x00, 0x04, 0xf8, 0xdf, 0x10, 0x04,
+	0x00, 0x10, 0x00, 0x80, 0xef, 0xbe, 0xad, 0xde,
+	0x01, 0x60, 0xfe, 0xe7,
+};
+
+static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
+{
+	void *dram;
+
+	if (SCSC_PROBE_OFF + sizeof(scsc_probe_payload) > scsc->mem_size)
+		return -EINVAL;
+
+	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	if (!dram)
+		return -ENOMEM;
+
+	memcpy(dram + SCSC_PROBE_OFF, scsc_probe_payload,
+	       sizeof(scsc_probe_payload));
+
+	if (memcmp(dram + SCSC_PROBE_OFF, scsc_probe_payload,
+		   sizeof(scsc_probe_payload))) {
+		dev_err(scsc->dev, "probe payload DRAM readback mismatch\n");
+		memunmap(dram);
+		return -EIO;
+	}
+
+	memunmap(dram);
+
+	scsc->sig_entry = SCSC_PROBE_OFF + 1;
+	scsc->sig_mbox1 = 0;
+	dev_info(scsc->dev, "R4 probe payload staged, entry 0x%x\n",
+		 scsc->sig_entry);
+
+	return 0;
+}
+
 static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 {
 	struct arm_smccc_res res;
@@ -382,10 +436,9 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 		      0, 0, 0, 0, &res);
 	dev_info(scsc->dev, "TZASC config result 0x%lx\n", res.a0);
 
-	/* Tell the R4 ROM where the staged image is, then release it. */
-	writel(scsc->fw_entry, scsc->base + SCSC_MBOX_ISSR(0));
-	writel(null_mxconf ? 0 : scsc->mxconf_off,
-	       scsc->base + SCSC_MBOX_ISSR(1));
+	/* Tell the R4 ROM where to jump, then release it. */
+	writel(scsc->sig_entry, scsc->base + SCSC_MBOX_ISSR(0));
+	writel(scsc->sig_mbox1, scsc->base + SCSC_MBOX_ISSR(1));
 	writel(SCSC_MBOX_MAGIC, scsc->base + SCSC_MBOX_ISSR(2));
 	writel(SCSC_MBOX_FW_FLAGS, scsc->base + SCSC_MBOX_ISSR(3));
 	/* CPU memory barrier: registers must land before reset release. */
@@ -455,6 +508,21 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
+
+	if (r4_probe) {
+		void *dram = memremap(scsc->mem_start, scsc->mem_size,
+				      MEMREMAP_WB);
+		u32 mark;
+
+		if (!dram)
+			return;
+
+		mark = readl(dram + SCSC_PROBE_MARK_OFF);
+		memunmap(dram);
+		dev_info(scsc->dev, "probe marker 0x%08x %s\n", mark,
+			 mark == SCSC_PROBE_MARKER ? "PRESENT (R4 ran it)" :
+			 "absent");
+	}
 }
 
 static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
@@ -657,11 +725,21 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (!signal_r4) {
 		dev_info(dev, "R4 signalling disabled by parameter\n");
 	} else {
-		if (!null_mxconf) {
-			ret = scsc_wifibt_mxconf(scsc);
+		if (r4_probe) {
+			ret = scsc_wifibt_r4_probe(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
-						     "failed to write mxconf\n");
+						     "failed to stage probe\n");
+		} else {
+			if (!null_mxconf) {
+				ret = scsc_wifibt_mxconf(scsc);
+				if (ret)
+					return dev_err_probe(dev, ret,
+							     "failed to write mxconf\n");
+			}
+
+			scsc->sig_entry = scsc->fw_entry;
+			scsc->sig_mbox1 = null_mxconf ? 0 : scsc->mxconf_off;
 		}
 
 		scsc_wifibt_signal(scsc);
