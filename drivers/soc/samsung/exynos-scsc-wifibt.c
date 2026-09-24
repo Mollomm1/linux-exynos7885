@@ -5,15 +5,16 @@
  *
  * It maps the R4/M4 mailbox registers, reports the firmware block version,
  * checks the shared-memory carveout and PMU state, and verifies the
- * firmware image is loadable via the firmware loader. It performs reads
- * only: powering the block and booting firmware are future work, as is the
- * 802.11 network interface itself.
+ * firmware image is loadable via the firmware loader. It can also power
+ * the block on/off through the PMU; booting firmware and the 802.11
+ * network interface itself are future work.
  *
  * Register map legislation: downstream Samsung Android kernel for T510
  * (drivers/misc/samsung/scsc/mif_reg_S5E7885.h), used as documentation only.
  */
 
 #include <linux/atomic.h>
+#include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -30,7 +31,32 @@
 #define SCSC_MBOX_IS_VERSION	0x050 /* Firmware block version information */
 
 /* PMU (system-controller syscon) register offsets */
-#define SCSC_PMU_WIFI_STAT	0x148
+#define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
+#define SCSC_PMU_WIFI_PWRON		BIT(1)
+#define SCSC_PMU_WIFI_RESET_SET		BIT(2)
+#define SCSC_PMU_WIFI_CTRL_S		0x144 /* secure control */
+#define SCSC_PMU_WIFI_START		BIT(3)
+#define SCSC_PMU_WIFI_STAT		0x148
+#define SCSC_PMU_WIFI_PWRDN_DONE	BIT(0)
+
+/* Shared-memory (BAAW) window configuration */
+#define SCSC_PMU_MEM_CONFIG0		0x7300 /* WiFi window size (4K units) */
+#define SCSC_PMU_MEM_CONFIG1		0x7304 /* WiFi window base (4K units) */
+
+/* Low-power sequencing (power-off path) */
+#define SCSC_PMU_RESET_AHEAD		0x1360
+#define SCSC_PMU_CLEANY_BUS		0x1364
+#define SCSC_PMU_LOGIC_RESET		0x1368
+#define SCSC_PMU_TCXO_GATE		0x136c
+#define SCSC_PMU_DISABLE_ISO		0x1370
+#define SCSC_PMU_RESET_ISO		0x1374
+#define SCSC_PMU_CENTRAL_SEQ_CFG	0x0380
+#define SCSC_PMU_CENTRAL_SEQ_STAT	0x0384
+#define SCSC_PMU_STATES			0xff0000
+#define SCSC_PMU_SYS_PWR_CFG		BIT(0)
+#define SCSC_PMU_SYS_PWR_CFG_2		(BIT(0) | BIT(1))
+#define SCSC_PMU_SYS_PWR_CFG_16		BIT(16)
+#define SCSC_PMU_SM_DOWN		0x80
 
 /*
  * Firmware image name as shipped by the firmware-samsung-gta3xlwifi aport.
@@ -41,6 +67,9 @@
 struct scsc_wifibt {
 	struct device	*dev;
 	void __iomem	*base;
+	struct regmap	*pmureg;
+	phys_addr_t	mem_start;
+	size_t		mem_size;
 	atomic_t	irq_count;
 };
 
@@ -61,6 +90,99 @@ static irqreturn_t scsc_wifibt_mbox_irq(int irq, void *data)
 		status, atomic_read(&scsc->irq_count));
 
 	return IRQ_HANDLED;
+}
+
+static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
+{
+	unsigned int val;
+	int ret;
+
+	/* Expose the shared-memory carveout to the firmware block (4K units).
+	 * The BT-ABOX window (CONFIG2/3) stays cleared; BT comes later.
+	 */
+	ret = regmap_write(scsc->pmureg, SCSC_PMU_MEM_CONFIG1,
+			   (scsc->mem_start & 0xfffffc000ULL) >> 12);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(scsc->pmureg, SCSC_PMU_MEM_CONFIG0,
+			   scsc->mem_size >> 12);
+	if (ret)
+		return ret;
+
+	/* Power on, release reset, start: mirrors downstream 8.6.6 sequence. */
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+				 SCSC_PMU_WIFI_PWRON, SCSC_PMU_WIFI_PWRON);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+				 SCSC_PMU_WIFI_RESET_SET, 0);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_S,
+				 SCSC_PMU_WIFI_START, SCSC_PMU_WIFI_START);
+	if (ret)
+		return ret;
+
+	usleep_range(10000, 20000);
+
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &val);
+	if (ret)
+		return ret;
+
+	dev_info(scsc->dev, "powered on, WIFI_STAT 0x%08x%s\n", val,
+		 val & SCSC_PMU_WIFI_PWRDN_DONE ? " (power-down done)" : "");
+
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &val);
+	if (ret)
+		return ret;
+
+	dev_info(scsc->dev, "central sequencer state 0x%02x\n",
+		 (val & SCSC_PMU_STATES) >> 16);
+
+	return 0;
+}
+
+static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
+{
+	unsigned int val;
+	int ret;
+
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_RESET_AHEAD,
+				 SCSC_PMU_SYS_PWR_CFG_2, 0);
+	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_CLEANY_BUS,
+				  SCSC_PMU_SYS_PWR_CFG, 0);
+	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_LOGIC_RESET,
+				  SCSC_PMU_SYS_PWR_CFG_2, 0);
+	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_TCXO_GATE,
+				  SCSC_PMU_SYS_PWR_CFG, 0);
+	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_DISABLE_ISO,
+				  SCSC_PMU_SYS_PWR_CFG, SCSC_PMU_SYS_PWR_CFG);
+	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_RESET_ISO,
+				  SCSC_PMU_SYS_PWR_CFG, 0);
+	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_CFG,
+				  SCSC_PMU_SYS_PWR_CFG_16, 0);
+	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+				  SCSC_PMU_WIFI_RESET_SET,
+				  SCSC_PMU_WIFI_RESET_SET);
+	if (ret) {
+		dev_warn(scsc->dev, "power-off sequencing write failed: %d\n",
+			 ret);
+		return;
+	}
+
+	ret = regmap_read_poll_timeout(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT,
+				       val, ((val & SCSC_PMU_STATES) >> 16) ==
+				       SCSC_PMU_SM_DOWN, 1000, 500000);
+	if (ret)
+		dev_warn(scsc->dev,
+			 "timeout waiting for DOWN state, STAT 0x%08x\n", val);
+
+	/* Revoke the shared-memory window. */
+	regmap_write(scsc->pmureg, SCSC_PMU_MEM_CONFIG0, 0);
+	regmap_write(scsc->pmureg, SCSC_PMU_MEM_CONFIG1, 0);
 }
 
 static int scsc_wifibt_probe(struct platform_device *pdev)
@@ -109,12 +231,16 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	dev_info(dev, "shared memory base 0x%llx size 0x%llx\n",
 		 (unsigned long long)rmem->base, (unsigned long long)rmem->size);
 
-	/* PMU syscon: read-only state check, no power sequencing yet. */
+	/* PMU syscon: state readout first, then power sequencing. */
 	pmureg = syscon_regmap_lookup_by_phandle(dev->of_node,
 						 "samsung,syscon-phandle");
 	if (IS_ERR(pmureg))
 		return dev_err_probe(dev, PTR_ERR(pmureg),
 				     "failed to get PMU syscon\n");
+
+	scsc->pmureg = pmureg;
+	scsc->mem_start = rmem->base;
+	scsc->mem_size = rmem->size;
 
 	ret = regmap_read(pmureg, SCSC_PMU_WIFI_STAT, &val);
 	if (ret)
@@ -141,9 +267,20 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 		release_firmware(fw);
 	}
 
-	dev_info(dev, "probed (stub, reads only)\n");
+	ret = scsc_wifibt_power_on(scsc);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to power on\n");
+
+	dev_info(dev, "probed\n");
 
 	return 0;
+}
+
+static void scsc_wifibt_remove(struct platform_device *pdev)
+{
+	struct scsc_wifibt *scsc = platform_get_drvdata(pdev);
+
+	scsc_wifibt_power_off(scsc);
 }
 
 static const struct of_device_id scsc_wifibt_of_match[] = {
@@ -154,6 +291,7 @@ MODULE_DEVICE_TABLE(of, scsc_wifibt_of_match);
 
 static struct platform_driver scsc_wifibt_driver = {
 	.probe = scsc_wifibt_probe,
+	.remove = scsc_wifibt_remove,
 	.driver = {
 		.name = "scsc-wifibt",
 		.of_match_table = scsc_wifibt_of_match,
