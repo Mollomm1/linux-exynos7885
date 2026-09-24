@@ -24,6 +24,8 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/string.h>
+#include <linux/unaligned.h>
 
 /* Mailbox (AP side, R4 bank) register offsets */
 #define SCSC_MBOX_INTMSR0	0x018 /* Interrupt mask status, upper half is FROM R4/M4 */
@@ -63,6 +65,22 @@
  * The final WLAN driver will use the linux-firmware style path instead.
  */
 #define SCSC_FW_NAME	"postmarketos/mx140/mx140.bin"
+
+/* Maxwell firmware header (format v0.2/v1.0, magic "smxf"). Offsets from
+ * the downstream header parser, used as documentation only.
+ */
+#define SCSC_FW_MAGIC_OFF		8
+#define SCSC_FW_MAGIC			"smxf"
+#define SCSC_FW_VER_MINOR_OFF		12
+#define SCSC_FW_VER_MAJOR_OFF		14
+#define SCSC_FW_LEN_OFF			16
+#define SCSC_FW_API_MINOR_OFF		20
+#define SCSC_FW_API_MAJOR_OFF		22
+#define SCSC_FW_ENTRY_OFF		40
+#define SCSC_FW_BUILD_ID_OFF		48
+#define SCSC_FW_BUILD_ID_SZ		128
+#define SCSC_FW_RUNTIME_LEN_OFF		36
+#define SCSC_FW_CONST_LEN_OFF		28
 
 struct scsc_wifibt {
 	struct device	*dev;
@@ -145,9 +163,40 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	return 0;
 }
 
-static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
+static void scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
+				   const struct firmware *fw)
 {
-	unsigned int val;
+	u16 ver_major, ver_minor, api_major, api_minor;
+	u32 hdr_len, entry, runtime_len, const_len;
+	char build_id[SCSC_FW_BUILD_ID_SZ + 1];
+
+	if (fw->size < SCSC_FW_BUILD_ID_OFF + SCSC_FW_BUILD_ID_SZ ||
+	    memcmp(fw->data + SCSC_FW_MAGIC_OFF, SCSC_FW_MAGIC,
+		   strlen(SCSC_FW_MAGIC))) {
+		dev_err(scsc->dev, "firmware has no Maxwell header\n");
+		return;
+	}
+
+	ver_minor = get_unaligned_le16(fw->data + SCSC_FW_VER_MINOR_OFF);
+	ver_major = get_unaligned_le16(fw->data + SCSC_FW_VER_MAJOR_OFF);
+	api_minor = get_unaligned_le16(fw->data + SCSC_FW_API_MINOR_OFF);
+	api_major = get_unaligned_le16(fw->data + SCSC_FW_API_MAJOR_OFF);
+	hdr_len = get_unaligned_le32(fw->data + SCSC_FW_LEN_OFF);
+	entry = get_unaligned_le32(fw->data + SCSC_FW_ENTRY_OFF);
+	runtime_len = get_unaligned_le32(fw->data + SCSC_FW_RUNTIME_LEN_OFF);
+	const_len = get_unaligned_le32(fw->data + SCSC_FW_CONST_LEN_OFF);
+	memcpy(build_id, fw->data + SCSC_FW_BUILD_ID_OFF, SCSC_FW_BUILD_ID_SZ);
+	build_id[SCSC_FW_BUILD_ID_SZ] = '\0';
+
+	dev_info(scsc->dev,
+		 "firmware header v%u.%u api %u.%u entry 0x%x runtime %u const %u\n",
+		 ver_major, ver_minor, api_major, api_minor, entry,
+		 runtime_len, const_len);
+	dev_info(scsc->dev, "firmware build %s\n", build_id);
+}
+
+static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
+{	unsigned int val;
 	int ret;
 
 	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_RESET_AHEAD,
@@ -264,6 +313,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			 SCSC_FW_NAME, ret);
 	} else {
 		dev_info(dev, "firmware %s size %zu\n", SCSC_FW_NAME, fw->size);
+		scsc_wifibt_fw_parse(scsc, fw);
 		release_firmware(fw);
 	}
 
