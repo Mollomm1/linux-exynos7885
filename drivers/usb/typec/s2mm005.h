@@ -28,9 +28,15 @@ static inline struct s2mm005_state s2mm005_decode(u32 func, u32 lp)
 	u8 pd = FIELD_GET(S2MM005_STATE, func);
 	bool attached;
 
-	if (!pd || pd == 29 || (func & S2MM005_SHORT) ||
+	if (!pd || (func & S2MM005_SHORT) ||
 	    (lp & S2MM005_WATER) || !(lp & S2MM005_DRY))
 		return state;
+	/* Samsung's driver handles firmware state 29 as a sink attachment. */
+	if (pd == 29) {
+		if (!(func & S2MM005_DFP))
+			state.role = USB_ROLE_DEVICE;
+		return state;
+	}
 	/* Firmware requests VBUS before ATTACH_DONE on a source connection. */
 	attached = (func & S2MM005_ATTACHED) || (pd >= 3 && pd <= 8) ||
 		   (pd >= 17 && pd <= 21) || (pd >= 52 && pd <= 64);

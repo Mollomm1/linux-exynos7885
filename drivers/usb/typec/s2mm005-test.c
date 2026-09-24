@@ -18,6 +18,10 @@ static void s2mm005_roles_test(struct kunit *test)
 	s = s2mm005_decode(17 | S2MM005_ATTACHED, S2MM005_DRY);
 	KUNIT_EXPECT_EQ(test, s.role, USB_ROLE_DEVICE);
 	KUNIT_EXPECT_FALSE(test, s.source);
+	/* Samsung handles firmware state 29 as a sink attachment. */
+	s = s2mm005_decode(29 | S2MM005_ATTACHED, S2MM005_DRY);
+	KUNIT_EXPECT_EQ(test, s.role, USB_ROLE_DEVICE);
+	KUNIT_EXPECT_FALSE(test, s.source);
 	/* Data device and power source is also a valid PD combination. */
 	s = s2mm005_decode(6 | S2MM005_SOURCE, S2MM005_DRY);
 	KUNIT_EXPECT_EQ(test, s.role, USB_ROLE_DEVICE);

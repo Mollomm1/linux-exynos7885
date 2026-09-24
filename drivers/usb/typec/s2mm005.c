@@ -150,7 +150,7 @@ static int s2mm005_current(struct s2mm005 *s, u32 func, int *ua)
 	int ret;
 
 	/* USB default current until enumeration; do not assume a 500 mA grant. */
-	*ua = rp == 3 ? 3000000 : rp == 2 ? 1500000 : rp == 1 ? 100000 : 0;
+	*ua = rp == 3 ? 3000000 : rp == 2 ? 1500000 : 100000;
 	if (FIELD_GET(S2MM005_STATE, func) != 21) {
 		if (s->five_volt_requested || s->pd)
 			*ua = 0;
@@ -275,8 +275,10 @@ static int s2mm005_update(struct s2mm005 *s)
 			return ret;
 		s->sourcing = true;
 	}
-	if (!state.source && FIELD_GET(S2MM005_STATE, func) >= 17 &&
-	    FIELD_GET(S2MM005_STATE, func) <= 21) {
+	if (!state.source &&
+	    ((FIELD_GET(S2MM005_STATE, func) >= 17 &&
+	      FIELD_GET(S2MM005_STATE, func) <= 21) ||
+	     FIELD_GET(S2MM005_STATE, func) == 29)) {
 		ret = s2mm005_current(s, func, &ua);
 		if (ret)
 			return ret;
