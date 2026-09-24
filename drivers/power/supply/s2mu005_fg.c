@@ -9,6 +9,7 @@
 
 #include <linux/i2c.h>
 #include <linux/irq.h>
+#include <linux/mutex.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 
@@ -36,6 +37,7 @@ struct s2mu005_fg {
 	struct device *dev;
 	struct regmap *regmap;
 	struct power_supply *psy;
+	struct mutex lock;
 };
 
 static const struct regmap_config s2mu005_fg_regmap_config = {
@@ -55,58 +57,70 @@ static irqreturn_t s2mu005_handle_irq(int irq, void *data)
 
 static int s2mu005_fg_get_voltage(struct s2mu005_fg *fg, int *value)
 {
-	u16 reg;
+	__le16 reg;
 	int ret;
 
 	ret = regmap_raw_read(fg->regmap, S2MU005_REG_RVBAT, &reg, sizeof(reg));
 	if (ret)
 		return ret;
 
-	*value = ((unsigned long)reg * 1000000) >> 13;
+	*value = ((unsigned long)le16_to_cpu(reg) * 1000000) >> 13;
 
 	return 0;
 }
 
 static int s2mu005_fg_get_current(struct s2mu005_fg *fg, int *value)
 {
-	s16 reg;
+	__le16 reg;
 	int ret;
 
 	ret = regmap_raw_read(fg->regmap, S2MU005_REG_RCUR_CC, &reg, sizeof(reg));
 	if (ret)
 		return ret;
 
-	*value = ((long)reg * 1000000) >> 12;
+	*value = (-((long)(s16)le16_to_cpu(reg) * 1000000)) >> 12;
 
 	return 0;
 }
 
 static int s2mu005_fg_get_capacity(struct s2mu005_fg *fg, int *value)
 {
-	s16 reg;
+	__le16 reg;
 	int ret;
 
 	ret = regmap_raw_read(fg->regmap, S2MU005_REG_RSOC, &reg, sizeof(reg));
 	if (ret)
 		return ret;
 
-	*value = (reg * 100) >> 14;
+	*value = clamp(((s16)le16_to_cpu(reg) * 100) >> 14, 0, 100);
 
 	return 0;
 }
 
 static int s2mu005_fg_get_temperature(struct s2mu005_fg *fg, int *value)
 {
-	s16 reg;
-	int ret;
+	__le16 reg, saved, selector;
+	int ret, err;
 
-	ret = regmap_raw_read(fg->regmap, S2MU005_REG_MONOUT, &reg, sizeof(reg));
+	/* MONOUT is shared with current monitoring. Preserve its selector. */
+	mutex_lock(&fg->lock);
+	ret = regmap_raw_read(fg->regmap, S2MU005_REG_MONOUT_SEL,
+			      &saved, sizeof(saved));
 	if (ret)
-		return ret;
-
-	*value = (reg * 10) >> 8;
-
-	return 0;
+		goto out;
+	selector = cpu_to_le16((le16_to_cpu(saved) & 0xff00) | S2MU005_MONOUT_TEMP);
+	ret = regmap_raw_write(fg->regmap, S2MU005_REG_MONOUT_SEL,
+			       &selector, sizeof(selector));
+	if (!ret)
+		ret = regmap_raw_read(fg->regmap, S2MU005_REG_MONOUT, &reg, sizeof(reg));
+	err = regmap_raw_write(fg->regmap, S2MU005_REG_MONOUT_SEL, &saved, sizeof(saved));
+	if (!ret)
+		ret = err;
+	if (!ret)
+		*value = ((s16)le16_to_cpu(reg) * 10) >> 8;
+out:
+	mutex_unlock(&fg->lock);
+	return ret;
 }
 
 static const enum power_supply_property s2mu005_fg_properties[] = {
@@ -165,6 +179,7 @@ static int s2mu005_fg_i2c_probe(struct i2c_client *client)
 		return PTR_ERR(fg->regmap);
 
 	fg->dev = &client->dev;
+	mutex_init(&fg->lock);
 
 	psy_cfg.drv_data = fg;
 	psy_cfg.of_node = fg->dev->of_node;
@@ -175,9 +190,10 @@ static int s2mu005_fg_i2c_probe(struct i2c_client *client)
 	if (IS_ERR(fg->psy))
 		return PTR_ERR(fg->psy);
 
-	return devm_request_threaded_irq(fg->dev, client->irq, NULL,
-					s2mu005_handle_irq, IRQF_ONESHOT,
-					s2mu005_fg_desc.name, fg);
+	if (client->irq > 0)
+		return devm_request_threaded_irq(fg->dev, client->irq, NULL,
+						s2mu005_handle_irq, IRQF_ONESHOT,
+						s2mu005_fg_desc.name, fg);
 
 	return 0;
 }
