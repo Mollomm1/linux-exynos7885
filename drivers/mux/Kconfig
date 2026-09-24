@@ -58,4 +58,10 @@ config MUX_MMIO
 	  To compile the driver as a module, choose M here: the module will
 	  be called mux-mmio.
 
+config MUX_S2MU005
+	tristate "Samsung S2MU005 USB data switch"
+	depends on MFD_S2MU005
+	help
+	  Route the USB data pair through the S2MU005 switch.
+
 endmenu

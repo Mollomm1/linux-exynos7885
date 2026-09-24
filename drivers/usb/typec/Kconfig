@@ -114,4 +114,20 @@ source "drivers/usb/typec/mux/Kconfig"
 
 source "drivers/usb/typec/altmodes/Kconfig"
 
+config TYPEC_S2MM005
+	tristate "Samsung S2MM005 Type-C controller"
+	depends on I2C && USB_ROLE_SWITCH && OF
+	depends on REGULATOR && POWER_SUPPLY
+	select MULTIPLEXER
+	help
+	  Use resident S2MM005 firmware for Type-C attachment and USB roles.
+
+
+config TYPEC_S2MM005_KUNIT_TEST
+	tristate "S2MM005 state decoding tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Test independent data/power roles and fault inhibition.
+
 endif # TYPEC

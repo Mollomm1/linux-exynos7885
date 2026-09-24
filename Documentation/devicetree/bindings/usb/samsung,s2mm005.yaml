@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/samsung,s2mm005.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung S2MM005 Type-C port controller
+
+maintainers:
+  - Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+
+description:
+  Type-C controller with resident Power Delivery firmware. The host controls
+  an external USB data switch and VBUS boost converter according to the
+  firmware's independent data and power roles.
+
+properties:
+  compatible:
+    const: samsung,s2mm005
+  reg:
+    maxItems: 1
+  interrupts:
+    maxItems: 1
+  vbus-supply: true
+  mux-controls:
+    maxItems: 1
+  mux-control-names:
+    const: usb
+  wakeup-source: true
+  connector:
+    $ref: /schemas/connector/usb-connector.yaml#
+    unevaluatedProperties: false
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - vbus-supply
+  - mux-controls
+  - mux-control-names
+  - connector
+
+additionalProperties: false
