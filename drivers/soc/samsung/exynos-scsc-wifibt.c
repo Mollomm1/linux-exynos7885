@@ -99,10 +99,13 @@
 struct scsc_wifibt {
 	struct device	*dev;
 	void __iomem	*base;
+	void __iomem	*base_m4;
 	struct regmap	*pmureg;
 	phys_addr_t	mem_start;
 	size_t		mem_size;
 	u32		fw_entry;
+	u32		dram_crc;
+	struct delayed_work check_work;
 	atomic_t	irq_count;
 };
 
@@ -275,6 +278,51 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		 readl(scsc->base + SCSC_MBOX_ISSR(1)),
 		 readl(scsc->base + SCSC_MBOX_ISSR(2)),
 		 readl(scsc->base + SCSC_MBOX_ISSR(3)));
+	dev_info(scsc->dev, "M4 status 0x%04x, M4 regs %08x %08x %08x %08x\n",
+		 readl(scsc->base_m4 + SCSC_MBOX_INTMSR0) >> 16,
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(0)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(1)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
+}
+
+static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
+{
+	void *dram;
+	u32 crc = 0;
+
+	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	if (!dram)
+		return 0;
+
+	crc = crc32_le(~0, dram, scsc->mem_size);
+	memunmap(dram);
+
+	return crc;
+}
+
+/* Runs 5 s after probe: any change in the shared window, or in the PMU /
+ * mailbox state, means the firmware block did something on its own.
+ */
+static void scsc_wifibt_check_work(struct work_struct *work)
+{
+	struct scsc_wifibt *scsc = container_of(to_delayed_work(work),
+						struct scsc_wifibt,
+						check_work);
+	unsigned int stat, seq, status;
+	u32 crc;
+
+	crc = scsc_wifibt_dram_crc(scsc);
+	regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &stat);
+	regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &seq);
+	status = readl(scsc->base + SCSC_MBOX_INTMSR0) >> 16;
+
+	dev_info(scsc->dev,
+		 "5s check: DRAM crc 0x%08x (was 0x%08x) %s, WIFI_STAT 0x%08x, seq 0x%02x, status 0x%04x, IRQs %d\n",
+		 crc, scsc->dram_crc,
+		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
+		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
+		 atomic_read(&scsc->irq_count));
 }
 
 static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
@@ -363,13 +411,19 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 
 	scsc->dev = dev;
 	atomic_set(&scsc->irq_count, 0);
+	INIT_DELAYED_WORK(&scsc->check_work, scsc_wifibt_check_work);
 	platform_set_drvdata(pdev, scsc);
 
-	/* R4 mailbox bank (index 0); M4 bank (index 1) is reserved for now. */
+	/* R4 mailbox bank (index 0); M4 bank (index 1) is read-only for now. */
 	scsc->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(scsc->base))
 		return dev_err_probe(dev, PTR_ERR(scsc->base),
 				     "failed to map R4 mailbox\n");
+
+	scsc->base_m4 = devm_platform_ioremap_resource(pdev, 1);
+	if (IS_ERR(scsc->base_m4))
+		return dev_err_probe(dev, PTR_ERR(scsc->base_m4),
+				     "failed to map M4 mailbox\n");
 
 	val = readl(scsc->base + SCSC_MBOX_IS_VERSION);
 	dev_info(dev, "R4 mailbox version 0x%08x\n", val);
@@ -447,6 +501,10 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 
 	scsc_wifibt_observe(scsc);
 
+	/* Baseline for the delayed signs-of-life check. */
+	scsc->dram_crc = scsc_wifibt_dram_crc(scsc);
+	schedule_delayed_work(&scsc->check_work, msecs_to_jiffies(5000));
+
 	dev_info(dev, "probed\n");
 
 	return 0;
@@ -456,6 +514,7 @@ static void scsc_wifibt_remove(struct platform_device *pdev)
 {
 	struct scsc_wifibt *scsc = platform_get_drvdata(pdev);
 
+	cancel_delayed_work_sync(&scsc->check_work);
 	scsc_wifibt_power_off(scsc);
 }
 
