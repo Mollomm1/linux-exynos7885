@@ -210,6 +210,16 @@ static int s2mm005_update(struct s2mm005 *s)
 		return ret;
 	func = get_unaligned_le32(func_buf);
 	lp = get_unaligned_le32(lp_buf);
+	state = s2mm005_decode(func, lp);
+	/* Supply the partner before acknowledging the source attach event. */
+	if (state.source && !s->sourcing &&
+	    !(lp & S2MM005_SLEEP_CABLE_DETECT)) {
+		s2mm005_supply(s, 0, 0);
+		ret = regulator_enable(s->vbus);
+		if (ret)
+			return ret;
+		s->sourcing = true;
+	}
 	ret = s2mm005_command(s, ack, sizeof(ack));
 	if (ret)
 		return ret;
@@ -220,7 +230,6 @@ static int s2mm005_update(struct s2mm005 *s)
 	}
 	if (func & S2MM005_RESET)
 		s->drp_restored = false;
-	state = s2mm005_decode(func, lp);
 	if (func != s->last_func || lp != s->last_lp) {
 		dev_info(&s->client->dev,
 			 "state=%u data=%s power=%s status=%#x lp=%#x\n",
