@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* S2MU005 5 V charger and OTG regulator. Register sequences from Samsung. */
+#include <linux/atomic.h>
 #include <linux/delay.h>
 #include <linux/iio/consumer.h>
 #include <linux/interrupt.h>
@@ -53,7 +54,7 @@ struct s2mu005_charger {
 	bool stopping;
 	int health;
 	int input_ua;
-	int gadget_ua;
+	atomic_t gadget_ua;
 	int charge_code;
 };
 
@@ -252,7 +253,7 @@ static int s2mu005_sink_current(struct s2mu005_charger *chg)
 	union power_supply_propval val;
 	struct power_supply *source;
 	unsigned int device_type;
-	int ret, ua = 0;
+	int ret, ua = 0, gadget_ua;
 
 	/* Lazy lookup avoids the Type-C controller/VBUS regulator probe cycle. */
 	source = power_supply_get_by_phandle(chg->dev->of_node,
@@ -272,8 +273,11 @@ static int s2mu005_sink_current(struct s2mu005_charger *chg)
 		ret = regmap_read(chg->map, MUIC_DEVICE_TYPE1, &device_type);
 		if (!ret && (device_type & (MUIC_DCP | MUIC_CDP)))
 			ua = 1500000;
-		else if (chg->gadget_ua > 100000)
-			ua = max(ua, chg->gadget_ua);
+		else {
+			gadget_ua = atomic_read(&chg->gadget_ua);
+			if (gadget_ua > 100000)
+				ua = max(ua, gadget_ua);
+		}
 	}
 out:
 	power_supply_put(source);
@@ -294,7 +298,7 @@ static void s2mu005_charge_work(struct work_struct *work)
 		goto requeue;
 	ua = s2mu005_sink_current(chg);
 	if (!ua)
-		chg->gadget_ua = 0;
+		atomic_set(&chg->gadget_ua, 0);
 	ret = iio_read_channel_raw(chg->thermistor, &adc);
 	chg->online = ua > 0;
 	if (ret < 0) {
@@ -422,9 +426,8 @@ static int s2mu005_set_property(struct power_supply *psy,
 		return -EINVAL;
 	if (val->intval < 0 || val->intval > 500000)
 		return -EINVAL;
-	mutex_lock(&chg->lock);
-	chg->gadget_ua = val->intval;
-	mutex_unlock(&chg->lock);
+	/* Gadget callbacks may run with the DWC3 spinlock held. */
+	atomic_set(&chg->gadget_ua, val->intval);
 	mod_delayed_work(system_wq, &chg->work, 0);
 	return 0;
 }
