@@ -107,6 +107,16 @@ MODULE_PARM_DESC(probe_entry, "DRAM offset used as R4 entry (and payload locatio
 #define SCSC_PMU_SYS_PWR_CFG_16		BIT(16)
 #define SCSC_PMU_SM_DOWN		0x80
 
+/* Low-power controls touched by the power-off path. Snapshotted at
+ * probe (cold defaults) and restored on power-on: releasing without
+ * them leaves a warm block wedged with START held.
+ */
+static const unsigned int scsc_lp_regs[] = {
+	SCSC_PMU_RESET_AHEAD, SCSC_PMU_CLEANY_BUS, SCSC_PMU_LOGIC_RESET,
+	SCSC_PMU_TCXO_GATE, SCSC_PMU_DISABLE_ISO, SCSC_PMU_RESET_ISO,
+	SCSC_PMU_CENTRAL_SEQ_CFG,
+};
+
 /*
  * Firmware image name as shipped by the firmware-samsung-gta3xlwifi aport.
  * The final WLAN driver will use the linux-firmware style path instead.
@@ -144,6 +154,7 @@ struct scsc_wifibt {
 	u32		mxconf_off;
 	u32		sig_entry;
 	u32		sig_mbox1;
+	u32		lp_vals[ARRAY_SIZE(scsc_lp_regs)];
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -171,8 +182,16 @@ static irqreturn_t scsc_wifibt_mbox_irq(int irq, void *data)
 
 static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 {
-	unsigned int val;
+	unsigned int val, i;
 	int ret;
+
+	/* Restore the cold low-power defaults (see power_off asymmetry). */
+	for (i = 0; i < ARRAY_SIZE(scsc_lp_regs); i++) {
+		ret = regmap_write(scsc->pmureg, scsc_lp_regs[i],
+				   scsc->lp_vals[i]);
+		if (ret)
+			return ret;
+	}
 
 	/* Expose the shared-memory carveout to the firmware block (4K units).
 	 * The BT-ABOX window (CONFIG2/3) stays cleared; BT comes later.
@@ -631,7 +650,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	struct reserved_mem *rmem;
 	struct device_node *rmem_np;
 	const struct firmware *fw;
-	unsigned int val;
+	unsigned int val, i;
 	int irq, ret;
 
 	scsc = devm_kzalloc(dev, sizeof(*scsc), GFP_KERNEL);
@@ -692,6 +711,19 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "failed to read WIFI_STAT\n");
 
 	dev_info(dev, "PMU WIFI_STAT 0x%08x\n", val);
+
+	/* Snapshot the cold low-power defaults for power_on restore. */
+	for (i = 0; i < ARRAY_SIZE(scsc_lp_regs); i++) {
+		ret = regmap_read(pmureg, scsc_lp_regs[i], &scsc->lp_vals[i]);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to snapshot LP regs\n");
+	}
+
+	dev_info(dev, "LP defaults %08x %08x %08x %08x %08x %08x %08x\n",
+		 scsc->lp_vals[0], scsc->lp_vals[1], scsc->lp_vals[2],
+		 scsc->lp_vals[3], scsc->lp_vals[4], scsc->lp_vals[5],
+		 scsc->lp_vals[6]);
 
 	irq = platform_get_irq_byname(pdev, "MBOX");
 	if (irq < 0)
