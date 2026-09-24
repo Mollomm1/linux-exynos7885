@@ -178,6 +178,36 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	dev_info(scsc->dev, "central sequencer state 0x%02x\n",
 		 (val & SCSC_PMU_STATES) >> 16);
 
+	/* Read back what we programmed: a blocked write here would explain
+	 * a silent R4.
+	 */
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS, &val);
+	if (ret)
+		return ret;
+
+	dev_info(scsc->dev, "WIFI_CTRL_NS readback 0x%08x (PWRON %s, RESET %s)\n",
+		 val, val & SCSC_PMU_WIFI_PWRON ? "set" : "clear",
+		 val & SCSC_PMU_WIFI_RESET_SET ? "held" : "released");
+
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_CTRL_S, &val);
+	if (ret)
+		return ret;
+
+	dev_info(scsc->dev, "WIFI_CTRL_S readback 0x%08x (START %s)\n",
+		 val, val & SCSC_PMU_WIFI_START ? "set" : "clear");
+
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_MEM_CONFIG0, &val);
+	if (ret)
+		return ret;
+
+	dev_info(scsc->dev, "MEM_CONFIG0 (size) readback 0x%08x\n", val);
+
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_MEM_CONFIG1, &val);
+	if (ret)
+		return ret;
+
+	dev_info(scsc->dev, "MEM_CONFIG1 (base) readback 0x%08x\n", val);
+
 	return 0;
 }
 
