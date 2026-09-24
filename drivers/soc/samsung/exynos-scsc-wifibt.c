@@ -69,6 +69,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	struct scsc_wifibt *scsc;
 	struct regmap *pmureg;
 	struct reserved_mem *rmem;
+	struct device_node *rmem_np;
 	const struct firmware *fw;
 	unsigned int val;
 	int irq, ret;
@@ -90,11 +91,20 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	val = readl(scsc->base + SCSC_MBOX_IS_VERSION);
 	dev_info(dev, "R4 mailbox version 0x%08x\n", val);
 
-	/* Shared-memory carveout referenced via memory-region. */
-	rmem = of_reserved_mem_lookup(dev->of_node);
-	if (!rmem)
+	/* Shared-memory carveout referenced via memory-region. Note:
+	 * of_reserved_mem_lookup() matches by node name, so resolve the
+	 * phandle first instead of passing our own node.
+	 */
+	rmem_np = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (!rmem_np)
 		return dev_err_probe(dev, -ENODEV,
 				     "missing memory-region (wifibt_if)\n");
+
+	rmem = of_reserved_mem_lookup(rmem_np);
+	of_node_put(rmem_np);
+	if (!rmem)
+		return dev_err_probe(dev, -ENODEV,
+				     "wifibt_if region not reserved\n");
 
 	dev_info(dev, "shared memory base 0x%llx size 0x%llx\n",
 		 (unsigned long long)rmem->base, (unsigned long long)rmem->size);
