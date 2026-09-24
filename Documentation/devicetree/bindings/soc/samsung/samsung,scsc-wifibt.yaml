@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/samsung/samsung,scsc-wifibt.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung SLSI SCSC (mx140/Lassen) WiFi/BT mailbox
+
+maintainers:
+  - T510 mainlining project
+
+description: |
+  Mailbox interface to the Samsung SLSI SCSC WiFi/BT firmware block
+  (mx140/Lassen) found on Exynos7885/7904 SoCs. The block runs its own
+  firmware (R4/M4 cores) and communicates with the AP over the mailbox
+  registers plus a shared-memory carveout. Power sequencing goes through
+  the PMU system controller.
+
+  This binding currently covers the minimal probe-only stage (register
+  mapping, interrupts, shared memory, PMU state readout). Booting the
+  firmware and the 802.11 interface are future work.
+
+properties:
+  compatible:
+    const: samsung,scsc-wifibt
+
+  reg:
+    items:
+      - description: R4 mailbox bank
+      - description: M4 mailbox bank
+
+  reg-names:
+    items:
+      - const: r4
+      - const: m4
+
+  interrupts:
+    items:
+      - description: mailbox interrupt (WLBT to AP)
+      - description: alive interrupt
+      - description: watchdog interrupt
+
+  interrupt-names:
+    items:
+      - const: MBOX
+      - const: ALIVE
+      - const: WDOG
+
+  samsung,syscon-phandle:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the PMU system controller (for WIFI_STAT readout and,
+      later, power sequencing).
+
+  memory-region:
+    maxItems: 1
+    description:
+      Phandle to the wifibt_if shared-memory reserved-memory region.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-names
+  - samsung,syscon-phandle
+  - memory-region
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    scsc-wifibt@120c0000 {
+        compatible = "samsung,scsc-wifibt";
+        reg = <0x0 0x120c0000 0x180>,
+              <0x0 0x120e0000 0x180>;
+        reg-names = "r4", "m4";
+        interrupts = <0 57 4>, <0 21 4>, <0 286 4>;
+        interrupt-names = "MBOX", "ALIVE", "WDOG";
+        samsung,syscon-phandle = <&pmu_system_controller>;
+        memory-region = <&wifibt_if>;
+    };
