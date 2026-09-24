@@ -60,6 +60,7 @@
 #define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
 #define SCSC_PMU_WIFI_PWRON		BIT(1)
 #define SCSC_PMU_WIFI_RESET_SET		BIT(2)
+#define SCSC_PMU_WIFI_RESET_REQ_CLR	BIT(8)
 #define SCSC_PMU_WIFI_CTRL_S		0x144 /* secure control */
 #define SCSC_PMU_WIFI_START		BIT(3)
 #define SCSC_PMU_WIFI_STAT		0x148
@@ -122,6 +123,7 @@ struct scsc_wifibt {
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
+	atomic_t	wdog_count;
 };
 
 static irqreturn_t scsc_wifibt_mbox_irq(int irq, void *data)
@@ -439,11 +441,11 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 	status = readl(scsc->base + SCSC_MBOX_INTMSR0) >> 16;
 
 	dev_info(scsc->dev,
-		 "5s check: DRAM crc 0x%08x (was 0x%08x) %s, WIFI_STAT 0x%08x, seq 0x%02x, status 0x%04x, IRQs %d\n",
+		 "5s check: DRAM crc 0x%08x (was 0x%08x) %s, WIFI_STAT 0x%08x, seq 0x%02x, status 0x%04x, IRQs %d, WDOG %d\n",
 		 crc, scsc->dram_crc,
 		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
-		 atomic_read(&scsc->irq_count));
+		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 }
 
 static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
@@ -515,6 +517,22 @@ static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
 	regmap_write(scsc->pmureg, SCSC_PMU_MEM_CONFIG1, 0);
 }
 
+static irqreturn_t scsc_wifibt_wdog_irq(int irq, void *data)
+{
+	struct scsc_wifibt *scsc = data;
+
+	atomic_inc(&scsc->wdog_count);
+	dev_info(scsc->dev, "WDOG IRQ #%d, disabling\n",
+		 atomic_read(&scsc->wdog_count));
+	/* Ack like downstream, then shut it up until re-probe. */
+	disable_irq_nosync(irq);
+	regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+			   SCSC_PMU_WIFI_RESET_REQ_CLR,
+			   SCSC_PMU_WIFI_RESET_REQ_CLR);
+
+	return IRQ_HANDLED;
+}
+
 static int scsc_wifibt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -532,6 +550,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 
 	scsc->dev = dev;
 	atomic_set(&scsc->irq_count, 0);
+	atomic_set(&scsc->wdog_count, 0);
 	INIT_DELAYED_WORK(&scsc->check_work, scsc_wifibt_check_work);
 	platform_set_drvdata(pdev, scsc);
 
@@ -592,6 +611,18 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			       dev_name(dev), scsc);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to request MBOX irq\n");
+
+	/* Watchdog: fires if the firmware block faults. One-shot, acked
+	 * like downstream.
+	 */
+	irq = platform_get_irq_byname(pdev, "WDOG");
+	if (irq < 0)
+		return dev_err_probe(dev, irq, "failed to get WDOG irq\n");
+
+	ret = devm_request_irq(dev, irq, scsc_wifibt_wdog_irq, 0,
+			       dev_name(dev), scsc);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to request WDOG irq\n");
 
 	/* Load, verify and stage the firmware image in shared DRAM before
 	 * releasing the block from reset (downstream mxman order).
