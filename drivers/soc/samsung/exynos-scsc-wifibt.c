@@ -57,11 +57,11 @@
 #define SCSC_SMC_WLBT_TZASC	0x82000710
 
 static bool signal_r4 = true;
-module_param(signal_r4, bool, 0444);
+module_param(signal_r4, bool, 0644);
 MODULE_PARM_DESC(signal_r4, "Write the R4 boot handshake (TZASC, MBOX regs) before reset release");
 
 static bool null_mxconf;
-module_param(null_mxconf, bool, 0444);
+module_param(null_mxconf, bool, 0644);
 MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the fabricated one");
 
 /* R4 execution probe: Thumb-2 payload that writes MARKER to DRAM offset
@@ -72,7 +72,7 @@ MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the 
 #define SCSC_PROBE_MARK_OFF	0x1000
 #define SCSC_PROBE_MARKER	0xdeadbeef
 static bool r4_probe;
-module_param(r4_probe, bool, 0444);
+module_param(r4_probe, bool, 0644);
 MODULE_PARM_DESC(r4_probe, "Point the R4 at a marker-writing probe payload instead of the firmware");
 
 /* PMU (system-controller syscon) register offsets */
@@ -523,6 +523,13 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			 mark == SCSC_PROBE_MARKER ? "PRESENT (R4 ran it)" :
 			 "absent");
 	}
+	dev_info(scsc->dev,
+		 "5s M4 status 0x%04x, M4 regs %08x %08x %08x %08x\n",
+		 readl(scsc->base_m4 + SCSC_MBOX_INTMSR0) >> 16,
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(0)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(1)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
 }
 
 static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
