@@ -40,6 +40,19 @@
 #define SCSC_MBOX_MAGIC		0xbcdeedcb
 #define SCSC_MBOX_FW_FLAGS	0x0 /* Bit 0 = spin at start of CRT0 */
 
+/* Minimal mxconf (infrastructure config) for the R4. Layout mirrors the
+ * downstream heap order: mxconf, management to-AP stream, management
+ * from-AP stream. GDB/mxlog configs stay zero until those exist.
+ */
+#define SCSC_MXCONF_MAGIC		0x79828486
+#define SCSC_MXCONF_VER_MAJOR		0
+#define SCSC_MXCONF_VER_MINOR		1
+#define SCSC_MGMT_BUF_LEN		512
+#define SCSC_MGMT_PACKET_SIZE		8
+#define SCSC_MGMT_NUM_PACKETS		(SCSC_MGMT_BUF_LEN / SCSC_MGMT_PACKET_SIZE)
+#define SCSC_MXCONF_SIZE		162
+#define SCSC_STREAMCONF_SIZE		22
+
 /* TZASC: allow the firmware block DRAM access (downstream SMC cmd) */
 #define SCSC_SMC_WLBT_TZASC	0x82000710
 
@@ -104,6 +117,8 @@ struct scsc_wifibt {
 	phys_addr_t	mem_start;
 	size_t		mem_size;
 	u32		fw_entry;
+	u32		fw_runtime;
+	u32		mxconf_off;
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -253,6 +268,7 @@ static int scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 	dev_info(scsc->dev, "firmware build %s\n", build_id);
 
 	scsc->fw_entry = entry;
+	scsc->fw_runtime = runtime_len;
 
 	/* Integrity checks over the image, same layout as downstream fwimage. */
 	fw_crc = get_unaligned_le32(fw->data + SCSC_FW_CRC_OFF);
@@ -276,6 +292,75 @@ static int scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 	return 0;
 }
 
+static void scsc_wifibt_stream_conf(u8 *p, u32 buf, u32 ridx, u32 widx,
+				    u8 read_bit, u8 write_bit)
+{
+	put_unaligned_le32(buf, p + 0);
+	put_unaligned_le32(SCSC_MGMT_NUM_PACKETS, p + 4);
+	put_unaligned_le32(SCSC_MGMT_PACKET_SIZE, p + 8);
+	put_unaligned_le32(ridx, p + 12);
+	put_unaligned_le32(widx, p + 16);
+	p[20] = read_bit;
+	p[21] = write_bit;
+}
+
+/* Lay out a minimal mxconf plus real management-stream buffers in the heap
+ * area (right after the firmware runtime), mirroring the downstream heap
+ * order. Returns the mxconf offset (R4-relative ref for MBOX_1).
+ */
+static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
+{
+	u8 *dram, *mxconf;
+	u32 heap, to_ap, from_ap, end;
+	u32 mx_off = ALIGN(scsc->fw_runtime, 4);
+
+	heap = mx_off + SCSC_MXCONF_SIZE;
+	to_ap = ALIGN(heap, 4);
+	/* to-AP buffer + read/write indices */
+	from_ap = to_ap + SCSC_MGMT_BUF_LEN + 8;
+	/* from-AP buffer + read/write indices */
+	end = from_ap + SCSC_MGMT_BUF_LEN + 8;
+
+	if (end > scsc->mem_size) {
+		dev_err(scsc->dev, "mxconf layout 0x%x exceeds window 0x%zx\n",
+			end, scsc->mem_size);
+		return -EINVAL;
+	}
+
+	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	if (!dram)
+		return -ENOMEM;
+
+	mxconf = dram + mx_off;
+	memset(mxconf, 0, SCSC_MXCONF_SIZE);
+	put_unaligned_le32(SCSC_MXCONF_MAGIC, mxconf + 0);
+	put_unaligned_le16(SCSC_MXCONF_VER_MAJOR, mxconf + 4);
+	put_unaligned_le16(SCSC_MXCONF_VER_MINOR, mxconf + 6);
+	/* Management to-AP stream: read=fromhost 1, write=tohost 0. */
+	scsc_wifibt_stream_conf(mxconf + 8, to_ap, to_ap + SCSC_MGMT_BUF_LEN,
+				to_ap + SCSC_MGMT_BUF_LEN + 4, 1, 0);
+	/* Management from-AP stream: read=tohost 1, write=fromhost 2. */
+	scsc_wifibt_stream_conf(mxconf + 8 + SCSC_STREAMCONF_SIZE, from_ap,
+				from_ap + SCSC_MGMT_BUF_LEN,
+				from_ap + SCSC_MGMT_BUF_LEN + 4, 1, 2);
+	/* GDB R4/M4 and mxlog configs stay zero for now. */
+
+	/* Buffers and indices. The to-AP buffer starts all-ones downstream. */
+	memset(dram + to_ap, 0xff, SCSC_MGMT_BUF_LEN);
+	memset(dram + from_ap, 0, SCSC_MGMT_BUF_LEN);
+	put_unaligned_le32(0, dram + to_ap + SCSC_MGMT_BUF_LEN);
+	put_unaligned_le32(0, dram + to_ap + SCSC_MGMT_BUF_LEN + 4);
+	put_unaligned_le32(0, dram + from_ap + SCSC_MGMT_BUF_LEN);
+	put_unaligned_le32(0, dram + from_ap + SCSC_MGMT_BUF_LEN + 4);
+
+	memunmap(dram);
+
+	scsc->mxconf_off = mx_off;
+	dev_info(scsc->dev, "mxconf at DRAM offset 0x%x\n", mx_off);
+
+	return 0;
+}
+
 static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 {
 	struct arm_smccc_res res;
@@ -287,12 +372,9 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 		      0, 0, 0, 0, &res);
 	dev_info(scsc->dev, "TZASC config result 0x%lx\n", res.a0);
 
-	/* Tell the R4 ROM where the staged image is, then release it.
-	 * MBOX_1 (mxconf transport config) stays 0 until the transport
-	 * layer exists.
-	 */
+	/* Tell the R4 ROM where the staged image is, then release it. */
 	writel(scsc->fw_entry, scsc->base + SCSC_MBOX_ISSR(0));
-	writel(0, scsc->base + SCSC_MBOX_ISSR(1));
+	writel(scsc->mxconf_off, scsc->base + SCSC_MBOX_ISSR(1));
 	writel(SCSC_MBOX_MAGIC, scsc->base + SCSC_MBOX_ISSR(2));
 	writel(SCSC_MBOX_FW_FLAGS, scsc->base + SCSC_MBOX_ISSR(3));
 	/* CPU memory barrier: registers must land before reset release. */
@@ -531,6 +613,10 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	release_firmware(fw);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to stage firmware\n");
+
+	ret = scsc_wifibt_mxconf(scsc);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to write mxconf\n");
 
 	scsc_wifibt_signal(scsc);
 
