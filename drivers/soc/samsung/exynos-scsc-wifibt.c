@@ -1235,6 +1235,10 @@ static const struct scsc_mark_site scsc_mark_mbox_sites[] = {
 };
 
 #define SCSC_MARK_RUN_LEN	16
+/* The pass-through stub stamps 0xa5a5a5a5 (movw/movt r3), which is
+ * distinct from both the preset and the halt stub's 0xa5.
+ */
+#define SCSC_MARK_RUN_STAMP	0xa5a5a5a5
 #define SCSC_MARK_RUN_SLOT	0x200000
 static const u8 scsc_mark_run_stub[] = {
 	0x02, 0x4a,			/* ldr r2, [pc, #8] */
@@ -2081,8 +2085,9 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 				dev_info(scsc->dev,
 					 "bisect 0x%03x: slot 0x%x = %08x %s\n",
 					 s->off, s->value, val,
-					 val == SCSC_MARK_VALUE ? "PASSED" :
-					 val == 0xdeadbeef ? "not reached" : "?");
+					 val == SCSC_MARK_RUN_STAMP ? "PASSED" :
+					 val == SCSC_MARK_VALUE ?
+					 "not reached" : "overwritten");
 			}
 			scsc_wifibt_unmap(dram);
 		}
