@@ -354,6 +354,11 @@ static void scsc_wifibt_unmap(const void *vmem)
 	vunmap(vmem);
 }
 
+static int panic_poll_ms = 1500;
+module_param(panic_poll_ms, int, 0644);
+MODULE_PARM_DESC(panic_poll_ms,
+		 "After releasing the R4, poll the shared window this long for a panic record");
+
 static bool cachetest;
 module_param(cachetest, bool, 0644);
 MODULE_PARM_DESC(cachetest,
@@ -1693,40 +1698,45 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 	 * registers both cores touch, at a resolution we can afford to
 	 * spin for, right here where the R4 has just been released.
 	 */
-	/* The R4 writes its panic record within microseconds of the
-	 * release and clears it again just as fast, so poll for it as
-	 * tightly as we can and keep the first complete copy.  Logging
+	/* The R4 writes its panic record when it gives up and clears it
+	 * again almost immediately, so poll for it for a good while after
+	 * the release and keep the first copy that shows up.  Logging
 	 * inside the loop is far too slow: each line costs more than the
 	 * record lives.
 	 */
-	{
+	if (panic_poll_ms) {
 		static u32 saved[64];
-		unsigned int saved_words = 0;
-		void *dram = scsc_wifibt_map(scsc);
+		unsigned long deadline;
+		unsigned int polls = 0;
+		void *pdram = scsc_wifibt_map(scsc);
 
-		if (dram) {
-			for (i = 0; i < 200000 && !saved_words; i++) {
-				if (readl(dram + SCSC_PANIC_OFF) == 2) {
-					unsigned int j;
+		if (!pdram)
+			return;
 
-					saved_words = min_t(u32,
-							    ARRAY_SIZE(saved),
-							    readl(dram + SCSC_PANIC_OFF) / 4);
-					for (j = 0; j < saved_words; j++)
-						saved[j] = readl(dram + SCSC_PANIC_OFF + 4 * j);
-				}
+		deadline = jiffies + msecs_to_jiffies(panic_poll_ms);
+		while (!saved[0] && time_before(jiffies, deadline)) {
+			if (readl(pdram + SCSC_PANIC_OFF) == 2) {
+				unsigned int j, words;
+
+				words = min_t(u32, ARRAY_SIZE(saved),
+					      readl(pdram + SCSC_PANIC_OFF) / 4);
+				for (j = 0; j < words; j++)
+					saved[j] = readl(pdram + SCSC_PANIC_OFF + 4 * j);
+				saved[0] = 2;
 			}
-			scsc_wifibt_unmap(dram);
+			if (++polls % 4096 == 0)
+				udelay(100);
 		}
+		scsc_wifibt_unmap(pdram);
 
-		if (saved_words) {
+		if (saved[0])
 			dev_info(scsc->dev,
-				 "caught a record after %u polls\n", i);
-			scsc_wifibt_panic_print(scsc->dev, saved, saved_words);
-		} else {
+				 "record caught after %u polls:\n", polls);
+		else
 			dev_info(scsc->dev,
-				 "no record in %u polls\n", i);
-		}
+				 "no record in %u ms of polling\n",
+				 panic_poll_ms);
+		scsc_wifibt_panic_print(scsc->dev, saved, saved[0] ? ARRAY_SIZE(saved) : 0);
 	}
 
 	if (fine > 0) {
