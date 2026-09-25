@@ -1121,12 +1121,29 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+/* movw/movt with a 16-bit immediate, split the way the encoding wants
+ * it: imm4:i:imm3:imm8, where imm4 and i live in the first halfword.
+ */
+static void scsc_mark_mov_imm(u8 *p, u32 val, bool top)
+{
+	u16 hi = 0xf240 | (top ? 0x80 : 0);
+	u16 lo;
+
+	hi |= ((val >> 11) & 1) << 10;
+	hi |= (val >> 12) & 0xf;
+	lo = ((val >> 8) & 7) << 12;
+	lo |= 3 << 8;
+	lo |= val & 0xff;
+	put_unaligned_le16(hi, p);
+	put_unaligned_le16(lo, p + 2);
+}
+
 static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
 {
 	u8 stub[] = {
 		0x02, 0x4a,			/* ldr r2, [pc, #8] */
-		0x4a, 0xf2, 0x00, 0x00,		/* movw r3, #lo */
-		0xca, 0xf2, 0x00, 0x00,		/* movt r3, #hi */
+		0x00, 0x00, 0x00, 0x00,		/* movw r3, #lo */
+		0x00, 0x00, 0x00, 0x00,		/* movt r3, #hi */
 		0x13, 0x60,			/* str r3, [r2] */
 		0x00, 0x00, 0x00, 0x00,		/* address */
 	};
@@ -1140,8 +1157,8 @@ static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
 	for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
 		const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
 
-		put_unaligned_le16(s->value & 0xffff, stub + 4);
-		put_unaligned_le16(s->value >> 16, stub + 8);
+		scsc_mark_mov_imm(stub + 4, s->value & 0xffff, false);
+		scsc_mark_mov_imm(stub + 8, s->value >> 16, true);
 		put_unaligned_le32(0xa20e0000ul + SCSC_MARK_MBOX_REG,
 				   stub + sizeof(stub) - 4);
 		memcpy(dram + s->off, stub, sizeof(stub));
