@@ -1040,7 +1040,7 @@ static const u32 scsc_mark_slots[] = {
 	0x300000, 0x340000, 0x380000, 0x3c0000,
 };
 #define SCSC_MARK_SLOTS		(ARRAY_SIZE(scsc_mark_slots) + 1)
-#define SCSC_MARK_LEN		(18 + 8 * SCSC_MARK_SLOTS)
+#define SCSC_MARK_LEN		(0x2c + 4 * SCSC_MARK_SLOTS)
 
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
@@ -1178,7 +1178,7 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	unsigned int i, n = 0;
 	void *dram;
 
-	if (mark_at & 3 || mark_at + SCSC_MARK_LEN > scsc->mem_size - 16) {
+	if (mark_at & 1 || mark_at + SCSC_MARK_LEN > scsc->mem_size - 16) {
 		dev_err(scsc->dev, "mark offset 0x%x unusable\n", mark_at);
 		return -EINVAL;
 	}
@@ -1191,103 +1191,21 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 		u32 off = i < ARRAY_SIZE(scsc_mark_slots) ?
 			  scsc_mark_slots[i] : scsc->mem_size - 16;
 		u8 *code = stub + 4 + 4 * n;
-		u8 *lit = stub + 14 + 4 * SCSC_MARK_SLOTS + 4 * n;
+		u8 *lit = stub + 0x2c + 4 * n;
 
 		put_unaligned_le32(0x80000000u + off, lit);
-		put_unaligned_le16(0x4900 | (u8)(lit - code - 4), code);
+		put_unaligned_le16(0x4909, code);
 		put_unaligned_le16(0x6008, code + 2);
 		put_unaligned_le32(SCSC_MARK_VALUE, dram + off);
 		n++;
 	}
 
-	/* Same for the R4-side mailbox: readable from the AP bank. */
-	stub[4 + 4 * n] = 0x4f;
-	stub[5 + 4 * n] = 0xf0;
-	stub[6 + 4 * n] = SCSC_MARK_MBOX_STAMP;
-	stub[7 + 4 * n] = 0x00;
-	put_unaligned_le16(0x4900 | (u8)(sizeof(stub) - 8 - (8 + 4 * n)),
-			   stub + 8 + 4 * n);
-	put_unaligned_le16(0x6008, stub + 10 + 4 * n);
-	put_unaligned_le32(SCSC_MARK_MBOX, stub + sizeof(stub) - 4);
-	put_unaligned_le16(0xe7fe, stub + 12 + 4 * n);
+	/* Spin once the stamps are out, so nothing after the halt matters. */
+	put_unaligned_le16(0xe7fe, stub + 0x28);
 	memcpy(dram + mark_at, stub, sizeof(stub));
 	scsc_wifibt_unmap(dram);
 
-	dev_info(scsc->dev, "marked and halted at 0x%x\n", mark_at);
-
-	return 0;
-}
-
-/* movw/movt with a 16-bit immediate, split the way the encoding wants
- * it: imm4:i:imm3:imm8, where imm4 and i live in the first halfword.
- */
-static void scsc_mark_mov_imm(u8 *p, u32 val, bool top)
-{
-	u16 hi = 0xf240 | (top ? 0x80 : 0);
-	u16 lo;
-
-	hi |= ((val >> 11) & 1) << 10;
-	hi |= (val >> 12) & 0xf;
-	lo = ((val >> 8) & 7) << 12;
-	lo |= 3 << 8;
-	lo |= val & 0xff;
-	put_unaligned_le16(hi, p);
-	put_unaligned_le16(lo, p + 2);
-}
-
-static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
-{
-	u8 stub[] = {
-		0x02, 0x4a,			/* ldr r2, [pc, #8] */
-		0x00, 0x00, 0x00, 0x00,		/* movw r3, #lo */
-		0x00, 0x00, 0x00, 0x00,		/* movt r3, #hi */
-		0x13, 0x60,			/* str r3, [r2] */
-		0x00, 0x00, 0x00, 0x00,		/* address */
-	};
-	unsigned int i;
-	void *dram;
-
-	dram = scsc_wifibt_map(scsc);
-	if (!dram)
-		return -ENOMEM;
-
-	for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
-		const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
-
-		scsc_mark_mov_imm(stub + 4, s->value & 0xffff, false);
-		scsc_mark_mov_imm(stub + 8, s->value >> 16, true);
-		put_unaligned_le32(0xa20e0000ul + SCSC_MARK_MBOX_REG,
-				   stub + sizeof(stub) - 4);
-		memcpy(dram + s->off, stub, sizeof(stub));
-	}
-	scsc_wifibt_unmap(dram);
-
-	dev_info(scsc->dev, "mailbox probes installed at 0x%x, 0x%x, 0x%x\n",
-		 scsc_mark_mbox_sites[0].off, scsc_mark_mbox_sites[1].off,
-		 scsc_mark_mbox_sites[2].off);
-
-	return 0;
-}
-
-static int scsc_wifibt_stack_fix(struct scsc_wifibt *scsc)
-{
-	void *dram;
-
-	dram = scsc_wifibt_map(scsc);
-	if (!dram)
-		return -ENOMEM;
-
-	if (memcmp(dram + 0x1b4, "\x4f\xf0\x00\x00", 4)) {
-		dev_err(scsc->dev, "stack patch site mismatch, not patching\n");
-		scsc_wifibt_unmap(dram);
-		return -EINVAL;
-	}
-
-	/* mov.w r0, #0x800: stack top of the 32K ATCM. */
-	memcpy(dram + 0x1b4, "\x4f\xf4\x00\x60", 4);
-	scsc_wifibt_unmap(dram);
-
-	dev_info(scsc->dev, "early boot stack set to 0x800\n");
+	dev_info(scsc->dev, "halted and marked at 0x%x\n", mark_at);
 
 	return 0;
 }
@@ -1656,7 +1574,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 					  scsc->mem_size - 16;
 				u32 val = readl(dram + off);
 
-				seen[i] = val == SCSC_MARK_STAMP16;
+				seen[i] = val == SCSC_MARK_STAMP;
 				hits += seen[i];
 			}
 			scsc_wifibt_unmap(dram);
