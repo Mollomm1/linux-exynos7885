@@ -319,12 +319,15 @@ struct scsc_wifibt {
  * build the mapping the downstream way instead.
  */
 /*
- * The window is RAM the R4 writes behind our back, so how it is mapped
- * matters.  Normal non-cacheable (which is what pgprot_writecombine()
- * selects on arm64) may satisfy a read out of a speculative line, but
- * it is also what Samsung's own driver uses for this window, and
- * Device memory cannot be used here at all: it forbids the unaligned
- * and merged accesses memcpy() performs, which faults.
+ * The window is RAM the R4 writes behind our back, so it has to be
+ * mapped so that every read reaches memory.  Normal non-cacheable,
+ * which is what pgprot_writecombine() selects on arm64 and what
+ * Samsung's own driver uses here, may satisfy a read out of a
+ * speculative line: polling the panic record tightly never saw it,
+ * while logging every sample always did, which is only explicable as
+ * a stale cached line.  Device memory is never speculatively filled,
+ * so map it that way and do the bulk transfers below as naturally
+ * aligned 32-bit accesses, which is all Device memory allows.
  */
 static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 {
@@ -339,11 +342,48 @@ static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 	for (i = 0; i < npages; i++)
 		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
 
-	vmem = vmap(pages, npages, VM_MAP,
-		    pgprot_writecombine(PAGE_KERNEL));
+	vmem = vmap(pages, npages, VM_MAP, pgprot_noncached(PAGE_KERNEL));
 	kfree(pages);
 
 	return vmem;
+}
+
+/* Bulk transfers into and out of the Device-mapped window. */
+static void scsc_win_copy(void *dst, const void *src, size_t n)
+{
+	u32 *d = dst;
+	const u32 *s = src;
+	size_t i;
+
+	for (i = 0; i < n / 4; i++)
+		d[i] = s[i];
+	for (i *= 4; i < n; i++)
+		((u8 *)dst)[i] = ((const u8 *)src)[i];
+}
+
+static int scsc_win_cmp(const void *a, const void *b, size_t n)
+{
+	const u32 *x = a, *y = b;
+	size_t i;
+
+	for (i = 0; i < n / 4; i++)
+		if (x[i] != y[i])
+			return 1;
+	for (i *= 4; i < n; i++)
+		if (((const u8 *)a)[i] != ((const u8 *)b)[i])
+			return 1;
+	return 0;
+}
+
+static void scsc_win_set(void *dst, u32 val, size_t n)
+{
+	u32 *d = dst;
+	size_t i;
+
+	for (i = 0; i < n / 4; i++)
+		d[i] = val;
+	for (i *= 4; i < n; i++)
+		((u8 *)dst)[i] = val;
 }
 
 static void scsc_wifibt_unmap(const void *vmem)
@@ -2140,9 +2180,9 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 	if (!dram)
 		return -ENOMEM;
 
-	memcpy(dram, fw->data, fw->size);
+	scsc_win_copy(dram, fw->data, fw->size);
 
-	if (memcmp(dram, fw->data, fw->size)) {
+	if (scsc_win_cmp(dram, fw->data, fw->size)) {
 		dev_err(scsc->dev, "firmware DRAM readback mismatch\n");
 		scsc_wifibt_unmap(dram);
 		return -EIO;
@@ -2152,12 +2192,13 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 	 * the shared window, and a stale record would look like a fresh
 	 * fault on this boot.
 	 */
-	memset(dram + SCSC_PANIC_OFF, 0, SCSC_PANIC_LEN);
+	scsc_win_set(dram + SCSC_PANIC_OFF, 0, SCSC_PANIC_LEN);
 	dev_info(scsc->dev, "panic record area cleared (%u bytes)\n",
 		 SCSC_PANIC_LEN);
 
 	if (fill_gap) {
-		memset(dram + fw->size, 0xaa, scsc->mem_size - fw->size);
+		scsc_win_set(dram + fw->size, 0xaa,
+			     scsc->mem_size - fw->size);
 		dev_info(scsc->dev, "gap filled 0x%zx bytes with 0xaa\n",
 			 scsc->mem_size - fw->size);
 	}
