@@ -1431,6 +1431,34 @@ static int scsc_wifibt_nop_window(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+static unsigned int lit_off;
+static unsigned int lit_val;
+module_param(lit_off, uint, 0644);
+module_param(lit_val, uint, 0644);
+MODULE_PARM_DESC(lit_off, "Patch the image word at this offset before release");
+MODULE_PARM_DESC(lit_val, "Value to write at lit_off");
+
+static int scsc_wifibt_patch_literal(struct scsc_wifibt *scsc)
+{
+	void *dram;
+
+	if (lit_off + 4 > scsc->mem_size) {
+		dev_err(scsc->dev, "literal offset 0x%x out of range\n", lit_off);
+		return -EINVAL;
+	}
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	put_unaligned_le32(lit_val, dram + lit_off);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "literal 0x%x set to 0x%08x\n", lit_off, lit_val);
+
+	return 0;
+}
+
 /* The literal the vector-region config writes into MPU_RLAR (0x17 enables
  * region 7).  Worth overriding: if the MPU really is on, that enable is
  * what would stop the R4, and the preceding isb is exactly where it
@@ -2698,6 +2726,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			if (ret)
 				return dev_err_probe(dev, ret,
 						     "failed to nop window\n");
+		}
+
+		if (lit_off) {
+			ret = scsc_wifibt_patch_literal(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to patch literal\n");
 		}
 
 		if (vec_rlar) {
