@@ -21,6 +21,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_reserved_mem.h>
@@ -60,38 +61,6 @@
 #define SCSC_MXLOG_NUM_PACKETS		(SCSC_MXLOG_BUF_LEN / SCSC_MXLOG_PACKET_SIZE)
 #define SCSC_MXCONF_SIZE		162
 #define SCSC_STREAMCONF_SIZE		22
-
-/* Shared DRAM is accessed by a non-coherent firmware block: map it
- * write-combined (uncached) like downstream's vmap WRITE_COMBINE, so
- * staged data is visible to the R4 and its writes are visible to us.
- * A cached mapping starves the R4 (stale DRAM) and blinds our reads.
- * memremap WC refuses RAM that already has a cached linear alias, so
- * build the mapping the downstream way instead.
- */
-static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
-{
-	struct page **pages;
-	void *vmem;
-	unsigned int i, npages = PAGE_ALIGN(scsc->mem_size) >> PAGE_SHIFT;
-
-	pages = kmalloc_array(npages, sizeof(*pages), GFP_KERNEL);
-	if (!pages)
-		return NULL;
-
-	for (i = 0; i < npages; i++)
-		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
-
-	vmem = vmap(pages, npages, VM_MAP,
-		    pgprot_writecombine(PAGE_KERNEL));
-	kfree(pages);
-
-	return vmem;
-}
-
-static void scsc_wifibt_unmap(const void *vmem)
-{
-	vunmap(vmem);
-}
 
 /* TZASC: allow the firmware block DRAM access (downstream SMC cmd) */
 #define SCSC_SMC_WLBT_TZASC	0x82000710
@@ -218,6 +187,38 @@ struct scsc_wifibt {
 	atomic_t	irq_count;
 	atomic_t	wdog_count;
 };
+
+/* Shared DRAM is accessed by a non-coherent firmware block: map it
+ * write-combined (uncached) like downstream's vmap WRITE_COMBINE, so
+ * staged data is visible to the R4 and its writes are visible to us.
+ * A cached mapping starves the R4 (stale DRAM) and blinds our reads.
+ * memremap WC refuses RAM that already has a cached linear alias, so
+ * build the mapping the downstream way instead.
+ */
+static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
+{
+	struct page **pages;
+	void *vmem;
+	unsigned int i, npages = PAGE_ALIGN(scsc->mem_size) >> PAGE_SHIFT;
+
+	pages = kmalloc_array(npages, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return NULL;
+
+	for (i = 0; i < npages; i++)
+		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
+
+	vmem = vmap(pages, npages, VM_MAP,
+		    pgprot_writecombine(PAGE_KERNEL));
+	kfree(pages);
+
+	return vmem;
+}
+
+static void scsc_wifibt_unmap(const void *vmem)
+{
+	vunmap(vmem);
+}
 
 static irqreturn_t scsc_wifibt_mbox_irq(int irq, void *data)
 {
