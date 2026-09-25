@@ -1655,9 +1655,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 					  scsc->mem_size - 16;
 				u32 val = readl(dram + off);
 
-				seen[i] = val ==
-					  (SCSC_MARK_VALUE & 0xffff0000u) +
-					  SCSC_MARK_STAMP;
+				seen[i] = val == SCSC_MARK_STAMP16;
 				hits += seen[i];
 			}
 			scsc_wifibt_unmap(dram);
