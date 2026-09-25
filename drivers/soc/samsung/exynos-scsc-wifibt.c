@@ -1031,6 +1031,7 @@ static const u8 scsc_mark_run_stub[] = {
 #define SCSC_MARK_STAMP		0xa5
 #define SCSC_MARK_MBOX_STAMP	0x5a
 #define SCSC_MARK_MBOX		0xa20c0088u
+#define SCSC_MARK_STAMP16	0x0000a5a5u
 /* All above the image (runtime is 0x1cee28): a stamp must not land in
  * the firmware's own text, and every slot must be plain shared DRAM.
  */
