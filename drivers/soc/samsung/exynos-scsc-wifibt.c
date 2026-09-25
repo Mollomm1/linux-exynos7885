@@ -354,10 +354,10 @@ static void scsc_wifibt_unmap(const void *vmem)
 	vunmap(vmem);
 }
 
-static int panic_poll_ms = 1500;
+static int panic_poll_ms;
 module_param(panic_poll_ms, int, 0644);
 MODULE_PARM_DESC(panic_poll_ms,
-		 "After releasing the R4, poll the shared window this long for a panic record");
+		 "After releasing the R4, poll the shared window this long for a panic record (0 = off; a normal boot writes none, and 0x160804 is a live R4 variable rather than a record version)");
 
 static bool cachetest;
 module_param(cachetest, bool, 0644);
@@ -1729,7 +1729,8 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 						      readl(pdram + SCSC_PANIC_OFF) / 4);
 					for (j = 0; j < words; j++)
 						saved[j] = readl(pdram + SCSC_PANIC_OFF + 4 * j);
-					if (saved[1] >= 8 * 4 && saved[1] <= SCSC_PANIC_LEN) {
+					if (saved[1] >= 8 * 4 &&
+					    saved[1] <= SCSC_PANIC_LEN) {
 						if (!good++)
 							dev_info(scsc->dev,
 								 "record copy %u complete\n",
