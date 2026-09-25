@@ -137,6 +137,8 @@ MODULE_PARM_DESC(fill_gap, "Fill shared DRAM beyond the image with 0xAA before b
 #define SCSC_PMU_WIFI_START		BIT(3)
 #define SCSC_PMU_WIFI_STAT		0x148
 #define SCSC_PMU_WIFI_PWRDN_DONE	BIT(0)
+/* 0 = boot the firmware block from external DRAM (not ROM/test). */
+#define SCSC_PMU_BOOT_TEST_RST_CFG	0x7330
 
 /* Shared-memory (BAAW) window configuration */
 #define SCSC_PMU_MEM_CONFIG0		0x7300 /* WiFi window size (4K units) */
@@ -675,6 +677,7 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 {
 	struct arm_smccc_res res;
+	int i, ret;
 
 	/* Let the firmware block access DRAM (ignored on failure,
 	 * like downstream).
@@ -687,6 +690,14 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 		dev_info(scsc->dev, "TZASC config skipped by parameter\n");
 	}
 
+	/* Mailbox initial state like downstream map(): clear all shared
+	 * registers on both banks first.
+	 */
+	for (i = 0; i < 8; i++) {
+		writel(0, scsc->base + SCSC_MBOX_ISSR(i));
+		writel(0, scsc->base_m4 + SCSC_MBOX_ISSR(i));
+	}
+
 	/* Tell the R4 ROM where to jump, then release it. */
 	writel(mbox0_override ? mbox0_override : scsc->sig_entry,
 	       scsc->base + SCSC_MBOX_ISSR(0));
@@ -695,6 +706,14 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	writel(SCSC_MBOX_FW_FLAGS, scsc->base + SCSC_MBOX_ISSR(3));
 	/* CPU memory barrier: registers must land before reset release. */
 	wmb();
+
+	/* Boot the block from external DRAM. Without this it never looks
+	 * at the staged image, no matter the handshake.
+	 */
+	ret = regmap_write(scsc->pmureg, SCSC_PMU_BOOT_TEST_RST_CFG, 0);
+	if (ret)
+		dev_warn(scsc->dev, "failed to clear BOOT_TEST_RST_CFG: %d\n",
+			 ret);
 }
 
 static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
