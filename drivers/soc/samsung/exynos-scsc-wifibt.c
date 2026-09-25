@@ -1604,25 +1604,23 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			u32 m4 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
 			u32 r4 = readl(scsc->base + SCSC_MBOX_ISSR(0));
 			u32 r4sr = readl(scsc->base + SCSC_MBOX_INTMSR1);
+			u32 ver = dram ? readl(dram + SCSC_PANIC_OFF) : 0;
 
 			/* The record is only there for a fraction of a
 			 * millisecond, so keep the first one we see.
 			 */
-			if (dram && !saved_words &&
-			    readl(dram + SCSC_PANIC_OFF) == 2) {
+			if (dram && !saved_words && ver == 2) {
 				unsigned int j;
 
 				saved_words = min_t(u32, ARRAY_SIZE(saved),
 						    readl(dram + SCSC_PANIC_OFF) / 4);
 				for (j = 0; j < saved_words; j++)
 					saved[j] = readl(dram + SCSC_PANIC_OFF + 4 * j);
-				saved[0] = 2;
 			}
 
 			dev_info(scsc->dev,
-				 "fine %3d m4 %08x r4 %08x r4sr %08x rec %08x %08x %08x %08x %08x %08x\n",
-				 i, m4, r4, r4sr,
-				 dram ? readl(dram + SCSC_PANIC_OFF) : 0,
+				 "fine %3d m4 %08x r4 %08x r4sr %08x ver %08x %08x %08x %08x %08x %08x\n",
+				 i, m4, r4, r4sr, ver,
 				 dram ? readl(dram + SCSC_PANIC_OFF + 4) : 0,
 				 dram ? readl(dram + 0x160840) : 0,
 				 dram ? readl(dram + 0x160844) : 0,
