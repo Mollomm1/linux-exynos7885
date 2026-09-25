@@ -96,6 +96,14 @@ static bool gdb_probe;
 module_param(gdb_probe, bool, 0644);
 MODULE_PARM_DESC(gdb_probe, "Send a GDB query to the R4 stub instead of a bare panic pulse");
 
+/* Pulse INTGR1 after unmasking/re-arming. Withheld (=0) to test whether
+ * the second watchdog comes from the re-enable alone (pending) or from
+ * the pulse (firmware response).
+ */
+static bool poke_intgr = true;
+module_param(poke_intgr, bool, 0644);
+MODULE_PARM_DESC(poke_intgr, "Pulse INTGR1 bit 0 after unmasking (0 tests re-enable alone)");
+
 static bool null_mxconf;
 module_param(null_mxconf, bool, 0644);
 MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the fabricated one");
@@ -820,8 +828,10 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		}
 	}
 
-	writel(1u, scsc->base + SCSC_MBOX_INTGR1);
-	dev_info(scsc->dev, "poked FROMHOST bit 0\n");
+	if (poke_intgr)
+		writel(1u, scsc->base + SCSC_MBOX_INTGR1);
+	dev_info(scsc->dev, "poked FROMHOST bit 0 (pulse %s)\n",
+		 poke_intgr ? "sent" : "withheld");
 }
 
 static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
