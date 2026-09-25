@@ -821,6 +821,15 @@ static bool skip_mpu;
 module_param(skip_mpu, bool, 0644);
 MODULE_PARM_DESC(skip_mpu, "Replace the MPU setup block with NOPs");
 
+/* Halt the R4 at its first instruction (branch to self at the entry).
+ * If M4 and the watchdog still appear, they come from ROM or power
+ * logic without any image execution; if they vanish, image execution
+ * (at least to M4 start) is required for them.
+ */
+static bool halt_entry;
+module_param(halt_entry, bool, 0644);
+MODULE_PARM_DESC(halt_entry, "Replace the firmware entry with an infinite loop");
+
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
 	void *dram;
@@ -901,6 +910,30 @@ static int scsc_wifibt_skip_mpu(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "nopped mpu setup block\n");
+
+	return 0;
+}
+
+static int scsc_wifibt_halt_entry(struct scsc_wifibt *scsc)
+{
+	u32 off = scsc->fw_entry & ~1u;
+	void *dram;
+
+	if (!(scsc->fw_entry & 1u) ||
+	    off + 2 > scsc->mem_size) {
+		dev_err(scsc->dev, "firmware entry 0x%x not haltable\n",
+			scsc->fw_entry);
+		return -EINVAL;
+	}
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	put_unaligned_le16(0xe7fe, dram + off);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "halted firmware entry at 0x%x\n", off);
 
 	return 0;
 }
@@ -1548,7 +1581,15 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to skip mpu\n");
 		}
 
-		if (patch_entry || nop_wait || graft_mm || skip_mpu) {
+		if (halt_entry) {
+			ret = scsc_wifibt_halt_entry(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to halt entry\n");
+		}
+
+		if (patch_entry || nop_wait || graft_mm || skip_mpu ||
+		    halt_entry) {
 			ret = scsc_wifibt_repair_crcs(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
