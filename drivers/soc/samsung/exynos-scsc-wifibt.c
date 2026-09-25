@@ -105,6 +105,14 @@ static bool patch_entry;
 module_param(patch_entry, bool, 0644);
 MODULE_PARM_DESC(patch_entry, "Replace the firmware image at its entry point with the probe payload");
 
+/* Override MBOX_0 with an arbitrary value on the intact-image path.
+ * Isolates whether the entry VALUE alone (independent of image
+ * content) decides the firmware block's response.
+ */
+static uint mbox0_override;
+module_param(mbox0_override, uint, 0644);
+MODULE_PARM_DESC(mbox0_override, "Write this instead of the firmware entry point to MBOX_0 (0 keeps fw_entry)");
+
 /* Fill the DRAM gap beyond the image with a pattern. Firmware BSS
  * clearing (or any other R4 write) then shows as a CRC change; an
  * untouched gap stays patterned.
@@ -659,7 +667,8 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	dev_info(scsc->dev, "TZASC config result 0x%lx\n", res.a0);
 
 	/* Tell the R4 ROM where to jump, then release it. */
-	writel(scsc->sig_entry, scsc->base + SCSC_MBOX_ISSR(0));
+	writel(mbox0_override ? mbox0_override : scsc->sig_entry,
+	       scsc->base + SCSC_MBOX_ISSR(0));
 	writel(scsc->sig_mbox1, scsc->base + SCSC_MBOX_ISSR(1));
 	writel(SCSC_MBOX_MAGIC, scsc->base + SCSC_MBOX_ISSR(2));
 	writel(SCSC_MBOX_FW_FLAGS, scsc->base + SCSC_MBOX_ISSR(3));
