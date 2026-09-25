@@ -930,9 +930,9 @@ struct scsc_mark_site {
  * around it still runs (with stack_fix enabled).
  */
 static const struct scsc_mark_site scsc_mark_mbox_sites[] = {
-	{ 0x212, 0xa1a10001 },
-	{ 0x22e, 0xa1a10002 },
-	{ 0x236, 0xa1a10003 },
+	{ 0x1b4, 0xa1a10001 },
+	{ 0x1be, 0xa1a10002 },
+	{ 0x1c4, 0xa1a10003 },
 };
 #define SCSC_MARK_MBOX_REG	0x8c
 
@@ -1425,9 +1425,9 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 
 		dev_info(scsc->dev,
 			 "mbox probe word 0x%08x: %s\n", val,
-			 val == scsc_mark_mbox_sites[0].value ? "reached 0x212" :
-			 val == scsc_mark_mbox_sites[1].value ? "reached 0x22e" :
-			 val == scsc_mark_mbox_sites[2].value ? "reached 0x236" :
+			 val == scsc_mark_mbox_sites[0].value ? "reached 0x1b4" :
+			 val == scsc_mark_mbox_sites[1].value ? "reached 0x1be" :
+			 val == scsc_mark_mbox_sites[2].value ? "reached 0x1c4" :
 			 "no probe landed");
 	}
 
