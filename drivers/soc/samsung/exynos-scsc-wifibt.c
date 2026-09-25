@@ -923,6 +923,12 @@ MODULE_PARM_DESC(skip_regions, "NOP the R4 DRAM/MPU region descriptors");
  */
 #define SCSC_VECREGION_OFF	0x64c
 #define SCSC_VECREGION_LEN	0x24
+
+/* Attribute literal for that region (base 0xffff0000 lives at 0x78c). */
+#define SCSC_VECREGION_RASR	0x794
+static unsigned int vecregion_rasr;
+module_param(vecregion_rasr, uint, 0644);
+MODULE_PARM_DESC(vecregion_rasr, "Override the vector-region attribute literal");
 static bool skip_vecregion;
 module_param(skip_vecregion, bool, 0644);
 MODULE_PARM_DESC(skip_vecregion, "NOP the R4 vector-table MPU region setup");
@@ -1171,6 +1177,23 @@ static int scsc_wifibt_skip_vecregion(struct scsc_wifibt *scsc)
 
 	dev_info(scsc->dev, "nopped vector region at 0x%x\n",
 		 SCSC_VECREGION_OFF);
+
+	return 0;
+}
+
+static int scsc_wifibt_vecregion_rasr(struct scsc_wifibt *scsc)
+{
+	void *dram;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	put_unaligned_le32(vecregion_rasr, dram + SCSC_VECREGION_RASR);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "vector region attrs now 0x%08x\n",
+		 vecregion_rasr);
 
 	return 0;
 }
@@ -2167,6 +2190,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to skip regions\n");
 		}
 
+		if (vecregion_rasr) {
+			ret = scsc_wifibt_vecregion_rasr(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to set vec rasr\n");
+		}
+
 		if (skip_vecregion) {
 			ret = scsc_wifibt_skip_vecregion(scsc);
 			if (ret)
@@ -2206,7 +2236,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
 	    halt_entry || mark_at || mark_run || mark_count || mark_mbox ||
 	    stack_fix ||
-	    skip_regions || skip_vecregion) {
+	    skip_regions || skip_vecregion || vecregion_rasr) {
 		ret = scsc_wifibt_repair_crcs(scsc);
 		if (ret)
 			return dev_err_probe(dev, ret,
