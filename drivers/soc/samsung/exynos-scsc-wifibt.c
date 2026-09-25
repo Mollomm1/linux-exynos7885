@@ -566,7 +566,7 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 	memcpy(dram + off, scsc_probe_payload, sizeof(scsc_probe_payload));
 
 	/* Repair the image CRCs over the patched copy so a validating ROM
-	 * still accepts it.
+	 * still accepts it, then verify the repair.
 	 */
 	put_unaligned_le32(ether_crc(scsc->fw_const_len - scsc->fw_hdr_len,
 				    dram + scsc->fw_hdr_len),
@@ -574,6 +574,17 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 	put_unaligned_le32(ether_crc(scsc->fw_len - scsc->fw_hdr_len,
 				    dram + scsc->fw_hdr_len),
 			   dram + SCSC_FW_CRC_OFF);
+
+	if (ether_crc(scsc->fw_const_len - scsc->fw_hdr_len,
+		      dram + scsc->fw_hdr_len) !=
+	    get_unaligned_le32(dram + SCSC_FW_CONST_CRC_OFF) ||
+	    ether_crc(scsc->fw_len - scsc->fw_hdr_len,
+		      dram + scsc->fw_hdr_len) !=
+	    get_unaligned_le32(dram + SCSC_FW_CRC_OFF)) {
+		dev_err(scsc->dev, "patched CRC repair mismatch\n");
+		memunmap(dram);
+		return -EIO;
+	}
 	memunmap(dram);
 
 	dev_info(scsc->dev, "patched probe payload over image at 0x%x\n",
