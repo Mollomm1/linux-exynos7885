@@ -698,6 +698,17 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 		writel(0, scsc->base_m4 + SCSC_MBOX_ISSR(i));
 	}
 
+	/* Mask and clear everything like downstream map(). The firmware
+	 * unmasks what it uses as transports come up; starting masked is
+	 * the state it expects. TOHOST signals still show in INTMSR0.
+	 */
+	writel(0xffff0000, scsc->base + SCSC_MBOX_INTMR0);
+	writel(0x0000ffff, scsc->base + SCSC_MBOX_INTMR1);
+	writel(0x0000ffff, scsc->base_m4 + SCSC_MBOX_INTMR1);
+	writel(0xffff0000, scsc->base + SCSC_MBOX_INTCR0);
+	writel(0x0000ffff, scsc->base + SCSC_MBOX_INTCR1);
+	writel(0x0000ffff, scsc->base_m4 + SCSC_MBOX_INTCR1);
+
 	/* Tell the R4 ROM where to jump, then release it. */
 	writel(mbox0_override ? mbox0_override : scsc->sig_entry,
 	       scsc->base + SCSC_MBOX_ISSR(0));
@@ -752,8 +763,9 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			break;
 	}
 
-	dev_info(scsc->dev, "R4 response status 0x%04x, MBOX IRQs seen %d\n",
-		 status, atomic_read(&scsc->irq_count));
+	dev_info(scsc->dev, "R4 response status 0x%04x raw 0x%04x, MBOX IRQs seen %d\n",
+		 status, readl(scsc->base + SCSC_MBOX_INTSR0) >> 16,
+		 atomic_read(&scsc->irq_count));
 	dev_info(scsc->dev, "MBOX regs %08x %08x %08x %08x\n",
 		 readl(scsc->base + SCSC_MBOX_ISSR(0)),
 		 readl(scsc->base + SCSC_MBOX_ISSR(1)),
