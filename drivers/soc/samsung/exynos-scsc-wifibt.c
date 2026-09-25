@@ -1541,7 +1541,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			scsc_wifibt_unmap(dram);
 		}
 		dev_info(scsc->dev, "mark at 0x%x: %u/%u slots written %*ph\n",
-			 mark_at, hits, SCSC_MARK_SLOTS,
+			 mark_at, hits, (unsigned int)SCSC_MARK_SLOTS,
 			 (int)sizeof(seen), seen);
 		for (i = 0; i < 12; i++) {
 			u32 val = readl(scsc->base + 0x80 + 4 * i);
