@@ -1152,6 +1152,24 @@ MODULE_PARM_DESC(mark_count, "Count R4 passes over 0x330 in shared DRAM");
 #define SCSC_MARK_COUNT_OFF	0x330
 #define SCSC_MARK_COUNT_SLOT	0x200000
 
+static unsigned int mark_bisect;
+module_param(mark_bisect, uint, 0644);
+MODULE_PARM_DESC(mark_bisect,
+		 "Stamp pass-through sites from 0x500 to 0x6a0, to see how far the R4 gets without halting it");
+
+/* Sites that stamp and let the R4 carry on, spread across the sequence
+ * between the MPU setup and the stall.  The one at 0x670 covers the
+ * literal load at 0x674 and the mailbox writes after it, so it also
+ * answers whether bypassing those lets the R4 continue.
+ */
+static const struct scsc_mark_site scsc_mark_bisect_sites[] = {
+	{ 0x500, 0x240000 },
+	{ 0x600, 0x2c0000 },
+	{ 0x640, 0x340000 },
+	{ 0x670, 0x3c0000 },
+	{ 0x6a0, 0x3ffff0 },
+};
+
 static const struct scsc_mark_site scsc_mark_run_sites[] = {
 	{ 0x330, 0x200000 },
 	{ 0x382, 0x280000 },
@@ -1442,6 +1460,40 @@ static int scsc_wifibt_halt_entry(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "halted firmware entry at 0x%x\n", off);
+
+	return 0;
+}
+
+static int scsc_wifibt_mark_bisect(struct scsc_wifibt *scsc)
+{
+	unsigned int i;
+	void *dram;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(scsc_mark_bisect_sites); i++) {
+		const struct scsc_mark_site *s = &scsc_mark_bisect_sites[i];
+		u8 stub[SCSC_MARK_RUN_LEN];
+
+		if (s->off & 1 || s->off + SCSC_MARK_RUN_LEN > scsc->mem_size - 16) {
+			dev_err(scsc->dev, "bisect offset 0x%x unusable\n",
+				s->off);
+			scsc_wifibt_unmap(dram);
+			return -EINVAL;
+		}
+
+		memcpy(stub, scsc_mark_run_stub, sizeof(scsc_mark_run_stub));
+		put_unaligned_le32(0x80000000u + s->value,
+				   stub + sizeof(scsc_mark_run_stub));
+		put_unaligned_le32(SCSC_MARK_VALUE, dram + s->value);
+		scsc_win_copy(dram + s->off, stub, sizeof(stub));
+	}
+
+	scsc_wifibt_unmap(dram);
+	dev_info(scsc->dev, "bisect stamps installed at %u sites\n",
+		 ARRAY_SIZE(scsc_mark_bisect_sites));
 
 	return 0;
 }
@@ -2015,6 +2067,25 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			 val == scsc_mark_mbox_sites[1].value ? "reached 0x212" :
 			 val == scsc_mark_mbox_sites[2].value ? "reached 0x236" :
 			 "no probe landed");
+	}
+
+	if (mark_bisect) {
+		void *dram = scsc_wifibt_map(scsc);
+
+		if (dram) {
+			for (i = 0; i < ARRAY_SIZE(scsc_mark_bisect_sites); i++) {
+				const struct scsc_mark_site *s =
+					&scsc_mark_bisect_sites[i];
+				u32 val = readl(dram + s->value);
+
+				dev_info(scsc->dev,
+					 "bisect 0x%03x: slot 0x%x = %08x %s\n",
+					 s->off, s->value, val,
+					 val == SCSC_MARK_VALUE ? "PASSED" :
+					 val == 0xdeadbeef ? "not reached" : "?");
+			}
+			scsc_wifibt_unmap(dram);
+		}
 	}
 
 	if (mark_run || mark_count) {
@@ -2615,6 +2686,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			if (ret)
 				return dev_err_probe(dev, ret,
 						     "failed to stamp boot points\n");
+		}
+
+		if (mark_bisect) {
+			ret = scsc_wifibt_mark_bisect(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to install bisect stamps\n");
 		}
 
 		if (mark_at) {
