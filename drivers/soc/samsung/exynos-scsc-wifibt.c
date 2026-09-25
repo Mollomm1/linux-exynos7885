@@ -36,6 +36,7 @@
 #define SCSC_MBOX_INTCR0	0x00c /* Interrupt clear, write 1 to clear */
 #define SCSC_MBOX_IS_VERSION	0x050 /* Firmware block version information */
 #define SCSC_MBOX_ISSR_BASE	0x080 /* Shared registers, 4 bytes each */
+#define SCSC_MARK_MBOX_REG	0x08c /* M4 shared register used by the early-boot probe */
 #define SCSC_MBOX_ISSR(i)	(SCSC_MBOX_ISSR_BASE + 4 * (i))
 
 /* Full mailbox control block offsets (beyond INTMSR/INTCR/version). */
@@ -410,17 +411,20 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	 */
 	usleep_range(1000, 2000);
 	for (i = 0; i < 25; i++) {
-		static u32 lm0, lm1, lr0, lr1;
+		static u32 lm0, lm1, lr0, lr1, lp;
 		u32 m0 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
 		u32 m1 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(1));
 		u32 r0 = readl(scsc->base + SCSC_MBOX_ISSR(0));
 		u32 r1 = readl(scsc->base + SCSC_MBOX_ISSR(1));
+		u32 p = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG);
 
 		if (i == 0 || m0 != lm0 || m1 != lm1 || r0 != lr0 ||
-		    r1 != lr1)
-			dev_info(scsc->dev, "t+%ums M4 %08x %08x R4 %08x %08x\n",
-				 2 + i * 2, m0, m1, r0, r1);
+		    r1 != lr1 || p != lp)
+			dev_info(scsc->dev,
+				 "t+%ums M4 %08x %08x R4 %08x %08x probe %08x\n",
+				 2 + i * 2, m0, m1, r0, r1, p);
 
+		lp = p;
 		lm0 = m0;
 		lm1 = m1;
 		lr0 = r0;
@@ -934,7 +938,6 @@ static const struct scsc_mark_site scsc_mark_mbox_sites[] = {
 	{ 0x1be, 0xa1a10002 },
 	{ 0x1c4, 0xa1a10003 },
 };
-#define SCSC_MARK_MBOX_REG	0x8c
 
 #define SCSC_MARK_RUN_LEN	16
 #define SCSC_MARK_RUN_SLOT	0x200000
