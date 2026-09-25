@@ -952,7 +952,7 @@ MODULE_PARM_DESC(mark_run, "Stamp three points of the boot in shared DRAM and co
 
 static const struct scsc_mark_site scsc_mark_run_sites[] = {
 	{ 0x330, 0x200000 },
-	{ 0x3f6, 0x280000 },
+	{ 0x382, 0x280000 },
 	{ 0x400, 0x300000 },
 };
 
@@ -1291,7 +1291,7 @@ static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 	for (i = 0; i < ARRAY_SIZE(scsc_mark_run_sites); i++) {
 		const struct scsc_mark_site *s = &scsc_mark_run_sites[i];
 
-		if (s->off & 3 || s->off + SCSC_MARK_RUN_LEN >
+		if (s->off & 1 || s->off + SCSC_MARK_RUN_LEN >
 		    scsc->mem_size - 16 || s->value + 4 > scsc->mem_size) {
 			dev_err(scsc->dev, "run offset 0x%x unusable\n",
 				s->off);
