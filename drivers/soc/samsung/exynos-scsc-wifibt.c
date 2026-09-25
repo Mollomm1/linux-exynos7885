@@ -901,6 +901,15 @@ static bool stack_fix;
 module_param(stack_fix, bool, 0644);
 MODULE_PARM_DESC(stack_fix, "Give the early boot a stack pointer at the ATCM top");
 
+/* TZASC grant variants. Downstream calls the SMC with (0, base, size) and
+ * treats a non-zero result as failure; ours answers 0x3, which would
+ * leave the firmware block unable to write the shared window. Try the
+ * nearby argument shapes and keep whichever the firmware answers.
+ */
+static unsigned int tzasc_args;
+module_param(tzasc_args, uint, 0644);
+MODULE_PARM_DESC(tzasc_args, "TZASC SMC argument variant (0 = downstream shape)");
+
 #define SCSC_MARK_RUN_LEN	16
 #define SCSC_MARK_RUN_SLOT	0x200000
 static const u8 scsc_mark_run_stub[] = {
@@ -1144,9 +1153,30 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	 * like downstream).
 	 */
 	if (!skip_tzasc) {
-		arm_smccc_smc(SCSC_SMC_WLBT_TZASC, 0, scsc->mem_start,
-			      scsc->mem_size, 0, 0, 0, 0, &res);
-		dev_info(scsc->dev, "TZASC config result 0x%lx\n", res.a0);
+		unsigned long a1 = 0, a2 = scsc->mem_start, a3 = scsc->mem_size;
+
+		switch (tzasc_args) {
+		case 1:
+			a1 = 1;
+			break;
+		case 2:
+			a2 = 0x80000000ul;
+			break;
+		case 3:
+			a1 = scsc->mem_start;
+			a2 = scsc->mem_size;
+			break;
+		case 4:
+			a3 = 0x200000;
+			break;
+		default:
+			break;
+		}
+		arm_smccc_smc(SCSC_SMC_WLBT_TZASC, a1, a2, a3, 0, 0, 0, 0,
+			      &res);
+		dev_info(scsc->dev,
+			 "TZASC config variant %u result 0x%lx (a1 0x%lx a2 0x%lx a3 0x%lx)\n",
+			 tzasc_args, res.a0, a1, a2, a3);
 	} else {
 		dev_info(scsc->dev, "TZASC config skipped by parameter\n");
 	}
