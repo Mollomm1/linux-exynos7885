@@ -60,6 +60,13 @@
 #define SCSC_MXCONF_SIZE		162
 #define SCSC_STREAMCONF_SIZE		22
 
+/* Shared DRAM is accessed by a non-coherent firmware block: map it
+ * write-combined (uncached) like downstream's vmap WRITE_COMBINE, so
+ * staged data is visible to the R4 and its writes are visible to us.
+ * A cached mapping starves the R4 (stale DRAM) and blinds our reads.
+ */
+#define SCSC_DRAM_MEMREMAP	MEMREMAP_WC
+
 /* TZASC: allow the firmware block DRAM access (downstream SMC cmd) */
 #define SCSC_SMC_WLBT_TZASC	0x82000710
 
@@ -427,7 +434,7 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
 	if (!dram)
 		return -ENOMEM;
 
@@ -532,7 +539,7 @@ static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
 	if (!dram)
 		return -ENOMEM;
 
@@ -567,7 +574,7 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
 	if (!dram)
 		return -ENOMEM;
 
@@ -652,7 +659,7 @@ static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
 	void *dram;
 	u32 crc = 0;
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
 	if (!dram)
 		return 0;
 
@@ -687,7 +694,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 
 	if (r4_probe || patch_entry) {
 		void *dram = memremap(scsc->mem_start, scsc->mem_size,
-				      MEMREMAP_WB);
+				      SCSC_DRAM_MEMREMAP);
 		u32 off, found = 0;
 
 		if (!dram)
@@ -734,7 +741,7 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
 	if (!dram)
 		return;
 
@@ -779,7 +786,7 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
 	if (!dram)
 		return -ENOMEM;
 
