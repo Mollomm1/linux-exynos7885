@@ -1188,6 +1188,9 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 
 	val = readl(scsc->base + SCSC_MBOX_IS_VERSION);
 	dev_info(dev, "R4 mailbox version 0x%08x\n", val);
+	dev_info(dev, "pre-release R4 INTMR1 0x%08x M4 INTMR1 0x%08x\n",
+		 readl(scsc->base + SCSC_MBOX_INTMR1),
+		 readl(scsc->base_m4 + SCSC_MBOX_INTMR1));
 
 	/* Shared-memory carveout referenced via memory-region. Note:
 	 * of_reserved_mem_lookup() matches by node name, so resolve the
