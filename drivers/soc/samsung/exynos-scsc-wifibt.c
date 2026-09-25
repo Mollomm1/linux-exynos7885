@@ -685,14 +685,20 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 	return 0;
 }
 
-/* Expected bytes of the table_A wait loop (2019 image, file 0x1f6).
- * Replaced with NOPs to run the firmware past a missing publisher.
+/* Expected bytes of the table_A wait loop (file 0x1f6). The 2019 and
+ * 2021 images differ only in the branch target. Replaced with NOPs to
+ * run the firmware past a missing publisher.
  */
-static const u8 scsc_wait_loop[] = {
+static const u8 scsc_wait_loop_2019[] = {
 	0x4f, 0xf0, 0x03, 0x00, 0x53, 0xf0, 0x47, 0xfe,
 	0xc0, 0xf3, 0x00, 0x00, 0x00, 0xb1, 0xf7, 0xe7,
 };
+static const u8 scsc_wait_loop_2021[] = {
+	0x4f, 0xf0, 0x03, 0x00, 0xd7, 0xf0, 0xbd, 0xf9,
+	0xc0, 0xf3, 0x00, 0x00, 0x00, 0xb1, 0xf7, 0xe7,
+};
 #define SCSC_WAIT_OFF		0x1f6
+#define SCSC_WAIT_LEN		16
 
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
@@ -736,14 +742,16 @@ static int scsc_wifibt_nop_wait(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	if (memcmp(dram + SCSC_WAIT_OFF, scsc_wait_loop,
-		   sizeof(scsc_wait_loop))) {
+	if (memcmp(dram + SCSC_WAIT_OFF, scsc_wait_loop_2019,
+		   SCSC_WAIT_LEN) &&
+	    memcmp(dram + SCSC_WAIT_OFF, scsc_wait_loop_2021,
+		   SCSC_WAIT_LEN)) {
 		dev_err(scsc->dev, "wait loop bytes mismatch, not patching\n");
 		scsc_wifibt_unmap(dram);
 		return -EINVAL;
 	}
 
-	for (i = 0; i < sizeof(scsc_wait_loop); i += 2)
+	for (i = 0; i < SCSC_WAIT_LEN; i += 2)
 		put_unaligned_le16(0xbf00, dram + SCSC_WAIT_OFF + i);
 	scsc_wifibt_unmap(dram);
 
