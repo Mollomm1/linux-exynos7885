@@ -1666,7 +1666,9 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		void *dram = scsc_wifibt_map(scsc);
 		unsigned int i, hits = 0;
 		u8 seen[SCSC_MARK_SLOTS] = { 0 };
+		u32 raw[SCSC_MARK_SLOTS];
 
+		memset(raw, 0, sizeof(raw));
 		if (dram) {
 			for (i = 0; i < SCSC_MARK_SLOTS; i++) {
 				u32 off = i < ARRAY_SIZE(scsc_mark_slots) ?
@@ -1674,14 +1676,20 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 					  scsc->mem_size - 16;
 				u32 val = readl(dram + off);
 
+				raw[i] = val;
 				seen[i] = val == SCSC_MARK_STAMP;
 				hits += seen[i];
 			}
 			scsc_wifibt_unmap(dram);
 		}
-		dev_info(scsc->dev, "mark at 0x%x: %u/%u slots written %*ph\n",
+		/* Raw values matter: the M4 writes the shared window too, so a
+		 * slot that is neither the preset nor our stamp was taken
+		 * from under us and the halt point is still unknown.
+		 */
+		dev_info(scsc->dev, "mark at 0x%x: %u/%u ours %*ph raw %*ph\n",
 			 mark_at, hits, (unsigned int)SCSC_MARK_SLOTS,
-			 (int)sizeof(seen), seen);
+			 (int)sizeof(seen), seen,
+			 (int)sizeof(raw), raw);
 		for (i = 0; i < 12; i++) {
 			u32 val = readl(scsc->base + 0x80 + 4 * i);
 
