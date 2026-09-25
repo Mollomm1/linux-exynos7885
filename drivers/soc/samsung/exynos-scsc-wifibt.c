@@ -1739,8 +1739,12 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 				if (saved[1] >= 8 * 4 && saved[1] <= SCSC_PANIC_LEN)
 					saved[0] = 2;
 			}
-			if (++polls % 4096 == 0)
-				udelay(100);
+			/* Read gently: hammering the window starves
+			 * the R4 of shared-memory bandwidth, and it is
+			 * the R4 that has to write the record.
+			 */
+			polls++;
+			udelay(250);
 		}
 		scsc_wifibt_unmap(pdram);
 
