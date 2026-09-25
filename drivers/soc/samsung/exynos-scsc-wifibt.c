@@ -1487,21 +1487,22 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	 * instruction" from "the R4 died later" without moving the site.
 	 */
 	if (mark_exec) {
-		for (i = 0; i < 2; i += 2) {
-			u8 a = readb(dram + mark_at + i);
-			u8 b = readb(dram + mark_at + i + 1);
-
-			/* 0b11101/0b11110/0b11111 in the top five bits
-			 * of the first halfword means 32-bit Thumb-2.
-			 */
-			stub[i] = a;
-			stub[i + 1] = (b & 0xe0) == 0xe0 ? b : 0xbf;
-		}
-		if ((readb(dram + mark_at + 1) & 0xe0) != 0xe0)
-			stub[1] = 0x00;	/* lsls r0, r0, #0 */
+		for (i = 0; i < 4; i++)
+			stub[i] = readb(dram + mark_at + i);
 	}
 
 	scsc_win_copy(dram + mark_at, stub, sizeof(stub));
+
+	/* Read the stub back: the pool has to sit exactly where the ldr
+	 * in front of it points, and a layout that misses by a word
+	 * silently stores nothing.
+	 */
+	dev_info(scsc->dev,
+		 "stub at 0x%x: code %08x %08x %08x %08x, pool[0] %08x\n",
+		 mark_at, readl(dram + mark_at), readl(dram + mark_at + 4),
+		 readl(dram + mark_at + 8), readl(dram + mark_at + 12),
+		 readl(dram + mark_at + SCSC_STUB_POOL_OFF));
+
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "halted and marked at 0x%x%s\n", mark_at,
