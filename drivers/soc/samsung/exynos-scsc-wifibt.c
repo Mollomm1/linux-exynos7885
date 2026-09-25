@@ -1113,7 +1113,8 @@ static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 }
 
 static void scsc_wifibt_dump_panic(struct scsc_wifibt *scsc);
-static void scsc_wifibt_panic_print(const u32 *rec, unsigned int words);
+static void scsc_wifibt_panic_print(struct device *dev, const u32 *rec,
+				       unsigned int words);
 
 static int scsc_wifibt_nop_wait(struct scsc_wifibt *scsc)
 {
@@ -1633,13 +1634,12 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			scsc_wifibt_unmap(dram);
 
 		if (saved_words) {
-			dev_info(scsc->dev,
-				 "record caught in the sampling window:\n");
-			scsc_wifibt_panic_print(saved, saved_words);
+			dev_info(scsc->dev, "record caught while sampling:\n");
+			scsc_wifibt_panic_print(scsc->dev, saved, saved_words);
 		}
-	} else {
-		scsc_wifibt_dump_panic(scsc);
 	}
+
+	scsc_wifibt_dump_panic(scsc);
 
 	for (i = 0; i < 10; i++) {
 		msleep(100);
@@ -1717,10 +1717,11 @@ static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
 /* R4 panic record (header field 0x160804, v2 layout per the downstream
  * fw_panic_record.c: version, byte length, two clock stamps,
  * R0-R12/SP/LR/SPSR/PC/CPSR, panic info, XOR checksum).  A core that
- * faults writes it into the shared window and clears it again almost
- * immediately, so it has to be caught while it is there.
+ * faults writes it into the shared window, and the firmware clears it
+ * again shortly after, so it has to be read early to catch anything.
  */
-static void scsc_wifibt_panic_print(const u32 *rec, unsigned int words)
+static void scsc_wifibt_panic_print(struct device *dev, const u32 *rec,
+			       unsigned int words)
 {
 	static const char * const regs[18] = {
 		"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
@@ -1731,22 +1732,22 @@ static void scsc_wifibt_panic_print(const u32 *rec, unsigned int words)
 	unsigned int i;
 
 	if (rec[0] != 2) {
-		dev_info(scsc->dev, "no R4 panic record (v=%u)\n", rec[0]);
+		dev_info(dev, "no R4 panic record (v=%u)\n", rec[0]);
 		return;
 	}
 
-	dev_info(scsc->dev, "R4 panic: len %u bytes, t1m %u t32k %u\n",
+	dev_info(dev, "R4 panic: len %u bytes, t1m %u t32k %u\n",
 		 rec[1], rec[2], rec[3]);
 	for (i = 0; i < 18 && 4 + i < words; i++)
-		dev_info(scsc->dev, "  %-4s %08x\n", regs[i], rec[4 + i]);
+		dev_info(dev, "  %-4s %08x\n", regs[i], rec[4 + i]);
 
 	for (i = 22; i + 1 < words; i++)
 		sum ^= rec[i];
 	sum ^= 0xa5a5a5a5;
-	dev_info(scsc->dev, "  info:");
+	dev_info(dev, "  info:");
 	for (i = 22; i + 1 < words; i++)
-		dev_info(scsc->dev, " %08x", rec[i]);
-	dev_info(scsc->dev, "\n  cksum rec %08x calc %08x %s\n",
+		dev_info(dev, " %08x", rec[i]);
+	dev_info(dev, "\n  cksum rec %08x calc %08x %s\n",
 		 rec[words - 1], sum,
 		 rec[words - 1] == sum ? "OK" : "BAD");
 }
@@ -1765,7 +1766,7 @@ static void scsc_wifibt_dump_panic(struct scsc_wifibt *scsc)
 		scsc_wifibt_unmap(dram);
 	}
 
-	scsc_wifibt_panic_print(rec, words);
+	scsc_wifibt_panic_print(scsc->dev, rec, words);
 }
 
 static void scsc_wifibt_check_work(struct work_struct *work)
@@ -1788,20 +1789,6 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			u32 m4 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
 			u32 m4sr = readl(scsc->base_m4 + SCSC_MBOX_INTMSR1);
 			u32 r4sr = readl(scsc->base + SCSC_MBOX_INTMSR1);
-
-			/* The record is only there for a fraction of a
-			 * millisecond, so keep the first one we see.
-			 */
-			if (dram && !saved_words &&
-			    readl(dram + SCSC_PANIC_OFF) == 2) {
-				unsigned int j;
-
-				saved_words = min_t(u32, ARRAY_SIZE(saved),
-						    readl(dram + SCSC_PANIC_OFF) / 4);
-				for (j = 0; j < saved_words; j++)
-					saved[j] = readl(dram + SCSC_PANIC_OFF + 4 * j);
-				saved[0] = 2;
-			}
 
 			dev_info(scsc->dev,
 				 "tl t+%4ums crc %08x m4issr %08x m4sr %08x r4sr %08x wd %d\n",
