@@ -87,6 +87,15 @@ static bool skip_tzasc;
 module_param(skip_tzasc, bool, 0644);
 MODULE_PARM_DESC(skip_tzasc, "Skip the WLBT TZASC SMC call");
 
+/* Queue a minimal GDB halt-reason query in the GDB R4 from-AP stream
+ * instead of sending a bare panic pulse. A live GDB stub answers in
+ * the to-AP stream (and need not panic); an absent one panics or
+ * stays silent exactly like the bare pulse.
+ */
+static bool gdb_probe;
+module_param(gdb_probe, bool, 0644);
+MODULE_PARM_DESC(gdb_probe, "Send a GDB query to the R4 stub instead of a bare panic pulse");
+
 static bool null_mxconf;
 module_param(null_mxconf, bool, 0644);
 MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the fabricated one");
@@ -221,6 +230,9 @@ struct scsc_wifibt {
 	u32		sig_entry;
 	u32		sig_mbox1;
 	u32		mxlog_off;
+	u32		gdb_fa_buf;
+	u32		gdb_fa_widx;
+	u32		gdb_ta_buf;
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -563,6 +575,9 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 
 	scsc->mxconf_off = mx_off;
 	scsc->mxlog_off = mxlog;
+	scsc->gdb_fa_buf = gdb_r4_out;
+	scsc->gdb_fa_widx = gdb_r4_out + SCSC_GDB_BUF_LEN;
+	scsc->gdb_ta_buf = gdb_r4_in;
 	dev_info(scsc->dev, "mxconf at DRAM offset 0x%x\n", mx_off);
 
 	return 0;
@@ -782,7 +797,9 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 	/* Kick the reserved panic bit (FROMHOST 0): unmask it, re-arm the
 	 * watchdog, and pulse. A running firmware with panic
 	 * infrastructure answers (panic record and/or watchdog); a
-	 * pre-transport stall stays silent.
+	 * pre-transport stall stays silent. With gdb_probe set, queue a
+	 * halt-reason query first: a live GDB stub answers in its stream
+	 * instead of panicking.
 	 */
 	irq = platform_get_irq_byname(to_platform_device(scsc->dev), "WDOG");
 	if (irq >= 0 && atomic_read(&scsc->wdog_count))
@@ -790,6 +807,19 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 
 	writel(readl(scsc->base + SCSC_MBOX_INTMR1) & ~1u,
 	       scsc->base + SCSC_MBOX_INTMR1);
+
+	if (gdb_probe) {
+		static const u8 query[] = { '$', '?', '#', '3', 'f' };
+		void *dram = scsc_wifibt_map(scsc);
+
+		if (dram) {
+			memcpy(dram + scsc->gdb_fa_buf, query, sizeof(query));
+			put_unaligned_le32(2, dram + scsc->gdb_fa_widx);
+			scsc_wifibt_unmap(dram);
+			dev_info(scsc->dev, "gdb query queued\n");
+		}
+	}
+
 	writel(1u, scsc->base + SCSC_MBOX_INTGR1);
 	dev_info(scsc->dev, "poked FROMHOST bit 0\n");
 }
@@ -965,6 +995,12 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 				 readl(dram + scsc->mxlog_off + 4),
 				 readl(dram + scsc->mxlog_off + 8),
 				 readl(dram + scsc->mxlog_off + 12));
+			dev_info(scsc->dev,
+				 "scan gdb-ta %08x %08x %08x %08x\n",
+				 readl(dram + scsc->gdb_ta_buf),
+				 readl(dram + scsc->gdb_ta_buf + 4),
+				 readl(dram + scsc->gdb_ta_buf + 8),
+				 readl(dram + scsc->gdb_ta_buf + 12));
 			scsc_wifibt_unmap(dram);
 		}
 	}
