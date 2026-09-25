@@ -38,6 +38,16 @@
 #define SCSC_MBOX_ISSR_BASE	0x080 /* Shared registers, 4 bytes each */
 #define SCSC_MBOX_ISSR(i)	(SCSC_MBOX_ISSR_BASE + 4 * (i))
 
+/* Full mailbox control block offsets (beyond INTMSR/INTCR/version). */
+#define SCSC_MBOX_INTGR0	0x008
+#define SCSC_MBOX_INTMR0	0x010
+#define SCSC_MBOX_INTSR0	0x014
+#define SCSC_MBOX_INTGR1	0x01c
+#define SCSC_MBOX_INTMR1	0x024
+#define SCSC_MBOX_INTSR1	0x028
+#define SCSC_MBOX_INTMSR1	0x02c
+#define SCSC_MBOX_MIF_INIT	0x04c
+
 /* Boot handshake values (downstream mbox_init, documentation only) */
 #define SCSC_MBOX_MAGIC		0xbcdeedcb
 #define SCSC_MBOX_FW_FLAGS	0x0 /* Bit 0 = spin at start of CRT0 */
@@ -740,12 +750,27 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		dev_info(scsc->dev, "marker scan: %u hits\n", found);
 	}
 	dev_info(scsc->dev,
-		 "5s M4 status 0x%04x, M4 regs %08x %08x %08x %08x\n",
+		 "scan M4 status 0x%04x, M4 regs %08x %08x %08x %08x\n",
 		 readl(scsc->base_m4 + SCSC_MBOX_INTMSR0) >> 16,
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(0)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(1)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
+	dev_info(scsc->dev,
+		 "scan MBOX ctl GR0 %08x MR0 %08x SR0 %08x GR1 %08x MR1 %08x SR1 %08x MSR1 %08x INIT %08x\n",
+		 readl(scsc->base + SCSC_MBOX_INTGR0),
+		 readl(scsc->base + SCSC_MBOX_INTMR0),
+		 readl(scsc->base + SCSC_MBOX_INTSR0),
+		 readl(scsc->base + SCSC_MBOX_INTGR1),
+		 readl(scsc->base + SCSC_MBOX_INTMR1),
+		 readl(scsc->base + SCSC_MBOX_INTSR1),
+		 readl(scsc->base + SCSC_MBOX_INTMSR1),
+		 readl(scsc->base + SCSC_MBOX_MIF_INIT));
+	dev_info(scsc->dev, "scan ISSR4-7 %08x %08x %08x %08x\n",
+		 readl(scsc->base + SCSC_MBOX_ISSR(4)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(5)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(6)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(7)));
 }
 
 static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
@@ -788,6 +813,21 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(1)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
+	dev_info(scsc->dev,
+		 "scan MBOX ctl GR0 %08x MR0 %08x SR0 %08x GR1 %08x MR1 %08x SR1 %08x MSR1 %08x INIT %08x\n",
+		 readl(scsc->base + SCSC_MBOX_INTGR0),
+		 readl(scsc->base + SCSC_MBOX_INTMR0),
+		 readl(scsc->base + SCSC_MBOX_INTSR0),
+		 readl(scsc->base + SCSC_MBOX_INTGR1),
+		 readl(scsc->base + SCSC_MBOX_INTMR1),
+		 readl(scsc->base + SCSC_MBOX_INTSR1),
+		 readl(scsc->base + SCSC_MBOX_INTMSR1),
+		 readl(scsc->base + SCSC_MBOX_MIF_INIT));
+	dev_info(scsc->dev, "scan ISSR4-7 %08x %08x %08x %08x\n",
+		 readl(scsc->base + SCSC_MBOX_ISSR(4)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(5)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(6)),
+		 readl(scsc->base + SCSC_MBOX_ISSR(7)));
 }
 
 static ssize_t scan_store(struct device *dev, struct device_attribute *attr,
