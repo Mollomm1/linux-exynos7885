@@ -36,7 +36,7 @@
 #define SCSC_MBOX_INTCR0	0x00c /* Interrupt clear, write 1 to clear */
 #define SCSC_MBOX_IS_VERSION	0x050 /* Firmware block version information */
 #define SCSC_MBOX_ISSR_BASE	0x080 /* Shared registers, 4 bytes each */
-#define SCSC_MARK_MBOX_REG	0x084 /* R4 MBOX1: never rewritten, so a stamp survives */
+#define SCSC_MARK_MBOX_REG	0x080 /* R4 MBOX0: the one shared word the R4 can write */
 #define SCSC_MBOX_ISSR(i)	(SCSC_MBOX_ISSR_BASE + 4 * (i))
 
 /* Full mailbox control block offsets (beyond INTMSR/INTCR/version). */
