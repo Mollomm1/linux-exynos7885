@@ -93,6 +93,14 @@ static bool patch_entry;
 module_param(patch_entry, bool, 0644);
 MODULE_PARM_DESC(patch_entry, "Replace the firmware image at its entry point with the probe payload");
 
+/* Fill the DRAM gap beyond the image with a pattern. Firmware BSS
+ * clearing (or any other R4 write) then shows as a CRC change; an
+ * untouched gap stays patterned.
+ */
+static bool fill_gap;
+module_param(fill_gap, bool, 0644);
+MODULE_PARM_DESC(fill_gap, "Fill shared DRAM beyond the image with 0xAA before boot");
+
 /* PMU (system-controller syscon) register offsets */
 #define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
 #define SCSC_PMU_WIFI_PWRON		BIT(1)
@@ -781,6 +789,12 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 		dev_err(scsc->dev, "firmware DRAM readback mismatch\n");
 		memunmap(dram);
 		return -EIO;
+	}
+
+	if (fill_gap) {
+		memset(dram + fw->size, 0xaa, scsc->mem_size - fw->size);
+		dev_info(scsc->dev, "gap filled 0x%zx bytes with 0xaa\n",
+			 scsc->mem_size - fw->size);
 	}
 
 	memunmap(dram);
