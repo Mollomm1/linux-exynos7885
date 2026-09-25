@@ -79,6 +79,13 @@ static bool signal_r4 = true;
 module_param(signal_r4, bool, 0644);
 MODULE_PARM_DESC(signal_r4, "Write the R4 boot handshake (TZASC, MBOX regs) before reset release");
 
+/* Skip the TZASC SMC: if our call narrows EL3 defaults to
+ * read-only, skipping restores the POR behavior for comparison.
+ */
+static bool skip_tzasc;
+module_param(skip_tzasc, bool, 0644);
+MODULE_PARM_DESC(skip_tzasc, "Skip the WLBT TZASC SMC call");
+
 static bool null_mxconf;
 module_param(null_mxconf, bool, 0644);
 MODULE_PARM_DESC(null_mxconf, "Hand the R4 a null mxconf pointer instead of the fabricated one");
@@ -662,9 +669,13 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	/* Let the firmware block access DRAM (ignored on failure,
 	 * like downstream).
 	 */
-	arm_smccc_smc(SCSC_SMC_WLBT_TZASC, 0, scsc->mem_start, scsc->mem_size,
-		      0, 0, 0, 0, &res);
-	dev_info(scsc->dev, "TZASC config result 0x%lx\n", res.a0);
+	if (!skip_tzasc) {
+		arm_smccc_smc(SCSC_SMC_WLBT_TZASC, 0, scsc->mem_start,
+			      scsc->mem_size, 0, 0, 0, 0, &res);
+		dev_info(scsc->dev, "TZASC config result 0x%lx\n", res.a0);
+	} else {
+		dev_info(scsc->dev, "TZASC config skipped by parameter\n");
+	}
 
 	/* Tell the R4 ROM where to jump, then release it. */
 	writel(mbox0_override ? mbox0_override : scsc->sig_entry,
