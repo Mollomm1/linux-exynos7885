@@ -157,6 +157,16 @@ MODULE_PARM_DESC(fill_gap, "Fill shared DRAM beyond the image with 0xAA before b
 #define SCSC_PMU_SYS_PWR_CFG_16		BIT(16)
 #define SCSC_PMU_SM_DOWN		0x80
 
+/* BAAW access windows (never written by anyone so far; dumped to see
+ * whether the firmware block is actually allowed past its DRAM window).
+ */
+#define SCSC_PMU_MIF_WIN0		0x7318
+#define SCSC_PMU_MIF_WIN1		0x731c
+#define SCSC_PMU_PERI_WIN0		0x7320
+#define SCSC_PMU_PERI_WIN1		0x7324
+#define SCSC_PMU_PERI_WIN2		0x7328
+#define SCSC_PMU_PERI_WIN3		0x732c
+
 /* Low-power controls touched by the power-off path. Snapshotted at
  * probe (cold defaults) and restored on power-on: releasing without
  * them leaves a warm block wedged with START held.
@@ -889,6 +899,22 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 		 readl(scsc->base + SCSC_MBOX_ISSR(5)),
 		 readl(scsc->base + SCSC_MBOX_ISSR(6)),
 		 readl(scsc->base + SCSC_MBOX_ISSR(7)));
+
+	{
+		unsigned int wins[6] = {
+			SCSC_PMU_MIF_WIN0, SCSC_PMU_MIF_WIN1,
+			SCSC_PMU_PERI_WIN0, SCSC_PMU_PERI_WIN1,
+			SCSC_PMU_PERI_WIN2, SCSC_PMU_PERI_WIN3,
+		};
+		unsigned int vals[6], i;
+
+		for (i = 0; i < 6; i++)
+			regmap_read(scsc->pmureg, wins[i], &vals[i]);
+
+		dev_info(scsc->dev,
+			 "scan access wins %08x %08x %08x %08x %08x %08x\n",
+			 vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]);
+	}
 
 	if (scsc->mxlog_off) {
 		void *dram = scsc_wifibt_map(scsc);
