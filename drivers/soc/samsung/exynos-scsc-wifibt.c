@@ -679,6 +679,7 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 {
 	unsigned int i, status = 0;
+	int irq;
 
 	/* Early timeline: sample the M4 status and mailbox every 50 ms
 	 * for 2 s after release, logging only changes. Shows the boot
@@ -724,6 +725,20 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(1)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
+
+	/* Kick the reserved panic bit (FROMHOST 0): unmask it, re-arm the
+	 * watchdog, and pulse. A running firmware with panic
+	 * infrastructure answers (panic record and/or watchdog); a
+	 * pre-transport stall stays silent.
+	 */
+	irq = platform_get_irq_byname(to_platform_device(scsc->dev), "WDOG");
+	if (irq >= 0 && atomic_read(&scsc->wdog_count))
+		enable_irq(irq);
+
+	writel(readl(scsc->base + SCSC_MBOX_INTMR1) & ~1u,
+	       scsc->base + SCSC_MBOX_INTMR1);
+	writel(1u, scsc->base + SCSC_MBOX_INTGR1);
+	dev_info(scsc->dev, "poked FROMHOST bit 0\n");
 }
 
 static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
