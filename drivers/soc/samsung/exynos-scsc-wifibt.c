@@ -1303,6 +1303,13 @@ static ssize_t scan_store(struct device *dev, struct device_attribute *attr,
 			  const char *buf, size_t count)
 {
 	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
+	int irq = platform_get_irq_byname(to_platform_device(dev), "WDOG");
+
+	/* Re-arm the watchdog so periodic pulses show as a growing count
+	 * with timestamps (rate-limited: only on manual scan).
+	 */
+	if (irq >= 0 && atomic_read(&scsc->wdog_count))
+		enable_irq(irq);
 
 	scsc_wifibt_scan(scsc);
 
