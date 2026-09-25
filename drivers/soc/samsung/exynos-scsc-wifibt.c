@@ -270,8 +270,6 @@ struct scsc_wifibt {
 	u32		mgmt_ta_widx;
 	u32		mgmt_fa_buf;
 	u32		mgmt_fa_widx;
-	u32		mark_seen;
-	u8		mark_bits[SCSC_MARK_SLOTS];
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -1236,8 +1234,6 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			}
 			scsc_wifibt_unmap(dram);
 		}
-		scsc->mark_seen = 0;
-		memcpy(scsc->mark_bits, seen, sizeof(seen));
 		dev_info(scsc->dev, "mark at 0x%x: %u/%u slots written %*ph\n",
 			 mark_at, hits, SCSC_MARK_SLOTS,
 			 (int)sizeof(seen), seen);
