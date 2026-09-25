@@ -1121,12 +1121,10 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
 {
 	u8 stub[] = {
-		0x03, 0xb4,			/* push {r0, r1} */
-		0x03, 0x4a,			/* ldr r2, [pc, #12] */
+		0x02, 0x4a,			/* ldr r2, [pc, #8] */
 		0x4a, 0xf2, 0x00, 0x00,		/* movw r3, #lo */
 		0xca, 0xf2, 0x00, 0x00,		/* movt r3, #hi */
 		0x13, 0x60,			/* str r3, [r2] */
-		0x03, 0xbc,			/* pop {r0, r1} */
 		0x00, 0x00, 0x00, 0x00,		/* address */
 	};
 	unsigned int i;
@@ -1139,8 +1137,10 @@ static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
 	for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
 		const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
 
-		put_unaligned_le16(s->value & 0xffff, stub + 6);
-		put_unaligned_le16(s->value >> 16, stub + 10);
+		put_unaligned_le16(s->value & 0xffff, stub + 4);
+		put_unaligned_le16(s->value >> 16, stub + 8);
+		put_unaligned_le32(0xa20e0000ul + SCSC_MARK_MBOX_REG,
+				   stub + sizeof(stub) - 4);
 		memcpy(dram + s->off, stub, sizeof(stub));
 	}
 	scsc_wifibt_unmap(dram);
