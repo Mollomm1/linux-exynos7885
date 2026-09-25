@@ -1651,7 +1651,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 	struct scsc_wifibt *scsc = container_of(to_delayed_work(work),
 						struct scsc_wifibt,
 						check_work);
-	unsigned int stat, seq, status;
+	unsigned int stat, seq, status, i;
 	u32 crc;
 
 	crc = scsc_wifibt_dram_crc(scsc);
@@ -1665,6 +1665,49 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
+
+	/* R4 panic record (header field, same offset in both builds): a
+	 * faulting core writes it into the shared window, which is the
+	 * only trace an exception leaves us.
+	 */
+	{
+		void *dram = scsc_wifibt_map(scsc);
+		static const u32 panic_offs[] = { 0x160804, 0x160840 };
+
+		if (dram) {
+			for (i = 0; i < ARRAY_SIZE(panic_offs); i++)
+				dev_info(scsc->dev,
+					 "panic rec 0x%x: %08x %08x %08x %08x\n",
+					 panic_offs[i],
+					 readl(dram + panic_offs[i]),
+					 readl(dram + panic_offs[i] + 4),
+					 readl(dram + panic_offs[i] + 8),
+					 readl(dram + panic_offs[i] + 12));
+			scsc_wifibt_unmap(dram);
+		}
+	}
+
+
+	/* R4 panic record (header field, same offset in both builds):
+	 * a faulting core writes it into the shared window, which is the
+	 * only trace an exception leaves us.
+	 */
+	{
+		void *dram = scsc_wifibt_map(scsc);
+		static const u32 panic_offs[] = { 0x160804, 0x160840 };
+
+		if (dram) {
+			for (i = 0; i < ARRAY_SIZE(panic_offs); i++)
+				dev_info(scsc->dev,
+					 "panic rec 0x%x: %08x %08x %08x %08x\n",
+					 panic_offs[i],
+					 readl(dram + panic_offs[i]),
+					 readl(dram + panic_offs[i] + 4),
+					 readl(dram + panic_offs[i] + 8),
+					 readl(dram + panic_offs[i] + 12));
+			scsc_wifibt_unmap(dram);
+		}
+	}
 
 	if (mark_mbox) {
 		u32 val = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG);
@@ -1680,7 +1723,6 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 
 	if (mark_run || mark_count) {
 		void *dram = scsc_wifibt_map(scsc);
-		unsigned int i;
 
 		if (dram && mark_count) {
 			dev_info(scsc->dev, "count 0x%x passes: %u\n",
@@ -2246,17 +2288,17 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 
 		if (mark_mbox) {
 			ret = scsc_wifibt_mark_mbox(scsc);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to install mailbox probes\n");
-	}
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to install mailbox probes\n");
+		}
 
-	if (stack_fix) {
-		ret = scsc_wifibt_stack_fix(scsc);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to fix early stack\n");
-	}
+		if (stack_fix) {
+			ret = scsc_wifibt_stack_fix(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to fix early stack\n");
+		}
 
 		if (mark_run || mark_count) {
 			ret = scsc_wifibt_mark_run(scsc);
