@@ -138,6 +138,15 @@ static bool nop_wait;
 module_param(nop_wait, bool, 0644);
 MODULE_PARM_DESC(nop_wait, "Replace the table wait loop with NOPs");
 
+/* Stage a hand-built MM_START_IND sender at the firmware entry instead
+ * of the sweep payload: all-zero management packet to the to-AP buffer,
+ * write index 0 to 1, spin. If R4 DRAM writes work, the packet lands
+ * visibly and the AP receive path can be built against it.
+ */
+static bool graft_mm;
+module_param(graft_mm, bool, 0644);
+MODULE_PARM_DESC(graft_mm, "Stage an MM_START_IND graft at the firmware entry");
+
 /* Override MBOX_0 with an arbitrary value on the intact-image path.
  * Isolates whether the entry VALUE alone (independent of image
  * content) decides the firmware block's response.
@@ -257,6 +266,8 @@ struct scsc_wifibt {
 	u32		gdb_fa_buf;
 	u32		gdb_fa_widx;
 	u32		gdb_ta_buf;
+	u32		mgmt_ta_buf;
+	u32		mgmt_ta_widx;
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -626,6 +637,8 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 	scsc->gdb_fa_buf = gdb_r4_out;
 	scsc->gdb_fa_widx = gdb_r4_out + SCSC_GDB_BUF_LEN;
 	scsc->gdb_ta_buf = gdb_r4_in;
+	scsc->mgmt_ta_buf = to_ap;
+	scsc->mgmt_ta_widx = to_ap + SCSC_MGMT_BUF_LEN;
 	dev_info(scsc->dev, "mxconf at DRAM offset 0x%x\n", mx_off);
 
 	return 0;
@@ -637,16 +650,16 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
  * of the window afterwards reveals where (if anywhere) stores land.
  */
 static const u8 scsc_probe_payload[] = {
-	0xf8, 0xdf, 0x00, 0x4e, 0xf8, 0xdf, 0x10, 0x4e,
-	0x01, 0x60, 0xf8, 0xdf, 0x00, 0x4c, 0xf8, 0xdf,
-	0x10, 0x4c, 0x01, 0x60, 0xf8, 0xdf, 0x00, 0x4a,
-	0xf8, 0xdf, 0x10, 0x4a, 0x01, 0x60, 0xf8, 0xdf,
-	0x00, 0x48, 0xf8, 0xdf, 0x10, 0x48, 0x01, 0x60,
-	0xf8, 0xdf, 0x00, 0x46, 0xf8, 0xdf, 0x10, 0x46,
-	0x01, 0x60, 0xf8, 0xdf, 0x00, 0x44, 0xf8, 0xdf,
-	0x10, 0x44, 0x01, 0x60, 0xf8, 0xdf, 0x00, 0x42,
-	0xf8, 0xdf, 0x10, 0x42, 0x01, 0x60, 0xf8, 0xdf,
-	0x00, 0x40, 0xf8, 0xdf, 0x10, 0x40, 0x01, 0x60,
+	0xdf, 0xf8, 0x4e, 0x00, 0xdf, 0xf8, 0x4e, 0x10,
+	0x01, 0x60, 0xdf, 0xf8, 0x4c, 0x00, 0xdf, 0xf8,
+	0x4c, 0x10, 0x01, 0x60, 0xdf, 0xf8, 0x4a, 0x00,
+	0xdf, 0xf8, 0x4a, 0x10, 0x01, 0x60, 0xdf, 0xf8,
+	0x48, 0x00, 0xdf, 0xf8, 0x48, 0x10, 0x01, 0x60,
+	0xdf, 0xf8, 0x46, 0x00, 0xdf, 0xf8, 0x46, 0x10,
+	0x01, 0x60, 0xdf, 0xf8, 0x44, 0x00, 0xdf, 0xf8,
+	0x44, 0x10, 0x01, 0x60, 0xdf, 0xf8, 0x42, 0x00,
+	0xdf, 0xf8, 0x42, 0x10, 0x01, 0x60, 0xdf, 0xf8,
+	0x40, 0x00, 0xdf, 0xf8, 0x40, 0x10, 0x01, 0x60,
 	0xfe, 0xe7, 0x00, 0x10, 0x00, 0x80, 0xef, 0xbe,
 	0xad, 0xde, 0x00, 0x00, 0x01, 0x80, 0xef, 0xbe,
 	0xad, 0xde, 0x00, 0x00, 0x02, 0x80, 0xef, 0xbe,
@@ -688,6 +701,67 @@ static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 	scsc->sig_mbox1 = 0;
 	dev_info(scsc->dev, "R4 probe payload staged at 0x%x, entry 0x%x\n",
 		 off, scsc->sig_entry);
+
+	return 0;
+}
+
+/* MM_START_IND graft (28 bytes, Thumb-2, R4 DRAM view base 0x80000000):
+ *   ldr r0, [pc, #16]  ; to-ap buffer address
+ *   movs r1, #0
+ *   str r1, [r0]
+ *   strb r1, [r0, #4]
+ *   ldr r0, [pc, #10]  ; write-index address
+ *   movs r1, #1
+ *   str r1, [r0]
+ *   b .
+ *   .word to_ap, widx
+ * Sends an all-zero management packet (ma_msg MM_START_IND) the same
+ * way the firmware would, to test the DRAM write path plus the AP
+ * receive side together.
+ */
+#define SCSC_GRAFT_LEN		28
+
+static void scsc_wifibt_build_graft(struct scsc_wifibt *scsc, u8 *g)
+{
+	u32 to_ap = 0x80000000u + scsc->mgmt_ta_buf;
+	u32 widx = 0x80000000u + scsc->mgmt_ta_widx;
+
+	/* LDR.W literal is DF F8 imm-lo Rt:imm-hi in memory order. */
+	g[0] = 0xdf; g[1] = 0xf8; g[2] = 0x10; g[3] = 0x00;
+	g[4] = 0x00; g[5] = 0x21;
+	g[6] = 0x01; g[7] = 0x60;
+	g[8] = 0x01; g[9] = 0x71;
+	g[10] = 0xdf; g[11] = 0xf8; g[12] = 0x0a; g[13] = 0x10;
+	g[14] = 0x01; g[15] = 0x21;
+	g[16] = 0x01; g[17] = 0x60;
+	g[18] = 0xfe; g[19] = 0xe7;
+	put_unaligned_le32(to_ap, g + 20);
+	put_unaligned_le32(widx, g + 24);
+}
+
+static int scsc_wifibt_graft_mm(struct scsc_wifibt *scsc)
+{
+	u32 off = scsc->fw_entry & ~1u;
+	u8 graft[SCSC_GRAFT_LEN];
+	void *dram;
+
+	if (!(scsc->fw_entry & 1u) ||
+	    off + sizeof(graft) > scsc->mem_size) {
+		dev_err(scsc->dev, "firmware entry 0x%x not graftable\n",
+			scsc->fw_entry);
+		return -EINVAL;
+	}
+
+	scsc_wifibt_build_graft(scsc, graft);
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	memcpy(dram + off, graft, sizeof(graft));
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "grafted MM_START_IND sender at 0x%x\n", off);
 
 	return 0;
 }
