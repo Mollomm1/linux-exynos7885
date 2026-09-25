@@ -1152,6 +1152,10 @@ MODULE_PARM_DESC(mark_count, "Count R4 passes over 0x330 in shared DRAM");
 #define SCSC_MARK_COUNT_OFF	0x330
 #define SCSC_MARK_COUNT_SLOT	0x200000
 
+static bool clear_panic;
+module_param(clear_panic, bool, 0644);
+MODULE_PARM_DESC(clear_panic, "Zero the panic record area when staging firmware");
+
 static unsigned int mark_bisect;
 module_param(mark_bisect, uint, 0644);
 MODULE_PARM_DESC(mark_bisect,
@@ -2395,11 +2399,15 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 
 	/* Wipe any panic record left in the carveout: a warm reboot keeps
 	 * the shared window, and a stale record would look like a fresh
-	 * fault on this boot.
+	 * fault on this boot.  A normal boot writes no record anyway, and
+	 * the R4 zeroes this range itself during init, so this is opt-in
+	 * and off by default.
 	 */
-	scsc_win_set(dram + SCSC_PANIC_OFF, 0, SCSC_PANIC_LEN);
-	dev_info(scsc->dev, "panic record area cleared (%u bytes)\n",
-		 SCSC_PANIC_LEN);
+	if (clear_panic) {
+		scsc_win_set(dram + SCSC_PANIC_OFF, 0, SCSC_PANIC_LEN);
+		dev_info(scsc->dev, "panic record area cleared (%u bytes)\n",
+			 SCSC_PANIC_LEN);
+	}
 
 	if (fill_gap) {
 		scsc_win_set(dram + fw->size, 0xaa,
