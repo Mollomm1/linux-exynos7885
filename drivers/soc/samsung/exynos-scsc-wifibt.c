@@ -197,12 +197,22 @@ MODULE_PARM_DESC(fill_gap, "Fill shared DRAM beyond the image with 0xAA before b
 /* BAAW access windows (never written by anyone so far; dumped to see
  * whether the firmware block is actually allowed past its DRAM window).
  */
-#define SCSC_PMU_MIF_WIN0		0x7318
-#define SCSC_PMU_MIF_WIN1		0x731c
-#define SCSC_PMU_PERI_WIN0		0x7320
-#define SCSC_PMU_PERI_WIN1		0x7324
-#define SCSC_PMU_PERI_WIN2		0x7328
-#define SCSC_PMU_PERI_WIN3		0x732c
+#define SCSC_PMU_MIF_WIN0	0x7318
+#define SCSC_PMU_MIF_WIN1	0x731c
+#define SCSC_PMU_PERI_WIN0	0x7320
+#define SCSC_PMU_PERI_WIN1	0x7324
+#define SCSC_PMU_PERI_WIN2	0x7328
+#define SCSC_PMU_PERI_WIN3	0x732c
+
+/* Shared-register option register. Downstream flips a bit here around
+ * the whole power sequence (mcu_ipc shared_reg_enable/disable) so the
+ * modem co-processor does not own the shared registers while the
+ * firmware block comes up.
+ */
+#define SCSC_PMU_SHARED_OPTION	0x3648
+static unsigned int shared_opt;
+module_param(shared_opt, uint, 0644);
+MODULE_PARM_DESC(shared_opt, "PMU shared-option bits to set before the power sequence");
 
 /* Open every BAAW access window. The MIF windows read 0x55555555
  * (per-region 01); if 01 means read-only, writes need all-ones.
@@ -368,6 +378,17 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 		return ret;
 
 	/* Power on, release reset, start: mirrors downstream 8.6.6 sequence. */
+	if (shared_opt) {
+		ret = regmap_update_bits(scsc->pmureg,
+					 SCSC_PMU_SHARED_OPTION,
+					 shared_opt, shared_opt);
+		if (ret)
+			return ret;
+		regmap_read(scsc->pmureg, SCSC_PMU_SHARED_OPTION, &val);
+		dev_info(scsc->dev, "shared option 0x%08x (want bits 0x%x)\n",
+			 val, shared_opt);
+	}
+
 	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
 				 SCSC_PMU_WIFI_PWRON, SCSC_PMU_WIFI_PWRON);
 	if (ret)
