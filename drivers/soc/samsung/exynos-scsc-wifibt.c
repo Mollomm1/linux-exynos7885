@@ -1717,12 +1717,22 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		while (!saved[0] && time_before(jiffies, deadline)) {
 			if (readl(pdram + SCSC_PANIC_OFF) == 2) {
 				unsigned int j, words;
+				u32 sum = 0xa5a5a5a5;
 
+				/* The firmware writes the version word
+				 * first, so give it a moment to finish
+				 * before copying, and only accept a copy
+				 * whose checksum agrees.
+				 */
+				udelay(200);
 				words = min_t(u32, ARRAY_SIZE(saved),
 					      readl(pdram + SCSC_PANIC_OFF) / 4);
 				for (j = 0; j < words; j++)
 					saved[j] = readl(pdram + SCSC_PANIC_OFF + 4 * j);
-				saved[0] = 2;
+				for (j = 0; j + 1 < words; j++)
+					sum ^= saved[j];
+				if (words > 1 && sum == saved[words - 1])
+					saved[0] = 2;
 			}
 			if (++polls % 4096 == 0)
 				udelay(100);
