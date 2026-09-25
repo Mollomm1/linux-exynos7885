@@ -910,6 +910,28 @@ static unsigned int tzasc_args;
 module_param(tzasc_args, uint, 0644);
 MODULE_PARM_DESC(tzasc_args, "TZASC SMC argument variant (0 = downstream shape)");
 
+/* Mailbox progress probes. The R4 demonstrably writes its mailbox (the
+ * M4 only boots because of it) while no shared-DRAM write has ever been
+ * seen, so stamp three M4-side mailbox words from three points of the
+ * early boot and read them back: each stamp proves the R4 ran that far.
+ */
+static bool mark_mbox;
+module_param(mark_mbox, bool, 0644);
+MODULE_PARM_DESC(mark_mbox, "Stamp the M4 mailbox from three early-boot points");
+
+#define SCSC_MARK_MBOX_SITES	3
+struct scsc_mark_site {
+	u32	off;		/* firmware offset of the probe */
+	u32	mbox;		/* M4 mailbox register offset */
+	u32	value;
+};
+
+static const struct scsc_mark_site scsc_mark_mbox_sites[] = {
+	{ 0x236, 0x84, 0xa1a10001 },
+	{ 0x330, 0x88, 0xa1a10002 },
+	{ 0x3ba, 0x8c, 0xa1a10003 },
+};
+
 #define SCSC_MARK_RUN_LEN	16
 #define SCSC_MARK_RUN_SLOT	0x200000
 static const u8 scsc_mark_run_stub[] = {
@@ -1088,6 +1110,33 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "marked and halted at 0x%x\n", mark_at);
+
+	return 0;
+}
+
+static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
+{
+	u8 stub[SCSC_MARK_RUN_LEN];
+	unsigned int i;
+	void *dram;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
+		const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
+
+		memcpy(stub, scsc_mark_run_stub, sizeof(scsc_mark_run_stub));
+		put_unaligned_le16(s->value & 0xffff, stub + 2);
+		put_unaligned_le16(s->value >> 16, stub + 6);
+		put_unaligned_le32(0xa20e0000ul + s->mbox,
+				   stub + sizeof(scsc_mark_run_stub));
+		memcpy(dram + s->off, stub, sizeof(stub));
+	}
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "mailbox probes installed\n");
 
 	return 0;
 }
@@ -1359,6 +1408,21 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
+
+	if (mark_mbox) {
+		unsigned int i;
+
+		for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
+			const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
+			u32 lo = readl(scsc->base_m4 + s->mbox);
+			u32 hi = readl(scsc->base_m4 + s->mbox + 0x10);
+
+			dev_info(scsc->dev,
+				 "mbox probe 0x%x: mbox+0x%02x = 0x%08x%s (shifted 0x%08x)\n",
+				 s->off, s->mbox, lo,
+				 lo == s->value ? " HIT" : "", hi);
+		}
+	}
 
 	if (mark_run) {
 		void *dram = scsc_wifibt_map(scsc);
@@ -1865,6 +1929,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to halt entry\n");
 		}
 
+	if (mark_mbox) {
+		ret = scsc_wifibt_mark_mbox(scsc);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to install mailbox probes\n");
+	}
+
 	if (stack_fix) {
 		ret = scsc_wifibt_stack_fix(scsc);
 		if (ret)
@@ -1889,7 +1960,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	}
 
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
-	    halt_entry || mark_at || mark_run || stack_fix) {
+	    halt_entry || mark_at || mark_run || mark_mbox || stack_fix) {
 		ret = scsc_wifibt_repair_crcs(scsc);
 		if (ret)
 			return dev_err_probe(dev, ret,
