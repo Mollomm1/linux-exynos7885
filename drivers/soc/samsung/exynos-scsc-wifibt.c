@@ -28,6 +28,7 @@
 #include <linux/regmap.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
+#include <linux/vmalloc.h>
 
 /* Mailbox (AP side, R4 bank) register offsets */
 #define SCSC_MBOX_INTMSR0	0x018 /* Interrupt mask status, upper half is FROM R4/M4 */
@@ -64,8 +65,33 @@
  * write-combined (uncached) like downstream's vmap WRITE_COMBINE, so
  * staged data is visible to the R4 and its writes are visible to us.
  * A cached mapping starves the R4 (stale DRAM) and blinds our reads.
+ * memremap WC refuses RAM that already has a cached linear alias, so
+ * build the mapping the downstream way instead.
  */
-#define SCSC_DRAM_MEMREMAP	MEMREMAP_WC
+static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
+{
+	struct page **pages;
+	void *vmem;
+	unsigned int i, npages = PAGE_ALIGN(scsc->mem_size) >> PAGE_SHIFT;
+
+	pages = kmalloc_array(npages, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return NULL;
+
+	for (i = 0; i < npages; i++)
+		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
+
+	vmem = vmap(pages, npages, VM_MAP,
+		    pgprot_writecombine(PAGE_KERNEL));
+	kfree(pages);
+
+	return vmem;
+}
+
+static void scsc_wifibt_unmap(const void *vmem)
+{
+	vunmap(vmem);
+}
 
 /* TZASC: allow the firmware block DRAM access (downstream SMC cmd) */
 #define SCSC_SMC_WLBT_TZASC	0x82000710
@@ -434,7 +460,7 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
+	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return -ENOMEM;
 
@@ -493,7 +519,7 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 	scsc_wifibt_stream_mem(dram, gdb_m4_out, SCSC_GDB_BUF_LEN, false);
 	scsc_wifibt_stream_mem(dram, mxlog, SCSC_MXLOG_BUF_LEN, true);
 
-	memunmap(dram);
+	scsc_wifibt_unmap(dram);
 
 	scsc->mxconf_off = mx_off;
 	dev_info(scsc->dev, "mxconf at DRAM offset 0x%x\n", mx_off);
@@ -539,7 +565,7 @@ static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
+	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return -ENOMEM;
 
@@ -548,11 +574,11 @@ static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 	if (memcmp(dram + off, scsc_probe_payload,
 		   sizeof(scsc_probe_payload))) {
 		dev_err(scsc->dev, "probe payload DRAM readback mismatch\n");
-		memunmap(dram);
+		scsc_wifibt_unmap(dram);
 		return -EIO;
 	}
 
-	memunmap(dram);
+	scsc_wifibt_unmap(dram);
 
 	scsc->sig_entry = probe_entry;
 	scsc->sig_mbox1 = 0;
@@ -574,7 +600,7 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
+	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return -ENOMEM;
 
@@ -597,10 +623,10 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 		      dram + scsc->fw_hdr_len) !=
 	    get_unaligned_le32(dram + SCSC_FW_CRC_OFF)) {
 		dev_err(scsc->dev, "patched CRC repair mismatch\n");
-		memunmap(dram);
+		scsc_wifibt_unmap(dram);
 		return -EIO;
 	}
-	memunmap(dram);
+	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "patched probe payload over image at 0x%x\n",
 		 off);
@@ -659,12 +685,12 @@ static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
 	void *dram;
 	u32 crc = 0;
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
+	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return 0;
 
 	crc = crc32_le(~0, dram, scsc->mem_size);
-	memunmap(dram);
+	scsc_wifibt_unmap(dram);
 
 	return crc;
 }
@@ -693,8 +719,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
 	if (r4_probe || patch_entry) {
-		void *dram = memremap(scsc->mem_start, scsc->mem_size,
-				      SCSC_DRAM_MEMREMAP);
+		void *dram = scsc_wifibt_map(scsc);
 		u32 off, found = 0;
 
 		if (!dram)
@@ -710,7 +735,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 				dev_info(scsc->dev, "marker at 0x%x\n", off);
 			found++;
 		}
-		memunmap(dram);
+		scsc_wifibt_unmap(dram);
 		dev_info(scsc->dev, "marker scan: %u hits\n", found);
 	}
 	dev_info(scsc->dev,
@@ -741,7 +766,7 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
+	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return;
 
@@ -752,7 +777,7 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 			dev_info(scsc->dev, "scan marker at 0x%x\n", off);
 		found++;
 	}
-	memunmap(dram);
+	scsc_wifibt_unmap(dram);
 	dev_info(scsc->dev, "scan markers: %u hits\n", found);
 
 	dev_info(scsc->dev,
@@ -786,7 +811,7 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 		return -EINVAL;
 	}
 
-	dram = memremap(scsc->mem_start, scsc->mem_size, SCSC_DRAM_MEMREMAP);
+	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return -ENOMEM;
 
@@ -794,7 +819,7 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 
 	if (memcmp(dram, fw->data, fw->size)) {
 		dev_err(scsc->dev, "firmware DRAM readback mismatch\n");
-		memunmap(dram);
+		scsc_wifibt_unmap(dram);
 		return -EIO;
 	}
 
@@ -804,7 +829,7 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 			 scsc->mem_size - fw->size);
 	}
 
-	memunmap(dram);
+	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "firmware staged in shared memory, verified\n");
 
