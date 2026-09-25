@@ -596,7 +596,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
-	if (r4_probe) {
+	if (r4_probe || patch_entry) {
 		void *dram = memremap(scsc->mem_start, scsc->mem_size,
 				      MEMREMAP_WB);
 		u32 mark;
@@ -817,7 +817,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (!signal_r4) {
 		dev_info(dev, "R4 signalling disabled by parameter\n");
 	} else {
-	if (r4_probe || patch_entry) {
+		if (r4_probe) {
 			ret = scsc_wifibt_r4_probe(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
