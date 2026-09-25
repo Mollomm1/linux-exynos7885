@@ -370,6 +370,30 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	if (ret)
 		return ret;
 
+	/* Fast sampling for 50 ms after release: whoever acts in the
+	 * first milliseconds (M4 status, mailbox signals) shows here.
+	 * Logs only changes.
+	 */
+	usleep_range(1000, 2000);
+	for (i = 0; i < 25; i++) {
+		static u32 lm0, lm1, lr0, lr1;
+		u32 m0 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
+		u32 m1 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(1));
+		u32 r0 = readl(scsc->base + SCSC_MBOX_ISSR(0));
+		u32 r1 = readl(scsc->base + SCSC_MBOX_ISSR(1));
+
+		if (i == 0 || m0 != lm0 || m1 != lm1 || r0 != lr0 ||
+		    r1 != lr1)
+			dev_info(scsc->dev, "t+%ums M4 %08x %08x R4 %08x %08x\n",
+				 2 + i * 2, m0, m1, r0, r1);
+
+		lm0 = m0;
+		lm1 = m1;
+		lr0 = r0;
+		lr1 = r1;
+		usleep_range(1500, 2500);
+	}
+
 	/* Immediate readback: the START bit auto-clears on UP, which takes
 	 * longer than this, so 1 here means the write landed.
 	 */
