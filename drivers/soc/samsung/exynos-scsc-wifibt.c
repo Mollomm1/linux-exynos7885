@@ -2616,13 +2616,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to stamp boot points\n");
 		}
 
-	if (mark_at) {
-		ret = scsc_wifibt_mark_at(scsc);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to mark at 0x%x\n",
-					     mark_at);
-	}
+		if (mark_at) {
+			ret = scsc_wifibt_mark_at(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to mark at 0x%x\n",
+						     mark_at);
+		}
 
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
 	    halt_entry || mark_at || mark_run || mark_count || mark_mbox ||
