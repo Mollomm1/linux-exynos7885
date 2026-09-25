@@ -41,8 +41,9 @@
 #define SCSC_MBOX_FW_FLAGS	0x0 /* Bit 0 = spin at start of CRT0 */
 
 /* Minimal mxconf (infrastructure config) for the R4. Layout mirrors the
- * downstream heap order: mxconf, management to-AP stream, management
- * from-AP stream. GDB/mxlog configs stay zero until those exist.
+ * downstream heap order with the downstream bit allocation: management,
+ * GDB R4, GDB M4, mxlog. The firmware reads buffer locations and
+ * signalling bits from here, so every stream gets real buffers.
  */
 #define SCSC_MXCONF_MAGIC		0x79828486
 #define SCSC_MXCONF_VER_MAJOR		0
@@ -50,6 +51,12 @@
 #define SCSC_MGMT_BUF_LEN		512
 #define SCSC_MGMT_PACKET_SIZE		8
 #define SCSC_MGMT_NUM_PACKETS		(SCSC_MGMT_BUF_LEN / SCSC_MGMT_PACKET_SIZE)
+#define SCSC_GDB_BUF_LEN		2048
+#define SCSC_GDB_PACKET_SIZE		4
+#define SCSC_GDB_NUM_PACKETS		(SCSC_GDB_BUF_LEN / SCSC_GDB_PACKET_SIZE)
+#define SCSC_MXLOG_BUF_LEN		16384
+#define SCSC_MXLOG_PACKET_SIZE		4
+#define SCSC_MXLOG_NUM_PACKETS		(SCSC_MXLOG_BUF_LEN / SCSC_MXLOG_PACKET_SIZE)
 #define SCSC_MXCONF_SIZE		162
 #define SCSC_STREAMCONF_SIZE		22
 
@@ -364,34 +371,47 @@ static int scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 	return 0;
 }
 
-static void scsc_wifibt_stream_conf(u8 *p, u32 buf, u32 ridx, u32 widx,
+static void scsc_wifibt_stream_conf(u8 *p, u32 buf, u32 num, u32 pktsize,
+				    u32 ridx, u32 widx,
 				    u8 read_bit, u8 write_bit)
 {
 	put_unaligned_le32(buf, p + 0);
-	put_unaligned_le32(SCSC_MGMT_NUM_PACKETS, p + 4);
-	put_unaligned_le32(SCSC_MGMT_PACKET_SIZE, p + 8);
+	put_unaligned_le32(num, p + 4);
+	put_unaligned_le32(pktsize, p + 8);
 	put_unaligned_le32(ridx, p + 12);
 	put_unaligned_le32(widx, p + 16);
 	p[20] = read_bit;
 	p[21] = write_bit;
 }
 
-/* Lay out a minimal mxconf plus real management-stream buffers in the heap
+static void scsc_wifibt_stream_mem(u8 *dram, u32 buf, u32 len, bool fill_ff)
+{
+	memset(dram + buf, fill_ff ? 0xff : 0, len);
+	put_unaligned_le32(0, dram + buf + len);
+	put_unaligned_le32(0, dram + buf + len + 4);
+}
+
+/* Lay out a full mxconf plus all transport stream buffers in the heap
  * area (right after the firmware runtime), mirroring the downstream heap
- * order. Returns the mxconf offset (R4-relative ref for MBOX_1).
+ * order and bit allocation. Returns the mxconf offset (R4-relative ref
+ * for MBOX_1).
  */
 static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 {
 	u8 *dram, *mxconf;
-	u32 heap, to_ap, from_ap, end;
+	u32 heap, to_ap, from_ap;
+	u32 gdb_r4_in, gdb_r4_out, gdb_m4_in, gdb_m4_out, mxlog, end;
 	u32 mx_off = ALIGN(scsc->fw_runtime, 4);
 
 	heap = mx_off + SCSC_MXCONF_SIZE;
 	to_ap = ALIGN(heap, 4);
-	/* to-AP buffer + read/write indices */
 	from_ap = to_ap + SCSC_MGMT_BUF_LEN + 8;
-	/* from-AP buffer + read/write indices */
-	end = from_ap + SCSC_MGMT_BUF_LEN + 8;
+	gdb_r4_in = from_ap + SCSC_MGMT_BUF_LEN + 8;
+	gdb_r4_out = gdb_r4_in + SCSC_GDB_BUF_LEN + 8;
+	gdb_m4_in = gdb_r4_out + SCSC_GDB_BUF_LEN + 8;
+	gdb_m4_out = gdb_m4_in + SCSC_GDB_BUF_LEN + 8;
+	mxlog = gdb_m4_out + SCSC_GDB_BUF_LEN + 8;
+	end = mxlog + SCSC_MXLOG_BUF_LEN + 8;
 
 	if (end > scsc->mem_size) {
 		dev_err(scsc->dev, "mxconf layout 0x%x exceeds window 0x%zx\n",
@@ -408,22 +428,55 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 	put_unaligned_le32(SCSC_MXCONF_MAGIC, mxconf + 0);
 	put_unaligned_le16(SCSC_MXCONF_VER_MAJOR, mxconf + 4);
 	put_unaligned_le16(SCSC_MXCONF_VER_MINOR, mxconf + 6);
-	/* Management to-AP stream: read=fromhost 1, write=tohost 0. */
-	scsc_wifibt_stream_conf(mxconf + 8, to_ap, to_ap + SCSC_MGMT_BUF_LEN,
+	/* Management to-AP (IN): read=fromhost 1, write=tohost 0. */
+	scsc_wifibt_stream_conf(mxconf + 8, to_ap,
+				SCSC_MGMT_NUM_PACKETS, SCSC_MGMT_PACKET_SIZE,
+				to_ap + SCSC_MGMT_BUF_LEN,
 				to_ap + SCSC_MGMT_BUF_LEN + 4, 1, 0);
-	/* Management from-AP stream: read=tohost 1, write=fromhost 2. */
+	/* Management from-AP (OUT): read=tohost 1, write=fromhost 2. */
 	scsc_wifibt_stream_conf(mxconf + 8 + SCSC_STREAMCONF_SIZE, from_ap,
+				SCSC_MGMT_NUM_PACKETS, SCSC_MGMT_PACKET_SIZE,
 				from_ap + SCSC_MGMT_BUF_LEN,
 				from_ap + SCSC_MGMT_BUF_LEN + 4, 1, 2);
-	/* GDB R4/M4 and mxlog configs stay zero for now. */
+	/* GDB R4 to-AP (IN): read=fromhost 3, write=tohost 2. */
+	scsc_wifibt_stream_conf(mxconf + 8 + 2 * SCSC_STREAMCONF_SIZE,
+				gdb_r4_in,
+				SCSC_GDB_NUM_PACKETS, SCSC_GDB_PACKET_SIZE,
+				gdb_r4_in + SCSC_GDB_BUF_LEN,
+				gdb_r4_in + SCSC_GDB_BUF_LEN + 4, 3, 2);
+	/* GDB R4 from-AP (OUT): read=tohost 3, write=fromhost 0. */
+	scsc_wifibt_stream_conf(mxconf + 8 + 3 * SCSC_STREAMCONF_SIZE,
+				gdb_r4_out,
+				SCSC_GDB_NUM_PACKETS, SCSC_GDB_PACKET_SIZE,
+				gdb_r4_out + SCSC_GDB_BUF_LEN,
+				gdb_r4_out + SCSC_GDB_BUF_LEN + 4, 3, 0);
+	/* GDB M4 to-AP (IN): read=fromhost(M4) 1, write=tohost 4. */
+	scsc_wifibt_stream_conf(mxconf + 8 + 4 * SCSC_STREAMCONF_SIZE,
+				gdb_m4_in,
+				SCSC_GDB_NUM_PACKETS, SCSC_GDB_PACKET_SIZE,
+				gdb_m4_in + SCSC_GDB_BUF_LEN,
+				gdb_m4_in + SCSC_GDB_BUF_LEN + 4, 1, 4);
+	/* GDB M4 from-AP (OUT): read=tohost 5, write=fromhost(M4) 0. */
+	scsc_wifibt_stream_conf(mxconf + 8 + 5 * SCSC_STREAMCONF_SIZE,
+				gdb_m4_out,
+				SCSC_GDB_NUM_PACKETS, SCSC_GDB_PACKET_SIZE,
+				gdb_m4_out + SCSC_GDB_BUF_LEN,
+				gdb_m4_out + SCSC_GDB_BUF_LEN + 4, 5, 0);
+	/* Mxlog (IN): read=fromhost 4, write=tohost 6. */
+	scsc_wifibt_stream_conf(mxconf + 8 + 6 * SCSC_STREAMCONF_SIZE,
+				mxlog,
+				SCSC_MXLOG_NUM_PACKETS, SCSC_MXLOG_PACKET_SIZE,
+				mxlog + SCSC_MXLOG_BUF_LEN,
+				mxlog + SCSC_MXLOG_BUF_LEN + 4, 4, 6);
 
-	/* Buffers and indices. The to-AP buffer starts all-ones downstream. */
-	memset(dram + to_ap, 0xff, SCSC_MGMT_BUF_LEN);
-	memset(dram + from_ap, 0, SCSC_MGMT_BUF_LEN);
-	put_unaligned_le32(0, dram + to_ap + SCSC_MGMT_BUF_LEN);
-	put_unaligned_le32(0, dram + to_ap + SCSC_MGMT_BUF_LEN + 4);
-	put_unaligned_le32(0, dram + from_ap + SCSC_MGMT_BUF_LEN);
-	put_unaligned_le32(0, dram + from_ap + SCSC_MGMT_BUF_LEN + 4);
+	/* Buffers and indices. IN-direction buffers start all-ones. */
+	scsc_wifibt_stream_mem(dram, to_ap, SCSC_MGMT_BUF_LEN, true);
+	scsc_wifibt_stream_mem(dram, from_ap, SCSC_MGMT_BUF_LEN, false);
+	scsc_wifibt_stream_mem(dram, gdb_r4_in, SCSC_GDB_BUF_LEN, true);
+	scsc_wifibt_stream_mem(dram, gdb_r4_out, SCSC_GDB_BUF_LEN, false);
+	scsc_wifibt_stream_mem(dram, gdb_m4_in, SCSC_GDB_BUF_LEN, true);
+	scsc_wifibt_stream_mem(dram, gdb_m4_out, SCSC_GDB_BUF_LEN, false);
+	scsc_wifibt_stream_mem(dram, mxlog, SCSC_MXLOG_BUF_LEN, true);
 
 	memunmap(dram);
 
