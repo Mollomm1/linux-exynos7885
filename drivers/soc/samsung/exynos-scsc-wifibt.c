@@ -950,6 +950,16 @@ static bool mark_run;
 module_param(mark_run, bool, 0644);
 MODULE_PARM_DESC(mark_run, "Stamp three points of the boot in shared DRAM and continue");
 
+/* Counting variant: bump a DRAM counter instead of stamping, so a
+ * restart loop (the R4 kept coming back to the same point) shows up as
+ * a count above one.
+ */
+static bool mark_count;
+module_param(mark_count, bool, 0644);
+MODULE_PARM_DESC(mark_count, "Count R4 passes over 0x330 in shared DRAM");
+#define SCSC_MARK_COUNT_OFF	0x330
+#define SCSC_MARK_COUNT_SLOT	0x200000
+
 static const struct scsc_mark_site scsc_mark_run_sites[] = {
 	{ 0x330, 0x200000 },
 	{ 0x382, 0x280000 },
@@ -1280,6 +1290,15 @@ static int scsc_wifibt_stack_fix(struct scsc_wifibt *scsc)
 
 static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 {
+	static const u8 count_stub[] = {
+		0x02, 0x4a,		/* ldr r2, [pc, #8] */
+		0x13, 0x68,		/* ldr r3, [r2] */
+		0x01, 0x33,		/* adds r3, #1 */
+		0x13, 0x60,		/* str r3, [r2] */
+		0x02, 0xe7,		/* b .+8 */
+		0x00, 0xbf,		/* nop */
+		0x00, 0x00, 0x00, 0x00,	/* address */
+	};
 	u8 stub[SCSC_MARK_RUN_LEN];
 	unsigned int i;
 	void *dram;
@@ -1287,6 +1306,18 @@ static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return -ENOMEM;
+
+	if (mark_count) {
+		memcpy(stub, count_stub, sizeof(count_stub));
+		put_unaligned_le32(0x80000000u + SCSC_MARK_COUNT_SLOT,
+				   stub + sizeof(count_stub) - 4);
+		put_unaligned_le32(0, dram + SCSC_MARK_COUNT_SLOT);
+		memcpy(dram + SCSC_MARK_COUNT_OFF, stub, sizeof(stub));
+		scsc_wifibt_unmap(dram);
+		dev_info(scsc->dev, "counting passes at 0x%x\n",
+			 SCSC_MARK_COUNT_OFF);
+		return 0;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(scsc_mark_run_sites); i++) {
 		const struct scsc_mark_site *s = &scsc_mark_run_sites[i];
@@ -1588,7 +1619,11 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			scsc_wifibt_unmap(dram);
 		}
 
-		if (abox_win) {
+		if (mark_count) {
+			dev_info(scsc->dev, "count 0x%x passes: %u\n",
+				 SCSC_MARK_COUNT_OFF,
+				 readl(dram + SCSC_MARK_COUNT_SLOT));
+		} else if (abox_win) {
 			void __iomem *abox = ioremap(SCSC_ABOX_BASE, 0x1000);
 
 			if (abox) {
@@ -2118,7 +2153,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 					     "failed to fix early stack\n");
 	}
 
-		if (mark_run) {
+		if (mark_run || mark_count) {
 			ret = scsc_wifibt_mark_run(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
@@ -2134,7 +2169,8 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	}
 
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
-	    halt_entry || mark_at || mark_run || mark_mbox || stack_fix ||
+	    halt_entry || mark_at || mark_run || mark_count || mark_mbox ||
+	    stack_fix ||
 	    skip_regions) {
 		ret = scsc_wifibt_repair_crcs(scsc);
 		if (ret)
