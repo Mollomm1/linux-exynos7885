@@ -223,6 +223,15 @@ static bool open_wins;
 module_param(open_wins, bool, 0644);
 MODULE_PARM_DESC(open_wins, "Write all-ones to the BAAW access windows before release");
 
+/* The reset value of the MIF access control is 0x55555555, which reads
+ * as "fetch works, stores do not" from the firmware's point of view.
+ * Sweep the value to find the encoding that grants the block write
+ * access to the shared window.
+ */
+static unsigned int mif_win;
+module_param(mif_win, uint, 0644);
+MODULE_PARM_DESC(mif_win, "Value for the MIF access control registers (0 = leave reset value)");
+
 /* Low-power controls touched by the power-off path. Snapshotted at
  * probe (cold defaults) and restored on power-on: releasing without
  * them leaves a warm block wedged with START held.
@@ -1229,6 +1238,7 @@ static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 {
 	struct arm_smccc_res res;
+	unsigned int tmp;
 	int i, ret;
 
 	/* Let the firmware block access DRAM (ignored on failure,
@@ -1298,6 +1308,21 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	if (ret)
 		dev_warn(scsc->dev, "failed to clear BOOT_TEST_RST_CFG: %d\n",
 			 ret);
+
+	if (mif_win) {
+		ret = regmap_write(scsc->pmureg, SCSC_PMU_MIF_WIN0, mif_win);
+		if (ret)
+			dev_warn(scsc->dev, "MIF_WIN0 write failed: %d\n",
+				 ret);
+		ret = regmap_write(scsc->pmureg, SCSC_PMU_MIF_WIN1, mif_win);
+		if (ret)
+			dev_warn(scsc->dev, "MIF_WIN1 write failed: %d\n",
+				 ret);
+		regmap_read(scsc->pmureg, SCSC_PMU_MIF_WIN0, &i);
+		regmap_read(scsc->pmureg, SCSC_PMU_MIF_WIN1, &tmp);
+		dev_info(scsc->dev, "MIF access control set to 0x%x: %08x %08x\n",
+			 mif_win, i, tmp);
+	}
 
 	if (open_wins) {
 		static const unsigned int wins[] = {
