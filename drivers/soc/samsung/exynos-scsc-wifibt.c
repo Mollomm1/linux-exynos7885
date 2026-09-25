@@ -1820,11 +1820,11 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
 	    halt_entry || mark_at || mark_run) {
-			ret = scsc_wifibt_repair_crcs(scsc);
-			if (ret)
-				return dev_err_probe(dev, ret,
-						     "failed to repair CRCs\n");
-		}
+		ret = scsc_wifibt_repair_crcs(scsc);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to repair CRCs\n");
+	}
 
 		scsc_wifibt_signal(scsc);
 	}
