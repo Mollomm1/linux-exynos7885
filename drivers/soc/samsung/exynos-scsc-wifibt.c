@@ -627,6 +627,14 @@ static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
 	/* Revoke the shared-memory window. */
 	regmap_write(scsc->pmureg, SCSC_PMU_MEM_CONFIG0, 0);
 	regmap_write(scsc->pmureg, SCSC_PMU_MEM_CONFIG1, 0);
+
+	/* Full power-down so the next probe gets a real PWRON edge instead
+	 * of a wedged warm re-release (downstream reset case 1).
+	 */
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+				 SCSC_PMU_WIFI_PWRON, 0);
+	if (ret)
+		dev_warn(scsc->dev, "failed to clear PWRON: %d\n", ret);
 }
 
 static irqreturn_t scsc_wifibt_wdog_irq(int irq, void *data)
