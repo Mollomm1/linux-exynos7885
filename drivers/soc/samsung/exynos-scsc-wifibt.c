@@ -1618,14 +1618,15 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 					saved[j] = readl(dram + SCSC_PANIC_OFF + 4 * j);
 			}
 
-			dev_info(scsc->dev,
-				 "fine %3d m4 %08x r4 %08x r4sr %08x ver %08x %08x %08x %08x %08x %08x\n",
-				 i, m4, r4, r4sr, ver,
-				 dram ? readl(dram + SCSC_PANIC_OFF + 4) : 0,
-				 dram ? readl(dram + 0x160840) : 0,
-				 dram ? readl(dram + 0x160844) : 0,
-				 dram ? readl(dram + 0x160848) : 0,
-				 dram ? readl(dram + 0x16084c) : 0);
+			if (i % 10 == 0)
+				dev_info(scsc->dev,
+					 "fine %3d m4 %08x r4 %08x r4sr %08x ver %08x %08x %08x %08x %08x %08x\n",
+					 i, m4, r4, r4sr, ver,
+					 dram ? readl(dram + SCSC_PANIC_OFF + 4) : 0,
+					 dram ? readl(dram + 0x160840) : 0,
+					 dram ? readl(dram + 0x160844) : 0,
+					 dram ? readl(dram + 0x160848) : 0,
+					 dram ? readl(dram + 0x16084c) : 0);
 			udelay(fine_us);
 		}
 		if (dram)
