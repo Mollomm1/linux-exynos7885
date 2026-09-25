@@ -891,6 +891,16 @@ static unsigned int mark_run;
 module_param(mark_run, uint, 0644);
 MODULE_PARM_DESC(mark_run, "Stamp DRAM at this firmware offset and continue (0 = off)");
 
+/* The entry code zeroes the stack pointer five times before it sets one
+ * up, so any call that pushes during early boot lands at 0xfffffffc.
+ * Point it at the top of the 32K ATCM instead (the firmware's own map
+ * calls 0x0000-0x7fff ATCM), which is where the rest of the boot keeps
+ * its stack.
+ */
+static bool stack_fix;
+module_param(stack_fix, bool, 0644);
+MODULE_PARM_DESC(stack_fix, "Give the early boot a stack pointer at the ATCM top");
+
 #define SCSC_MARK_RUN_LEN	16
 #define SCSC_MARK_RUN_SLOT	0x200000
 static const u8 scsc_mark_run_stub[] = {
@@ -1069,6 +1079,29 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "marked and halted at 0x%x\n", mark_at);
+
+	return 0;
+}
+
+static int scsc_wifibt_stack_fix(struct scsc_wifibt *scsc)
+{
+	void *dram;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	if (memcmp(dram + 0x1b4, "\x4f\xf0\x00\x00", 4)) {
+		dev_err(scsc->dev, "stack patch site mismatch, not patching\n");
+		scsc_wifibt_unmap(dram);
+		return -EINVAL;
+	}
+
+	/* mov.w r0, #0x800: stack top of the 32K ATCM. */
+	memcpy(dram + 0x1b4, "\x4f\xf4\x00\x60", 4);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "early boot stack set to 0x800\n");
 
 	return 0;
 }
@@ -1802,6 +1835,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to halt entry\n");
 		}
 
+	if (stack_fix) {
+		ret = scsc_wifibt_stack_fix(scsc);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to fix early stack\n");
+	}
+
 	if (mark_run) {
 		ret = scsc_wifibt_mark_run(scsc);
 		if (ret)
@@ -1819,7 +1859,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	}
 
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
-	    halt_entry || mark_at || mark_run) {
+	    halt_entry || mark_at || mark_run || stack_fix) {
 		ret = scsc_wifibt_repair_crcs(scsc);
 		if (ret)
 			return dev_err_probe(dev, ret,
