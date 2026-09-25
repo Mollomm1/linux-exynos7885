@@ -922,15 +922,19 @@ MODULE_PARM_DESC(mark_mbox, "Stamp the M4 mailbox from three early-boot points")
 #define SCSC_MARK_MBOX_SITES	3
 struct scsc_mark_site {
 	u32	off;		/* firmware offset of the probe */
-	u32	mbox;		/* M4 mailbox register offset */
 	u32	value;
 };
 
+/* Sequential stamps into one M4 mailbox word: the last value to land
+ * says how far the R4 got. Each probe keeps r0 and r1, so the code
+ * around it still runs (with stack_fix enabled).
+ */
 static const struct scsc_mark_site scsc_mark_mbox_sites[] = {
-	{ 0x236, 0x84, 0xa1a10001 },
-	{ 0x330, 0x88, 0xa1a10002 },
-	{ 0x3ba, 0x8c, 0xa1a10003 },
+	{ 0x236, 0xa1a10001 },
+	{ 0x2ae, 0xa1a10002 },
+	{ 0x30e, 0xa1a10003 },
 };
+#define SCSC_MARK_MBOX_REG	0x8c
 
 #define SCSC_MARK_RUN_LEN	16
 #define SCSC_MARK_RUN_SLOT	0x200000
@@ -1116,7 +1120,15 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 
 static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
 {
-	u8 stub[SCSC_MARK_RUN_LEN];
+	u8 stub[] = {
+		0x03, 0xb4,			/* push {r0, r1} */
+		0x03, 0x4a,			/* ldr r2, [pc, #12] */
+		0x4a, 0xf2, 0x00, 0x00,		/* movw r3, #lo */
+		0xca, 0xf2, 0x00, 0x00,		/* movt r3, #hi */
+		0x13, 0x60,			/* str r3, [r2] */
+		0x03, 0xbc,			/* pop {r0, r1} */
+		0x00, 0x00, 0x00, 0x00,		/* address */
+	};
 	unsigned int i;
 	void *dram;
 
@@ -1127,16 +1139,15 @@ static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
 	for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
 		const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
 
-		memcpy(stub, scsc_mark_run_stub, sizeof(scsc_mark_run_stub));
-		put_unaligned_le16(s->value & 0xffff, stub + 2);
-		put_unaligned_le16(s->value >> 16, stub + 6);
-		put_unaligned_le32(0xa20e0000ul + s->mbox,
-				   stub + sizeof(scsc_mark_run_stub));
+		put_unaligned_le16(s->value & 0xffff, stub + 6);
+		put_unaligned_le16(s->value >> 16, stub + 10);
 		memcpy(dram + s->off, stub, sizeof(stub));
 	}
 	scsc_wifibt_unmap(dram);
 
-	dev_info(scsc->dev, "mailbox probes installed\n");
+	dev_info(scsc->dev, "mailbox probes installed at 0x%x, 0x%x, 0x%x\n",
+		 scsc_mark_mbox_sites[0].off, scsc_mark_mbox_sites[1].off,
+		 scsc_mark_mbox_sites[2].off);
 
 	return 0;
 }
@@ -1410,18 +1421,14 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
 	if (mark_mbox) {
-		unsigned int i;
+		u32 val = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG);
 
-		for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
-			const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
-			u32 lo = readl(scsc->base_m4 + s->mbox);
-			u32 hi = readl(scsc->base_m4 + s->mbox + 0x10);
-
-			dev_info(scsc->dev,
-				 "mbox probe 0x%x: mbox+0x%02x = 0x%08x%s (shifted 0x%08x)\n",
-				 s->off, s->mbox, lo,
-				 lo == s->value ? " HIT" : "", hi);
-		}
+		dev_info(scsc->dev,
+			 "mbox probe word 0x%08x: %s\n", val,
+			 val == scsc_mark_mbox_sites[0].value ? "reached 0x236" :
+			 val == scsc_mark_mbox_sites[1].value ? "reached 0x2ae" :
+			 val == scsc_mark_mbox_sites[2].value ? "reached 0x30e" :
+			 "no probe landed");
 	}
 
 	if (mark_run) {
