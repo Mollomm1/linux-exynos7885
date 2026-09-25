@@ -599,31 +599,21 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 
 	return 0;
 }
-
 static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
-{	unsigned int val;
+{
+	unsigned int val;
 	int ret;
 
-	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_RESET_AHEAD,
-				 SCSC_PMU_SYS_PWR_CFG_2, 0);
-	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_CLEANY_BUS,
-				  SCSC_PMU_SYS_PWR_CFG, 0);
-	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_LOGIC_RESET,
-				  SCSC_PMU_SYS_PWR_CFG_2, 0);
-	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_TCXO_GATE,
-				  SCSC_PMU_SYS_PWR_CFG, 0);
-	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_DISABLE_ISO,
-				  SCSC_PMU_SYS_PWR_CFG, SCSC_PMU_SYS_PWR_CFG);
-	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_RESET_ISO,
-				  SCSC_PMU_SYS_PWR_CFG, 0);
-	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_CFG,
-				  SCSC_PMU_SYS_PWR_CFG_16, 0);
-	ret |= regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
-				  SCSC_PMU_WIFI_RESET_SET,
-				  SCSC_PMU_WIFI_RESET_SET);
+	/* Minimal shutdown: hold the cores, revoke the window, drop power.
+	 * The suspend-time low-power controls are deliberately left alone:
+	 * gating them here wedges warm re-release, and nothing on the
+	 * start path restores them.
+	 */
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+				 SCSC_PMU_WIFI_RESET_SET,
+				 SCSC_PMU_WIFI_RESET_SET);
 	if (ret) {
-		dev_warn(scsc->dev, "power-off sequencing write failed: %d\n",
-			 ret);
+		dev_warn(scsc->dev, "failed to hold reset: %d\n", ret);
 		return;
 	}
 
