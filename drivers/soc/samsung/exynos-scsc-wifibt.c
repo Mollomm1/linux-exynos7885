@@ -906,6 +906,17 @@ static bool skip_mpu;
 module_param(skip_mpu, bool, 0644);
 MODULE_PARM_DESC(skip_mpu, "Replace the MPU setup block with NOPs");
 
+/* The region-configuration block that follows the M4 handshake (the
+ * R4 describing 0x80000000/8 MB as its DRAM region). A store injected
+ * just before it lands, so the region descriptors are what take the
+ * shared window away afterwards.
+ */
+#define SCSC_REGION_OFF		0x330
+#define SCSC_REGION_LEN		0x4e
+static bool skip_regions;
+module_param(skip_regions, bool, 0644);
+MODULE_PARM_DESC(skip_regions, "NOP the R4 DRAM/MPU region descriptors");
+
 /* Halt the R4 at its first instruction (branch to self at the entry).
  * If M4 and the watchdog still appear, they come from ROM or power
  * logic without any image execution; if they vanish, image execution
@@ -1093,6 +1104,25 @@ static int scsc_wifibt_skip_mpu(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "nopped mpu setup block\n");
+
+	return 0;
+}
+
+static int scsc_wifibt_skip_regions(struct scsc_wifibt *scsc)
+{
+	void *dram;
+	unsigned int i;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	for (i = 0; i < SCSC_REGION_LEN; i += 2)
+		put_unaligned_le16(0xbf00, dram + SCSC_REGION_OFF + i);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "nopped region descriptors at 0x%x\n",
+		 SCSC_REGION_OFF);
 
 	return 0;
 }
@@ -2077,7 +2107,8 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	}
 
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
-	    halt_entry || mark_at || mark_run || mark_mbox || stack_fix) {
+	    halt_entry || mark_at || mark_run || mark_mbox || stack_fix ||
+	    skip_regions) {
 		ret = scsc_wifibt_repair_crcs(scsc);
 		if (ret)
 			return dev_err_probe(dev, ret,
