@@ -696,6 +696,59 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
 }
 
+static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
+{
+	unsigned int stat, seq, status;
+	void *dram;
+	u32 off, found = 0;
+	u32 crc;
+
+	crc = scsc_wifibt_dram_crc(scsc);
+	regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &stat);
+	regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &seq);
+	status = readl(scsc->base + SCSC_MBOX_INTMSR0) >> 16;
+
+	dev_info(scsc->dev,
+		 "scan: DRAM crc 0x%08x (probe 0x%08x) %s, STAT 0x%08x, seq 0x%02x, status 0x%04x, IRQs %d, WDOG %d\n",
+		 crc, scsc->dram_crc,
+		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
+		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
+		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
+
+	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	if (!dram)
+		return;
+
+	for (off = 0; off < scsc->mem_size; off += 4) {
+		if (readl(dram + off) != SCSC_PROBE_MARKER)
+			continue;
+		if (found < 8)
+			dev_info(scsc->dev, "scan marker at 0x%x\n", off);
+		found++;
+	}
+	memunmap(dram);
+	dev_info(scsc->dev, "scan markers: %u hits\n", found);
+
+	dev_info(scsc->dev,
+		 "scan M4 status 0x%04x, M4 regs %08x %08x %08x %08x\n",
+		 readl(scsc->base_m4 + SCSC_MBOX_INTMSR0) >> 16,
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(0)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(1)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
+		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
+}
+
+static ssize_t scan_store(struct device *dev, struct device_attribute *attr,
+			  const char *buf, size_t count)
+{
+	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
+
+	scsc_wifibt_scan(scsc);
+
+	return count;
+}
+static DEVICE_ATTR_WO(scan);
+
 static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 				const struct firmware *fw)
 {
@@ -799,6 +852,10 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	atomic_set(&scsc->wdog_count, 0);
 	INIT_DELAYED_WORK(&scsc->check_work, scsc_wifibt_check_work);
 	platform_set_drvdata(pdev, scsc);
+
+	ret = device_create_file(dev, &dev_attr_scan);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to create scan file\n");
 
 	/* R4 mailbox bank (index 0); M4 bank (index 1) is read-only for now. */
 	scsc->base = devm_platform_ioremap_resource(pdev, 0);
@@ -940,6 +997,7 @@ static void scsc_wifibt_remove(struct platform_device *pdev)
 {
 	struct scsc_wifibt *scsc = platform_get_drvdata(pdev);
 
+	device_remove_file(&pdev->dev, &dev_attr_scan);
 	cancel_delayed_work_sync(&scsc->check_work);
 	scsc_wifibt_power_off(scsc);
 }
