@@ -917,6 +917,16 @@ static bool skip_regions;
 module_param(skip_regions, bool, 0644);
 MODULE_PARM_DESC(skip_regions, "NOP the R4 DRAM/MPU region descriptors");
 
+/* The last thing the R4 gets through is the vector-table region
+ * (0xffff0000, where the firmware's own map puts the VIC), configured
+ * just before its first stack push.
+ */
+#define SCSC_VECREGION_OFF	0x64c
+#define SCSC_VECREGION_LEN	0x24
+static bool skip_vecregion;
+module_param(skip_vecregion, bool, 0644);
+MODULE_PARM_DESC(skip_vecregion, "NOP the R4 vector-table MPU region setup");
+
 /* Halt the R4 at its first instruction (branch to self at the entry).
  * If M4 and the watchdog still appear, they come from ROM or power
  * logic without any image execution; if they vanish, image execution
@@ -1142,6 +1152,25 @@ static int scsc_wifibt_skip_regions(struct scsc_wifibt *scsc)
 
 	dev_info(scsc->dev, "nopped region descriptors at 0x%x\n",
 		 SCSC_REGION_OFF);
+
+	return 0;
+}
+
+static int scsc_wifibt_skip_vecregion(struct scsc_wifibt *scsc)
+{
+	void *dram;
+	unsigned int i;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	for (i = 0; i < SCSC_VECREGION_LEN; i += 2)
+		put_unaligned_le16(0xbf00, dram + SCSC_VECREGION_OFF + i);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "nopped vector region at 0x%x\n",
+		 SCSC_VECREGION_OFF);
 
 	return 0;
 }
@@ -2130,6 +2159,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to skip regions\n");
 		}
 
+		if (skip_vecregion) {
+			ret = scsc_wifibt_skip_vecregion(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to skip vec region\n");
+		}
+
 		if (mark_mbox) {
 			ret = scsc_wifibt_mark_mbox(scsc);
 		if (ret)
@@ -2162,7 +2198,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
 	    halt_entry || mark_at || mark_run || mark_count || mark_mbox ||
 	    stack_fix ||
-	    skip_regions) {
+	    skip_regions || skip_vecregion) {
 		ret = scsc_wifibt_repair_crcs(scsc);
 		if (ret)
 			return dev_err_probe(dev, ret,
