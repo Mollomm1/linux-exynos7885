@@ -1431,6 +1431,30 @@ static int scsc_wifibt_nop_window(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+/* The literal the vector-region config writes into MPU_RLAR (0x17 enables
+ * region 7).  Worth overriding: if the MPU really is on, that enable is
+ * what would stop the R4, and the preceding isb is exactly where it
+ * would take effect.
+ */
+static unsigned int vec_rlar;
+module_param(vec_rlar, uint, 0644);
+MODULE_PARM_DESC(vec_rlar, "Override the vector-region RLAR literal at 0x790");
+
+static int scsc_wifibt_vec_rlar(struct scsc_wifibt *scsc)
+{
+	void *dram = scsc_wifibt_map(scsc);
+
+	if (!dram)
+		return -ENOMEM;
+
+	put_unaligned_le32(vec_rlar, dram + 0x790);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "vector region RLAR literal now 0x%08x\n", vec_rlar);
+
+	return 0;
+}
+
 static int scsc_wifibt_vecregion_rasr(struct scsc_wifibt *scsc)
 {
 	void *dram;
@@ -2674,6 +2698,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			if (ret)
 				return dev_err_probe(dev, ret,
 						     "failed to nop window\n");
+		}
+
+		if (vec_rlar) {
+			ret = scsc_wifibt_vec_rlar(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to set vec rlar\n");
 		}
 
 		if (vecregion_rasr) {
