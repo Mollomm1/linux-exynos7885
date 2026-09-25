@@ -36,7 +36,7 @@
 #define SCSC_MBOX_INTCR0	0x00c /* Interrupt clear, write 1 to clear */
 #define SCSC_MBOX_IS_VERSION	0x050 /* Firmware block version information */
 #define SCSC_MBOX_ISSR_BASE	0x080 /* Shared registers, 4 bytes each */
-#define SCSC_MARK_MBOX_REG	0x08c /* M4 shared register used by the early-boot probe */
+#define SCSC_MARK_MBOX_REG	0x080 /* M4 MBOX0: the one register the R4 writes for sure */
 #define SCSC_MBOX_ISSR(i)	(SCSC_MBOX_ISSR_BASE + 4 * (i))
 
 /* Full mailbox control block offsets (beyond INTMSR/INTCR/version). */
@@ -411,19 +411,21 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	 */
 	usleep_range(100, 300);
 	for (i = 0; i < 200; i++) {
-		static u32 lm0, lm1, lr0, lr1, lp;
+		static u32 lm0, lm1, lr0, lr1, lp, lpa;
 		u32 m0 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
 		u32 m1 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(1));
 		u32 r0 = readl(scsc->base + SCSC_MBOX_ISSR(0));
 		u32 r1 = readl(scsc->base + SCSC_MBOX_ISSR(1));
 		u32 p = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG);
+		u32 pa = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG + 0x10);
 
 		if (i == 0 || m0 != lm0 || m1 != lm1 || r0 != lr0 ||
-		    r1 != lr1 || p != lp)
+		    r1 != lr1 || p != lp || pa != lpa)
 			dev_info(scsc->dev,
-				 "t+%ums M4 %08x %08x R4 %08x %08x probe %08x\n",
-				 2 + i * 2, m0, m1, r0, r1, p);
+				 "t+%ums M4 %08x %08x R4 %08x %08x probe %08x/%08x\n",
+				 2 + i * 2, m0, m1, r0, r1, p, pa);
 
+		lpa = pa;
 		lp = p;
 		lm0 = m0;
 		lm1 = m1;
@@ -934,9 +936,9 @@ struct scsc_mark_site {
  * around it still runs (with stack_fix enabled).
  */
 static const struct scsc_mark_site scsc_mark_mbox_sites[] = {
-	{ 0x1b4, 0xa1a10001 },
-	{ 0x1be, 0xa1a10002 },
-	{ 0x1c4, 0xa1a10003 },
+	{ 0x212, 0xa1a10001 },
+	{ 0x236, 0xa1a10002 },
+	{ 0x2ae, 0xa1a10003 },
 };
 
 #define SCSC_MARK_RUN_LEN	16
@@ -1442,12 +1444,13 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 
 	if (mark_mbox) {
 		u32 val = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG);
+		u32 val2 = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG + 0x10);
 
 		dev_info(scsc->dev,
-			 "mbox probe word 0x%08x: %s\n", val,
-			 val == scsc_mark_mbox_sites[0].value ? "reached 0x1b4" :
-			 val == scsc_mark_mbox_sites[1].value ? "reached 0x1be" :
-			 val == scsc_mark_mbox_sites[2].value ? "reached 0x1c4" :
+			 "mbox probe word 0x%08x/0x%08x: %s\n", val, val2,
+			 val == scsc_mark_mbox_sites[0].value ? "reached 0x212" :
+			 val == scsc_mark_mbox_sites[1].value ? "reached 0x236" :
+			 val == scsc_mark_mbox_sites[2].value ? "reached 0x2ae" :
 			 "no probe landed");
 	}
 
