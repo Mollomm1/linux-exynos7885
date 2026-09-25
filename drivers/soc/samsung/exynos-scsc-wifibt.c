@@ -1200,6 +1200,11 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 				 readl(dram + scsc->gdb_ta_buf + 4),
 				 readl(dram + scsc->gdb_ta_buf + 8),
 				 readl(dram + scsc->gdb_ta_buf + 12));
+			dev_info(scsc->dev,
+				 "scan mgmt-ta %08x %08x widx %08x\n",
+				 readl(dram + scsc->mgmt_ta_buf),
+				 readl(dram + scsc->mgmt_ta_buf + 4),
+				 readl(dram + scsc->mgmt_ta_widx));
 			scsc_wifibt_unmap(dram);
 		}
 	}
@@ -1478,7 +1483,12 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			scsc->sig_mbox1 = null_mxconf ? 0 : scsc->mxconf_off;
 		}
 
-		if (patch_entry) {
+		if (graft_mm) {
+			ret = scsc_wifibt_graft_mm(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to graft\n");
+		} else if (patch_entry) {
 			ret = scsc_wifibt_patch_entry(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
@@ -1492,7 +1502,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to nop wait\n");
 		}
 
-		if (patch_entry || nop_wait) {
+		if (patch_entry || nop_wait || graft_mm) {
 			ret = scsc_wifibt_repair_crcs(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
