@@ -1112,6 +1112,8 @@ static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+static void scsc_wifibt_dump_panic(struct scsc_wifibt *scsc);
+
 static int scsc_wifibt_nop_wait(struct scsc_wifibt *scsc)
 {
 	void *dram;
@@ -1612,6 +1614,8 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			scsc_wifibt_unmap(dram);
 	}
 
+	scsc_wifibt_dump_panic(scsc);
+
 	for (i = 0; i < 10; i++) {
 		msleep(100);
 		status = readl(scsc->base + SCSC_MBOX_INTMSR0) >> 16;
@@ -1685,6 +1689,53 @@ static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
 /* Runs 5 s after probe: any change in the shared window, or in the PMU /
  * mailbox state, means the firmware block did something on its own.
  */
+/* R4 panic record (header field 0x160804, v2 layout per the downstream
+ * fw_panic_record.c: version, byte length, two clock stamps,
+ * R0-R12/SP/LR/SPSR/PC/CPSR, panic info, XOR checksum).  A core that
+ * faults writes it into the shared window, and the firmware clears it
+ * again shortly after, so it has to be read early to catch anything.
+ */
+static void scsc_wifibt_dump_panic(struct scsc_wifibt *scsc)
+{
+	static const char * const regs[18] = {
+		"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+		"r8", "r9", "r10", "r11", "r12", "sp", "lr",
+		"spsr", "pc", "cpsr",
+	};
+	void *dram = scsc_wifibt_map(scsc);
+	u32 rec[64] = { 0 };
+	u32 words = 0, sum = 0xa5a5a5a5;
+	unsigned int i;
+
+	if (dram) {
+		words = min_t(u32, ARRAY_SIZE(rec),
+			      readl(dram + SCSC_PANIC_OFF) / 4);
+		for (i = 0; i < words; i++)
+			rec[i] = readl(dram + SCSC_PANIC_OFF + 4 * i);
+		scsc_wifibt_unmap(dram);
+	}
+
+	if (rec[0] != 2) {
+		dev_info(scsc->dev, "no R4 panic record (v=%u)\n", rec[0]);
+		return;
+	}
+
+	dev_info(scsc->dev, "R4 panic: len %u bytes, t1m %u t32k %u\n",
+		 rec[1], rec[2], rec[3]);
+	for (i = 0; i < 18 && 4 + i < words; i++)
+		dev_info(scsc->dev, "  %-4s %08x\n", regs[i], rec[4 + i]);
+
+	for (i = 22; i + 1 < words; i++)
+		sum ^= rec[i];
+	sum ^= 0xa5a5a5a5;
+	dev_info(scsc->dev, "  info:");
+	for (i = 22; i + 1 < words; i++)
+		dev_info(scsc->dev, " %08x", rec[i]);
+	dev_info(scsc->dev, "\n  cksum rec %08x calc %08x %s\n",
+		 rec[words - 1], sum,
+		 rec[words - 1] == sum ? "OK" : "BAD");
+}
+
 static void scsc_wifibt_check_work(struct work_struct *work)
 {
 	struct scsc_wifibt *scsc = container_of(to_delayed_work(work),
@@ -1726,62 +1777,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
-	/* R4 panic record (header field 0x160804, v2 layout per the
-	 * downstream fw_panic_record.c: version, byte length, two clock
-	 * stamps, R0-R12/SP/LR/SPSR/PC/CPSR, panic info, XOR checksum).
-	 * A faulting core leaves this behind, so it is the only direct
-	 * evidence of where the R4 gave up.
-	 */
-	{
-		static const char * const regs[18] = {
-			"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
-			"r8", "r9", "r10", "r11", "r12", "sp", "lr",
-			"spsr", "pc", "cpsr",
-		};
-		void *dram = scsc_wifibt_map(scsc);
-		u32 rec[64] = { 0 };
-		u32 words = 0, sum = 0xa5a5a5a5;
-
-		if (dram) {
-			words = min_t(u32, ARRAY_SIZE(rec),
-				      readl(dram + SCSC_PANIC_OFF) / 4);
-			for (i = 0; i < words; i++)
-				rec[i] = readl(dram + SCSC_PANIC_OFF + 4 * i);
-
-			/* The M4 shares this window and has been seen writing
-			 * into it; dump the literals the R4 is about to
-			 * consume to see whether the image it executes is
-			 * still intact.
-			 */
-			for (i = 0; i < 20; i++)
-				dev_info(scsc->dev, " lit[%02x] %08x%s",
-					 0x6b4 + 4 * i,
-					 readl(dram + 0x6b4 + 4 * i),
-					 (i % 4 == 3) ? "\n" : "");
-			scsc_wifibt_unmap(dram);
-		}
-
-		if (rec[0] != 2) {
-			dev_info(scsc->dev, "no R4 panic record (v=%u)\n",
-				 rec[0]);
-		} else {
-			dev_info(scsc->dev,
-				 "R4 panic: len %u bytes, t1m %u t32k %u\n",
-				 rec[1], rec[2], rec[3]);
-			for (i = 0; i < 18 && 4 + i < words; i++)
-				dev_info(scsc->dev, "  %-4s %08x\n",
-					 regs[i], rec[4 + i]);
-			for (i = 22; i + 1 < words; i++)
-				sum ^= rec[i];
-			sum ^= 0xa5a5a5a5;
-			dev_info(scsc->dev, "  info:");
-			for (i = 22; i + 1 < words; i++)
-				dev_info(scsc->dev, " %08x", rec[i]);
-			dev_info(scsc->dev, "\n  cksum rec %08x calc %08x %s\n",
-				 rec[words - 1], sum,
-				 rec[words - 1] == sum ? "OK" : "BAD");
-		}
-	}
+	scsc_wifibt_dump_panic(scsc);
 
 	if (mark_mbox) {
 		u32 val = readl(scsc->base_m4 + SCSC_MARK_MBOX_REG);
