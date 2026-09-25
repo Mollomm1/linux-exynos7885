@@ -1606,16 +1606,19 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			u32 r4sr = readl(scsc->base + SCSC_MBOX_INTMSR1);
 			u32 ver = dram ? readl(dram + SCSC_PANIC_OFF) : 0;
 
-			/* The record is only there for a fraction of a
-			 * millisecond, so keep the first one we see.
+			/* The record is only visible while this mapping
+			 * is up, so copy it out unconditionally on the
+			 * first sample and decode the copy later.
 			 */
-			if (dram && !saved_words && ver == 2) {
+			if (i == 0 && dram) {
 				unsigned int j;
 
 				saved_words = min_t(u32, ARRAY_SIZE(saved),
 						    readl(dram + SCSC_PANIC_OFF) / 4);
 				for (j = 0; j < saved_words; j++)
 					saved[j] = readl(dram + SCSC_PANIC_OFF + 4 * j);
+				dev_info(scsc->dev, "snap %u words, first %08x\n",
+					 saved_words, saved[0]);
 			}
 
 			if (i % 10 == 0)
