@@ -1431,6 +1431,49 @@ static int scsc_wifibt_nop_window(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+/* Every CP15 write the entry code performs between 0x222 and 0x668, i.e.
+ * the MPU region programming, the cache maintenance and the second SCTLR
+ * write.  The MPU disable at 0x21a is left alone on purpose: keeping it
+ * means the MPU is off, so a result with these removed says the stall is
+ * not in any of the CPU-state configuration.
+ */
+static const u16 scsc_cp15_writes[] = {
+	0x222, 0x22e, 0x23a, 0x246, 0x252, 0x25e, 0x26a, 0x276,
+	0x282, 0x28e, 0x29a, 0x2a6, 0x2b2, 0x2be, 0x2ca, 0x2d6,
+	0x2e2, 0x2ee, 0x2fa, 0x306, 0x312, 0x31e, 0x33c, 0x340,
+	0x344, 0x34c, 0x36a, 0x36e, 0x372, 0x37a, 0x398, 0x39c,
+	0x3a0, 0x3a8, 0x3be, 0x3ca, 0x3de, 0x3e2, 0x3e6, 0x3ee,
+	0x404, 0x408, 0x464, 0x474, 0x478, 0x47c, 0x484, 0x4a2,
+	0x4ae, 0x4ba, 0x4d4, 0x4d8, 0x4dc, 0x4e4, 0x546, 0x552,
+	0x568, 0x574, 0x580, 0x58a, 0x59a, 0x59e, 0x5a2, 0x5aa,
+	0x5b8, 0x5c8, 0x5cc, 0x5d0, 0x5d8, 0x606, 0x60a, 0x60e,
+	0x616, 0x634, 0x638, 0x63c, 0x644, 0x658, 0x65c, 0x660,
+	0x668
+};
+
+static bool skip_cp15;
+module_param(skip_cp15, bool, 0644);
+MODULE_PARM_DESC(skip_cp15,
+		 "NOP every CP15 write in the entry sequence, keeping the MPU disable");
+
+static int scsc_wifibt_skip_cp15(struct scsc_wifibt *scsc)
+{
+	unsigned int i;
+	void *dram = scsc_wifibt_map(scsc);
+
+	if (!dram)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(scsc_cp15_writes); i++)
+		put_unaligned_le32(0x00bfbf00, dram + scsc_cp15_writes[i]);
+
+	scsc_wifibt_unmap(dram);
+	dev_info(scsc->dev, "nopped " __stringify(ARRAY_SIZE(scsc_cp15_writes))
+		 " CP15 writes\n");
+
+	return 0;
+}
+
 static unsigned int lit_off;
 static unsigned int lit_val;
 module_param(lit_off, uint, 0644);
@@ -2726,6 +2769,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			if (ret)
 				return dev_err_probe(dev, ret,
 						     "failed to nop window\n");
+		}
+
+		if (skip_cp15) {
+			ret = scsc_wifibt_skip_cp15(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to nop cp15 writes\n");
 		}
 
 		if (lit_off) {
