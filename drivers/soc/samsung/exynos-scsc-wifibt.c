@@ -51,6 +51,7 @@
 #define SCSC_MBOX_MIF_INIT	0x04c
 
 /* Boot handshake values (downstream mbox_init, documentation only) */
+#define SCSC_CACHETEST_OFF	0x1f0000
 #define SCSC_PANIC_OFF		0x160804
 #define SCSC_PANIC_LEN		0xd4
 #define SCSC_MBOX_MAGIC		0xbcdeedcb
@@ -320,14 +321,13 @@ struct scsc_wifibt {
  */
 /*
  * The window is RAM the R4 writes behind our back, so it has to be
- * mapped so that every read reaches memory.  Normal non-cacheable,
- * which is what pgprot_writecombine() selects on arm64 and what
- * Samsung's own driver uses here, may satisfy a read out of a
- * speculative line: polling the panic record tightly never saw it,
- * while logging every sample always did, which is only explicable as
- * a stale cached line.  Device memory is never speculatively filled,
- * so map it that way and do the bulk transfers below as naturally
- * aligned 32-bit accesses, which is all Device memory allows.
+ * mapped so that every read reaches memory.  This is Normal
+ * non-cacheable, which is what pgprot_writecombine() selects on arm64
+ * and what Samsung's own driver uses for this window.  Device memory
+ * would be safe from speculation but rejects the unaligned accesses
+ * put_unaligned_le32() and friends perform, so it is not an option
+ * here; scsc_wifibt_cachetest() below measures whether reads through
+ * this mapping come back stale.
  */
 static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 {
@@ -342,17 +342,26 @@ static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 	for (i = 0; i < npages; i++)
 		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
 
-	vmem = vmap(pages, npages, VM_MAP, pgprot_noncached(PAGE_KERNEL));
+	vmem = vmap(pages, npages, VM_MAP,
+		    pgprot_writecombine(PAGE_KERNEL));
 	kfree(pages);
 
 	return vmem;
 }
 
+static void scsc_wifibt_unmap(const void *vmem)
+{
+	vunmap(vmem);
+}
+
+static bool cachetest;
+module_param(cachetest, bool, 0644);
+MODULE_PARM_DESC(cachetest,
+		 "Self-test whether reads through the window mapping are coherent");
+
 /*
- * Bulk transfers into and out of the Device-mapped window.  These have
- * to go through the volatile accessors: plain pointer stores get merged
- * into 64- and 128-bit accesses, which Device memory rejects with an
- * alignment fault.
+ * Bulk transfers into and out of the window, through the volatile
+ * accessors so the compiler cannot merge them into wider accesses.
  */
 static void scsc_win_copy(void *dst, const void *src, size_t n)
 {
@@ -392,9 +401,39 @@ static void scsc_win_set(void *dst, u32 val, size_t n)
 		writeb(val, d + i);
 }
 
-static void scsc_wifibt_unmap(const void *vmem)
+/*
+ * Self-test for the window mapping: write a pattern, read it back, write
+ * a different value and read again, then read it through a second
+ * mapping.  If any read comes back stale we cannot trust anything we
+ * read out of this window, and the R4's own writes are what we are here
+ * to look at.
+ */
+static void scsc_wifibt_cachetest(struct scsc_wifibt *scsc)
 {
-	vunmap(vmem);
+	void *dram;
+	u32 first, again, fresh;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return;
+
+	scsc_win_set(dram + SCSC_CACHETEST_OFF, 0x11223344, 0x1000);
+	first = readl(dram + SCSC_CACHETEST_OFF);
+	writel(0xa5a5a5a5, dram + SCSC_CACHETEST_OFF);
+	again = readl(dram + SCSC_CACHETEST_OFF);
+	scsc_wifibt_unmap(dram);
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return;
+	fresh = readl(dram + SCSC_CACHETEST_OFF);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev,
+		 "cachetest: pattern %08x, after write %08x, remap %08x -> %s\n",
+		 first, again, fresh,
+		 (first == 0x11223344 && again == 0xa5a5a5a5 &&
+		  fresh == 0xa5a5a5a5) ? "coherent" : "STALE");
 }
 
 static irqreturn_t scsc_wifibt_mbox_irq(int irq, void *data)
@@ -693,6 +732,9 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 			end, scsc->mem_size);
 		return -EINVAL;
 	}
+
+	if (cachetest)
+		scsc_wifibt_cachetest(scsc);
 
 	dram = scsc_wifibt_map(scsc);
 	if (!dram)
