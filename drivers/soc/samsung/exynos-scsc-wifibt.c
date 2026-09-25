@@ -348,42 +348,48 @@ static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 	return vmem;
 }
 
-/* Bulk transfers into and out of the Device-mapped window. */
+/*
+ * Bulk transfers into and out of the Device-mapped window.  These have
+ * to go through the volatile accessors: plain pointer stores get merged
+ * into 64- and 128-bit accesses, which Device memory rejects with an
+ * alignment fault.
+ */
 static void scsc_win_copy(void *dst, const void *src, size_t n)
 {
-	u32 *d = dst;
-	const u32 *s = src;
+	u8 *d = dst;
+	const u8 *s = src;
 	size_t i;
 
-	for (i = 0; i < n / 4; i++)
-		d[i] = s[i];
-	for (i *= 4; i < n; i++)
-		((u8 *)dst)[i] = ((const u8 *)src)[i];
+	for (i = 0; i + 4 <= n; i += 4)
+		writel(*(const u32 *)(s + i), d + i);
+	for (; i < n; i++)
+		writeb(s[i], d + i);
 }
 
-static int scsc_win_cmp(const void *a, const void *b, size_t n)
+static int scsc_win_cmp(const void *win, const void *buf, size_t n)
 {
-	const u32 *x = a, *y = b;
+	const u8 *b = buf;
+	u8 *w = (u8 *)win;
 	size_t i;
 
-	for (i = 0; i < n / 4; i++)
-		if (x[i] != y[i])
+	for (i = 0; i + 4 <= n; i += 4)
+		if (readl(w + i) != *(const u32 *)(b + i))
 			return 1;
-	for (i *= 4; i < n; i++)
-		if (((const u8 *)a)[i] != ((const u8 *)b)[i])
+	for (; i < n; i++)
+		if (readb(w + i) != b[i])
 			return 1;
 	return 0;
 }
 
 static void scsc_win_set(void *dst, u32 val, size_t n)
 {
-	u32 *d = dst;
+	u8 *d = dst;
 	size_t i;
 
-	for (i = 0; i < n / 4; i++)
-		d[i] = val;
-	for (i *= 4; i < n; i++)
-		((u8 *)dst)[i] = val;
+	for (i = 0; i + 4 <= n; i += 4)
+		writel(val, d + i);
+	for (; i < n; i++)
+		writeb(val, d + i);
 }
 
 static void scsc_wifibt_unmap(const void *vmem)
@@ -655,7 +661,7 @@ static void scsc_wifibt_stream_conf(u8 *p, u32 buf, u32 num, u32 pktsize,
 
 static void scsc_wifibt_stream_mem(u8 *dram, u32 buf, u32 len, bool fill_ff)
 {
-	memset(dram + buf, fill_ff ? 0xff : 0, len);
+	scsc_win_set(dram + buf, fill_ff ? 0xff : 0, len);
 	put_unaligned_le32(0, dram + buf + len);
 	put_unaligned_le32(0, dram + buf + len + 4);
 }
@@ -805,9 +811,10 @@ static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	memcpy(dram + off, scsc_probe_payload, sizeof(scsc_probe_payload));
+	scsc_win_copy(dram + off, scsc_probe_payload,
+		      sizeof(scsc_probe_payload));
 
-	if (memcmp(dram + off, scsc_probe_payload,
+	if (scsc_win_cmp(dram + off, scsc_probe_payload,
 		   sizeof(scsc_probe_payload))) {
 		dev_err(scsc->dev, "probe payload DRAM readback mismatch\n");
 		scsc_wifibt_unmap(dram);
@@ -877,7 +884,7 @@ static int scsc_wifibt_graft_mm(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	memcpy(dram + off, graft, sizeof(graft));
+	scsc_win_copy(dram + off, graft, sizeof(graft));
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "grafted MM_START_IND sender at 0x%x\n", off);
@@ -901,7 +908,8 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	memcpy(dram + off, scsc_probe_payload, sizeof(scsc_probe_payload));
+	scsc_win_copy(dram + off, scsc_probe_payload,
+		      sizeof(scsc_probe_payload));
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "patched probe payload over image at 0x%x\n",
@@ -1173,9 +1181,9 @@ static int scsc_wifibt_nop_wait(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	if (memcmp(dram + SCSC_WAIT_OFF, scsc_wait_loop_2019,
+	if (scsc_win_cmp(dram + SCSC_WAIT_OFF, scsc_wait_loop_2019,
 		   SCSC_WAIT_LEN) &&
-	    memcmp(dram + SCSC_WAIT_OFF, scsc_wait_loop_2021,
+	    scsc_win_cmp(dram + SCSC_WAIT_OFF, scsc_wait_loop_2021,
 		   SCSC_WAIT_LEN)) {
 		dev_err(scsc->dev, "wait loop bytes mismatch, not patching\n");
 		scsc_wifibt_unmap(dram);
@@ -1200,8 +1208,8 @@ static int scsc_wifibt_skip_mpu(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	if (memcmp(dram + SCSC_MPU_OFF, scsc_mpu_block_2019, SCSC_MPU_LEN) &&
-	    memcmp(dram + SCSC_MPU_OFF, scsc_mpu_block_2021, SCSC_MPU_LEN)) {
+	if (scsc_win_cmp(dram + SCSC_MPU_OFF, scsc_mpu_block_2019, SCSC_MPU_LEN) &&
+	    scsc_win_cmp(dram + SCSC_MPU_OFF, scsc_mpu_block_2021, SCSC_MPU_LEN)) {
 		dev_err(scsc->dev, "mpu block bytes mismatch, not patching\n");
 		scsc_wifibt_unmap(dram);
 		return -EINVAL;
@@ -1352,7 +1360,7 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 
 	/* Spin once the stamps are out, so nothing after the halt matters. */
 	put_unaligned_le16(0xe7fe, stub + 0x28);
-	memcpy(dram + mark_at, stub, sizeof(stub));
+	scsc_win_copy(dram + mark_at, stub, sizeof(stub));
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "halted and marked at 0x%x\n", mark_at);
@@ -1397,7 +1405,7 @@ static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
 		scsc_mark_mov_imm(stub + 8, s->value >> 16, true);
 		put_unaligned_le32(0xa20e0000ul + SCSC_MARK_MBOX_REG,
 				   stub + sizeof(stub) - 4);
-		memcpy(dram + s->off, stub, sizeof(stub));
+		scsc_win_copy(dram + s->off, stub, sizeof(stub));
 	}
 	scsc_wifibt_unmap(dram);
 
@@ -1416,14 +1424,14 @@ static int scsc_wifibt_stack_fix(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	if (memcmp(dram + 0x1b4, "\x4f\xf0\x00\x00", 4)) {
+	if (scsc_win_cmp(dram + 0x1b4, "\x4f\xf0\x00\x00", 4)) {
 		dev_err(scsc->dev, "stack patch site mismatch, not patching\n");
 		scsc_wifibt_unmap(dram);
 		return -EINVAL;
 	}
 
 	/* mov.w r0, #0x800: stack top of the 32K ATCM. */
-	memcpy(dram + 0x1b4, "\x4f\xf4\x00\x60", 4);
+	scsc_win_copy(dram + 0x1b4, "\x4f\xf4\x00\x60", 4);
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "early boot stack set to 0x800\n");
@@ -1455,7 +1463,7 @@ static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 		put_unaligned_le32(0x80000000u + SCSC_MARK_COUNT_SLOT,
 				   stub + sizeof(count_stub) - 4);
 		put_unaligned_le32(0, dram + SCSC_MARK_COUNT_SLOT);
-		memcpy(dram + SCSC_MARK_COUNT_OFF, stub, sizeof(stub));
+		scsc_win_copy(dram + SCSC_MARK_COUNT_OFF, stub, sizeof(stub));
 		scsc_wifibt_unmap(dram);
 		dev_info(scsc->dev, "counting passes at 0x%x\n",
 			 SCSC_MARK_COUNT_OFF);
@@ -1477,7 +1485,7 @@ static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 		put_unaligned_le32(0x80000000u + s->value,
 				   stub + sizeof(scsc_mark_run_stub));
 		put_unaligned_le32(SCSC_MARK_VALUE, dram + s->value);
-		memcpy(dram + s->off, stub, sizeof(stub));
+		scsc_win_copy(dram + s->off, stub, sizeof(stub));
 	}
 	scsc_wifibt_unmap(dram);
 
@@ -1746,7 +1754,8 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		void *dram = scsc_wifibt_map(scsc);
 
 		if (dram) {
-			memcpy(dram + scsc->gdb_fa_buf, query, sizeof(query));
+			scsc_win_copy(dram + scsc->gdb_fa_buf, query,
+				      sizeof(query));
 			put_unaligned_le32(2, dram + scsc->gdb_fa_widx);
 			scsc_wifibt_unmap(dram);
 			dev_info(scsc->dev, "gdb query queued\n");
