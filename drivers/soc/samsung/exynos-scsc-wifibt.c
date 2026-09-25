@@ -1266,6 +1266,18 @@ static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 	memcpy(dram + mark_run, stub, sizeof(stub));
 	scsc_wifibt_unmap(dram);
 
+	/* Same stamp aimed at the BT-ABOX window: if that one lands and
+	 * the WiFi one does not, the main window is what is misconfigured.
+	 */
+	if (abox_win) {
+		void __iomem *abox = ioremap(SCSC_ABOX_BASE, 0x1000);
+
+		if (abox) {
+			writel(SCSC_MARK_VALUE, abox + SCSC_MARK_RUN_SLOT);
+			iounmap(abox);
+		}
+	}
+
 	dev_info(scsc->dev, "marking pass at 0x%x, slot 0x%x\n",
 		 mark_run, SCSC_MARK_RUN_SLOT);
 
@@ -1526,6 +1538,20 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		dev_info(scsc->dev, "mark run 0x%x: slot 0x%08x %s\n",
 			 mark_run, val,
 			 val == 0xa5a5a5a5 ? "PASSED" : "not reached");
+
+		if (abox_win) {
+			void __iomem *abox = ioremap(SCSC_ABOX_BASE, 0x1000);
+
+			if (abox) {
+				val = readl(abox + SCSC_MARK_RUN_SLOT);
+				iounmap(abox);
+				dev_info(scsc->dev,
+					 "mark run 0x%x: abox slot 0x%08x %s\n",
+					 mark_run, val,
+					 val == 0xa5a5a5a5 ? "PASSED" :
+					 "not reached");
+			}
+		}
 	}
 
 	if (mark_at) {
