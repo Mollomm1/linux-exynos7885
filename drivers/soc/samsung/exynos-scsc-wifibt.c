@@ -884,6 +884,9 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(1)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
+	dev_info(scsc->dev, "scan M4 INTMR1 %08x INTGR1 %08x\n",
+		 readl(scsc->base_m4 + SCSC_MBOX_INTMR1),
+		 readl(scsc->base_m4 + SCSC_MBOX_INTGR1));
 	dev_info(scsc->dev,
 		 "scan MBOX ctl GR0 %08x MR0 %08x SR0 %08x GR1 %08x MR1 %08x SR1 %08x MSR1 %08x INIT %08x\n",
 		 readl(scsc->base + SCSC_MBOX_INTGR0),
