@@ -52,6 +52,7 @@
 
 /* Boot handshake values (downstream mbox_init, documentation only) */
 #define SCSC_PANIC_OFF		0x160804
+#define SCSC_PANIC_LEN		0xd4
 #define SCSC_MBOX_MAGIC		0xbcdeedcb
 #define SCSC_MBOX_FW_FLAGS	0x0 /* Bit 0 = spin at start of CRT0 */
 
@@ -2021,6 +2022,14 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 		scsc_wifibt_unmap(dram);
 		return -EIO;
 	}
+
+	/* Wipe any panic record left in the carveout: a warm reboot keeps
+	 * the shared window, and a stale record would look like a fresh
+	 * fault on this boot.
+	 */
+	memset(dram + SCSC_PANIC_OFF, 0, SCSC_PANIC_LEN);
+	dev_info(scsc->dev, "panic record area cleared (%u bytes)\n",
+		 SCSC_PANIC_LEN);
 
 	if (fill_gap) {
 		memset(dram + fw->size, 0xaa, scsc->mem_size - fw->size);
