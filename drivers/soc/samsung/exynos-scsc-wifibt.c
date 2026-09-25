@@ -954,6 +954,14 @@ static unsigned int tzasc_args;
 module_param(tzasc_args, uint, 0644);
 MODULE_PARM_DESC(tzasc_args, "TZASC SMC argument variant (0 = downstream shape)");
 
+/* Raw SMC id, so we can tell "the secure firmware rejected the grant"
+ * apart from "this EL3 does not implement the call at all" by calling
+ * an id that cannot exist.
+ */
+static unsigned int tzasc_cmd = SCSC_SMC_WLBT_TZASC;
+module_param(tzasc_cmd, uint, 0644);
+MODULE_PARM_DESC(tzasc_cmd, "Raw SMC id to call for the TZASC grant");
+
 /* Mailbox progress probes. The R4 demonstrably writes its mailbox (the
  * M4 only boots because of it) while no shared-DRAM write has ever been
  * seen, so stamp three M4-side mailbox words from three points of the
@@ -1293,11 +1301,10 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 		default:
 			break;
 		}
-		arm_smccc_smc(SCSC_SMC_WLBT_TZASC, a1, a2, a3, 0, 0, 0, 0,
-			      &res);
+		arm_smccc_smc(tzasc_cmd, a1, a2, a3, 0, 0, 0, 0, &res);
 		dev_info(scsc->dev,
-			 "TZASC config variant %u result 0x%lx (a1 0x%lx a2 0x%lx a3 0x%lx)\n",
-			 tzasc_args, res.a0, a1, a2, a3);
+			 "TZASC smc 0x%x variant %u result 0x%lx (a1 0x%lx a2 0x%lx a3 0x%lx)\n",
+			 tzasc_cmd, tzasc_args, res.a0, a1, a2, a3);
 	} else {
 		dev_info(scsc->dev, "TZASC config skipped by parameter\n");
 	}
