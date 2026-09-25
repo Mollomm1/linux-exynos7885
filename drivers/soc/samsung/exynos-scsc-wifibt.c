@@ -51,6 +51,7 @@
 #define SCSC_MBOX_MIF_INIT	0x04c
 
 /* Boot handshake values (downstream mbox_init, documentation only) */
+#define SCSC_PANIC_OFF		0x160804
 #define SCSC_MBOX_MAGIC		0xbcdeedcb
 #define SCSC_MBOX_FW_FLAGS	0x0 /* Bit 0 = spin at start of CRT0 */
 
@@ -1666,46 +1667,51 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
-	/* R4 panic record (header field, same offset in both builds): a
-	 * faulting core writes it into the shared window, which is the
-	 * only trace an exception leaves us.
+	/* R4 panic record (header field 0x160804, v2 layout per the
+	 * downstream fw_panic_record.c: version, byte length, two clock
+	 * stamps, R0-R12/SP/LR/SPSR/PC/CPSR, panic info, XOR checksum).
+	 * A faulting core leaves this behind, so it is the only direct
+	 * evidence of where the R4 gave up.
 	 */
 	{
+		static const char * const regs[18] = {
+			"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+			"r8", "r9", "r10", "r11", "r12", "sp", "lr",
+			"spsr", "pc", "cpsr",
+		};
 		void *dram = scsc_wifibt_map(scsc);
-		static const u32 panic_offs[] = { 0x160804, 0x160840 };
+		u32 rec[64] = { 0 };
+		u32 words, sum = 0xa5a5a5a5;
 
 		if (dram) {
-			for (i = 0; i < ARRAY_SIZE(panic_offs); i++)
-				dev_info(scsc->dev,
-					 "panic rec 0x%x: %08x %08x %08x %08x\n",
-					 panic_offs[i],
-					 readl(dram + panic_offs[i]),
-					 readl(dram + panic_offs[i] + 4),
-					 readl(dram + panic_offs[i] + 8),
-					 readl(dram + panic_offs[i] + 12));
+			words = min_t(u32, ARRAY_SIZE(rec),
+				      readl(dram + SCSC_PANIC_OFF) / 4);
+			for (i = 0; i < words; i++)
+				rec[i] = readl(dram + SCSC_PANIC_OFF + 4 * i);
 			scsc_wifibt_unmap(dram);
-		}
-	}
 
-
-	/* R4 panic record (header field, same offset in both builds):
-	 * a faulting core writes it into the shared window, which is the
-	 * only trace an exception leaves us.
-	 */
-	{
-		void *dram = scsc_wifibt_map(scsc);
-		static const u32 panic_offs[] = { 0x160804, 0x160840 };
-
-		if (dram) {
-			for (i = 0; i < ARRAY_SIZE(panic_offs); i++)
+			if (rec[0] != 2) {
 				dev_info(scsc->dev,
-					 "panic rec 0x%x: %08x %08x %08x %08x\n",
-					 panic_offs[i],
-					 readl(dram + panic_offs[i]),
-					 readl(dram + panic_offs[i] + 4),
-					 readl(dram + panic_offs[i] + 8),
-					 readl(dram + panic_offs[i] + 12));
-			scsc_wifibt_unmap(dram);
+					 "no R4 panic record (v=%u)\n", rec[0]);
+			} else {
+				dev_info(scsc->dev,
+					 "R4 panic: len %u bytes, t1m %u t32k %u\n",
+					 rec[1], rec[2], rec[3]);
+				for (i = 0; i < 18 && 4 + i < words; i++)
+					dev_info(scsc->dev, "  %-4s %08x\n",
+						 regs[i], rec[4 + i]);
+				for (i = 22; i + 1 < words; i++)
+					sum ^= rec[i];
+				sum ^= 0xa5a5a5a5;
+				dev_info(scsc->dev,
+					 "  info:");
+				for (i = 22; i + 1 < words; i++)
+					dev_info(scsc->dev, " %08x", rec[i]);
+				dev_info(scsc->dev,
+					 "\n  cksum rec %08x calc %08x %s\n",
+					 rec[words - 1], sum,
+					 rec[words - 1] == sum ? "OK" : "BAD");
+			}
 		}
 	}
 
