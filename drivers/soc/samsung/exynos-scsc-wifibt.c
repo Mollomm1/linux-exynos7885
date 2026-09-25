@@ -882,6 +882,24 @@ static unsigned int mark_at;
 module_param(mark_at, uint, 0644);
 MODULE_PARM_DESC(mark_at, "Halt the R4 at this firmware offset and mark DRAM (0 = off)");
 
+/* Non-halting marker: stamp DRAM and let the firmware carry on. Only
+ * r2 and r3 are clobbered, so a probe placed right after the MPU setup
+ * tells us whether the R4 gets that far and can write at all, without
+ * the halt itself changing the outcome.
+ */
+static unsigned int mark_run;
+module_param(mark_run, uint, 0644);
+MODULE_PARM_DESC(mark_run, "Stamp DRAM at this firmware offset and continue (0 = off)");
+
+#define SCSC_MARK_RUN_LEN	16
+#define SCSC_MARK_RUN_SLOT	0x200000
+static const u8 scsc_mark_run_stub[] = {
+	0x02, 0x4a,			/* ldr r2, [pc, #8] */
+	0x4a, 0xf2, 0xa5, 0x53,		/* movw r3, #0xa5a5 */
+	0xca, 0xf2, 0xa5, 0x53,		/* movt r3, #0xa5a5 */
+	0x13, 0x60,			/* str r3, [r2] */
+};
+
 /* Stub: mov.w r0, #0xa5; per DRAM slot: ldr r1, [pc, #imm]; str r0, [r1];
  * mov.w r0, #0x5a; ldr r1, [pc, #imm]; str r0, [r1]; b .; then one
  * literal address per store. A mailbox hit proves the R4 runs and can
@@ -1051,6 +1069,35 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "marked and halted at 0x%x\n", mark_at);
+
+	return 0;
+}
+
+static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
+{
+	u8 stub[SCSC_MARK_RUN_LEN];
+	void *dram;
+
+	if (mark_run & 1 || mark_run + SCSC_MARK_RUN_LEN > scsc->mem_size - 16 ||
+	    SCSC_MARK_RUN_SLOT + 4 > scsc->mem_size) {
+		dev_err(scsc->dev, "run offset 0x%x unusable\n", mark_run);
+		return -EINVAL;
+	}
+
+	memcpy(stub, scsc_mark_run_stub, sizeof(scsc_mark_run_stub));
+	put_unaligned_le32(0x80000000u + SCSC_MARK_RUN_SLOT,
+			   stub + sizeof(scsc_mark_run_stub));
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	put_unaligned_le32(SCSC_MARK_VALUE, dram + SCSC_MARK_RUN_SLOT);
+	memcpy(dram + mark_run, stub, sizeof(stub));
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "marking pass at 0x%x, slot 0x%x\n",
+		 mark_run, SCSC_MARK_RUN_SLOT);
 
 	return 0;
 }
@@ -1249,6 +1296,19 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
+
+	if (mark_run) {
+		void *dram = scsc_wifibt_map(scsc);
+		u32 val = 0;
+
+		if (dram) {
+			val = readl(dram + SCSC_MARK_RUN_SLOT);
+			scsc_wifibt_unmap(dram);
+		}
+		dev_info(scsc->dev, "mark run 0x%x: slot 0x%08x %s\n",
+			 mark_run, val,
+			 val == 0xa5a5a5a5 ? "PASSED" : "not reached");
+	}
 
 	if (mark_at) {
 		void *dram = scsc_wifibt_map(scsc);
@@ -1742,16 +1802,24 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to halt entry\n");
 		}
 
-		if (mark_at) {
-			ret = scsc_wifibt_mark_at(scsc);
-			if (ret)
-				return dev_err_probe(dev, ret,
-						     "failed to mark at 0x%x\n",
-						     mark_at);
-		}
+	if (mark_run) {
+		ret = scsc_wifibt_mark_run(scsc);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to mark run 0x%x\n",
+					     mark_run);
+	}
 
-		if (patch_entry || nop_wait || graft_mm || skip_mpu ||
-		    halt_entry || mark_at) {
+	if (mark_at) {
+		ret = scsc_wifibt_mark_at(scsc);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to mark at 0x%x\n",
+					     mark_at);
+	}
+
+	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
+	    halt_entry || mark_at || mark_run) {
 			ret = scsc_wifibt_repair_crcs(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
