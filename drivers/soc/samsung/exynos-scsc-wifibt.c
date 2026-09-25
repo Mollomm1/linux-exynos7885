@@ -801,7 +801,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (!signal_r4) {
 		dev_info(dev, "R4 signalling disabled by parameter\n");
 	} else {
-	if (r4_probe || patch_entry) {
+		if (r4_probe) {
 			ret = scsc_wifibt_r4_probe(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
