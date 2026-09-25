@@ -78,6 +78,14 @@ static uint probe_entry = 0x200001;
 module_param(probe_entry, uint, 0644);
 MODULE_PARM_DESC(probe_entry, "DRAM offset used as R4 entry (and payload location) when r4_probe is set");
 
+/* Overwrite the staged image at the firmware entry point with the probe
+ * payload. The ROM accepts 0x1a9 (it runs, starts the M4 and faults),
+ * so if the R4 truly jumps there, the marker must appear.
+ */
+static bool patch_entry;
+module_param(patch_entry, bool, 0644);
+MODULE_PARM_DESC(patch_entry, "Replace the firmware image at its entry point with the probe payload");
+
 /* PMU (system-controller syscon) register offsets */
 #define SCSC_PMU_WIFI_CTRL_NS		0x140 /* non-secure control */
 #define SCSC_PMU_WIFI_PWRON		BIT(1)
@@ -463,6 +471,31 @@ static int scsc_wifibt_r4_probe(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
+{
+	u32 off = scsc->fw_entry & ~1u;
+	void *dram;
+
+	if (!(scsc->fw_entry & 1u) ||
+	    off + sizeof(scsc_probe_payload) > scsc->mem_size) {
+		dev_err(scsc->dev, "firmware entry 0x%x not patchable\n",
+			scsc->fw_entry);
+		return -EINVAL;
+	}
+
+	dram = memremap(scsc->mem_start, scsc->mem_size, MEMREMAP_WB);
+	if (!dram)
+		return -ENOMEM;
+
+	memcpy(dram + off, scsc_probe_payload, sizeof(scsc_probe_payload));
+	memunmap(dram);
+
+	dev_info(scsc->dev, "patched probe payload over image at 0x%x\n",
+		 off);
+
+	return 0;
+}
+
 static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 {
 	struct arm_smccc_res res;
@@ -768,7 +801,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (!signal_r4) {
 		dev_info(dev, "R4 signalling disabled by parameter\n");
 	} else {
-		if (r4_probe) {
+	if (r4_probe || patch_entry) {
 			ret = scsc_wifibt_r4_probe(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
@@ -783,6 +816,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 
 			scsc->sig_entry = scsc->fw_entry;
 			scsc->sig_mbox1 = null_mxconf ? 0 : scsc->mxconf_off;
+		}
+
+		if (patch_entry) {
+			ret = scsc_wifibt_patch_entry(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to patch entry\n");
 		}
 
 		scsc_wifibt_signal(scsc);
