@@ -1028,6 +1028,13 @@ static bool mark_mbox;
 module_param(mark_mbox, bool, 0644);
 static int timeline;
 module_param(timeline, int, 0644);
+static int fine;
+static int fine_us = 500;
+module_param(fine, int, 0644);
+module_param(fine_us, int, 0644);
+MODULE_PARM_DESC(fine,
+		 "Sample N cheap registers every fine_us after releasing the R4");
+MODULE_PARM_DESC(fine_us, "Interval in us between the fine samples");
 MODULE_PARM_DESC(timeline,
 		 "Sample the WLBT state every N ms during the boot check (0 = off)");
 MODULE_PARM_DESC(mark_mbox, "Stamp the M4 mailbox from three early-boot points");
@@ -1577,6 +1584,32 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		last_m4_1 = m4_1;
 		last_msr = msr;
 		msleep(50);
+	}
+
+	/* The whole R4 boot is over in a few milliseconds, so the
+	 * timeline above starts far too late to see it.  Sample the few
+	 * registers both cores touch, at a resolution we can afford to
+	 * spin for, right here where the R4 has just been released.
+	 */
+	if (fine > 0) {
+		void *dram = scsc_wifibt_map(scsc);
+
+		for (i = 0; i < fine; i++) {
+			u32 m4 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
+			u32 r4 = readl(scsc->base + SCSC_MBOX_ISSR(0));
+			u32 r4sr = readl(scsc->base + SCSC_MBOX_INTMSR1);
+			u32 tail = 0;
+
+			if (dram && scsc->mem_size > SCSC_PANIC_OFF + 4)
+				tail = readl(dram + SCSC_PANIC_OFF);
+
+			dev_info(scsc->dev,
+				 "fine %3d m4 %08x r4 %08x r4sr %08x panic %08x\n",
+				 i, m4, r4, r4sr, tail);
+			udelay(fine_us);
+		}
+		if (dram)
+			scsc_wifibt_unmap(dram);
 	}
 
 	for (i = 0; i < 10; i++) {
