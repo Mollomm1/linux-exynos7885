@@ -179,6 +179,19 @@ MODULE_PARM_DESC(fill_gap, "Fill shared DRAM beyond the image with 0xAA before b
 /* Shared-memory (BAAW) window configuration */
 #define SCSC_PMU_MEM_CONFIG0		0x7300 /* WiFi window size (4K units) */
 #define SCSC_PMU_MEM_CONFIG1		0x7304 /* WiFi window base (4K units) */
+#define SCSC_PMU_ABOX_CONFIG0		0x7308 /* BT-ABOX window size */
+#define SCSC_PMU_ABOX_CONFIG1		0x730c /* BT-ABOX window base */
+
+/* Downstream programs the adjacent BT-ABOX window before releasing the
+ * block (abox_rmem in the stock exynos7885-rmem.dtsi). The M4 lives on
+ * that side of the pair, so the firmware may refuse to go on without
+ * it. Kept as a parameter because the DT region is not wired to us.
+ */
+#define SCSC_ABOX_BASE			0xe9400000ul
+#define SCSC_ABOX_SIZE			0x400000ul
+static bool abox_win;
+module_param(abox_win, bool, 0644);
+MODULE_PARM_DESC(abox_win, "Program the stock BT-ABOX window before release");
 
 /* Low-power sequencing (power-off path) */
 #define SCSC_PMU_RESET_AHEAD		0x1360
@@ -349,7 +362,7 @@ static irqreturn_t scsc_wifibt_mbox_irq(int irq, void *data)
 
 static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 {
-	unsigned int val, i;
+	unsigned int val, tmp, i;
 	int ret;
 
 	/* Keep system-level low-power mode disabled (cold default): the
@@ -386,6 +399,22 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 			   scsc->mem_size >> 12);
 	if (ret)
 		return ret;
+
+	if (abox_win) {
+		ret = regmap_write(scsc->pmureg, SCSC_PMU_ABOX_CONFIG1,
+				   (SCSC_ABOX_BASE & 0xfffffc000UL) >> 12);
+		if (ret)
+			return ret;
+
+		ret = regmap_write(scsc->pmureg, SCSC_PMU_ABOX_CONFIG0,
+				   SCSC_ABOX_SIZE >> 12);
+		if (ret)
+			return ret;
+
+		regmap_read(scsc->pmureg, SCSC_PMU_ABOX_CONFIG0, &val);
+		regmap_read(scsc->pmureg, SCSC_PMU_ABOX_CONFIG1, &tmp);
+		dev_info(scsc->dev, "ABOX window %08x %08x\n", val, tmp);
+	}
 
 	/* Power on, release reset, start: mirrors downstream 8.6.6 sequence. */
 	if (shared_opt) {
