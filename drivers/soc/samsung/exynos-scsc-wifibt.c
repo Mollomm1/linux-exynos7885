@@ -184,6 +184,16 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	unsigned int val, i;
 	int ret;
 
+	/* Keep system-level low-power mode disabled (cold default): the
+	 * power-off path enables it, and releasing with it enabled wedges
+	 * warm with START held.
+	 */
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_CFG,
+				 SCSC_PMU_SYS_PWR_CFG_16,
+				 SCSC_PMU_SYS_PWR_CFG_16);
+	if (ret)
+		return ret;
+
 	/* NOTE: the low-power controls are NOT restored here. They read
 	 * all-ones while the block is off, so a snapshot would be garbage;
 	 * the power-off path (downstream-faithful) is the only writer.
