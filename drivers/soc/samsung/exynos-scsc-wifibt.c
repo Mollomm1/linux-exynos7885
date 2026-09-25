@@ -1600,14 +1600,16 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			u32 m4 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
 			u32 r4 = readl(scsc->base + SCSC_MBOX_ISSR(0));
 			u32 r4sr = readl(scsc->base + SCSC_MBOX_INTMSR1);
-			u32 tail = 0;
-
-			if (dram && scsc->mem_size > SCSC_PANIC_OFF + 4)
-				tail = readl(dram + SCSC_PANIC_OFF);
 
 			dev_info(scsc->dev,
-				 "fine %3d m4 %08x r4 %08x r4sr %08x panic %08x\n",
-				 i, m4, r4, r4sr, tail);
+				 "fine %3d m4 %08x r4 %08x r4sr %08x rec %08x %08x %08x %08x %08x %08x\n",
+				 i, m4, r4, r4sr,
+				 dram ? readl(dram + SCSC_PANIC_OFF) : 0,
+				 dram ? readl(dram + SCSC_PANIC_OFF + 4) : 0,
+				 dram ? readl(dram + 0x160840) : 0,
+				 dram ? readl(dram + 0x160844) : 0,
+				 dram ? readl(dram + 0x160848) : 0,
+				 dram ? readl(dram + 0x16084c) : 0);
 			udelay(fine_us);
 		}
 		if (dram)
