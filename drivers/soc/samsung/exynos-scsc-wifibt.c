@@ -1243,7 +1243,15 @@ static const u32 scsc_mark_slots[] = {
 	0x300000, 0x340000, 0x380000, 0x3c0000,
 };
 #define SCSC_MARK_SLOTS		(ARRAY_SIZE(scsc_mark_slots) + 1)
-#define SCSC_MARK_LEN		(0x2c + 4 * SCSC_MARK_SLOTS)
+/* Stub layout: [original instruction], mov.w r0,#0xa5, one ldr/str pair
+ * per slot, a spin, then the literal pool.  Every ldr has to reach its
+ * literal 0x24 bytes further on, so the pool offset is fixed by the
+ * code that precedes it and the two cannot be sized independently.
+ */
+#define SCSC_STUB_POOL_OFF	0x30
+#define SCSC_MARK_LEN		0x60
+static_assert(SCSC_STUB_POOL_OFF + 4 * SCSC_MARK_SLOTS <= SCSC_MARK_LEN,
+	      "halt stub too small for its literal pool");
 
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
@@ -1462,7 +1470,7 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 		u32 off = i < ARRAY_SIZE(scsc_mark_slots) ?
 			  scsc_mark_slots[i] : scsc->mem_size - 16;
 		u8 *code = stub + 8 + 4 * n;
-		u8 *lit = stub + 0x30 + 4 * n;
+		u8 *lit = stub + SCSC_STUB_POOL_OFF + 4 * n;
 
 		put_unaligned_le32(0x80000000u + off, lit);
 		put_unaligned_le16(0x4909, code);
@@ -1472,7 +1480,7 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	}
 
 	/* Spin once the stamps are out, so nothing after the halt matters. */
-	put_unaligned_le16(0xe7fe, stub + 0x2c);
+	put_unaligned_le16(0xe7fe, stub + 8 + 4 * SCSC_MARK_SLOTS);
 
 	/* With mark_exec, run the instruction we are replacing first and
 	 * only then stamp.  That separates "the R4 died executing this
