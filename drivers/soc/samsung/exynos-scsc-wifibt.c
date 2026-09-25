@@ -159,6 +159,9 @@ struct scsc_wifibt {
 	size_t		mem_size;
 	u32		fw_entry;
 	u32		fw_runtime;
+	u32		fw_hdr_len;
+	u32		fw_const_len;
+	u32		fw_len;
 	u32		mxconf_off;
 	u32		sig_entry;
 	u32		sig_mbox1;
@@ -335,6 +338,9 @@ static int scsc_wifibt_fw_parse(struct scsc_wifibt *scsc,
 
 	scsc->fw_entry = entry;
 	scsc->fw_runtime = runtime_len;
+	scsc->fw_hdr_len = hdr_len;
+	scsc->fw_const_len = const_len;
+	scsc->fw_len = fw->size;
 
 	/* Integrity checks over the image, same layout as downstream fwimage. */
 	fw_crc = get_unaligned_le32(fw->data + SCSC_FW_CRC_OFF);
@@ -488,6 +494,16 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 		return -ENOMEM;
 
 	memcpy(dram + off, scsc_probe_payload, sizeof(scsc_probe_payload));
+
+	/* Repair the image CRCs over the patched copy so a validating ROM
+	 * still accepts it.
+	 */
+	put_unaligned_le32(ether_crc(scsc->fw_const_len - scsc->fw_hdr_len,
+				    dram + scsc->fw_hdr_len),
+			   dram + SCSC_FW_CONST_CRC_OFF);
+	put_unaligned_le32(ether_crc(scsc->fw_len - scsc->fw_hdr_len,
+				    dram + scsc->fw_hdr_len),
+			   dram + SCSC_FW_CRC_OFF);
 	memunmap(dram);
 
 	dev_info(scsc->dev, "patched probe payload over image at 0x%x\n",
@@ -801,7 +817,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (!signal_r4) {
 		dev_info(dev, "R4 signalling disabled by parameter\n");
 	} else {
-		if (r4_probe) {
+	if (r4_probe || patch_entry) {
 			ret = scsc_wifibt_r4_probe(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
