@@ -937,14 +937,24 @@ static unsigned int mark_at;
 module_param(mark_at, uint, 0644);
 MODULE_PARM_DESC(mark_at, "Halt the R4 at this firmware offset and mark DRAM (0 = off)");
 
-/* Non-halting marker: stamp DRAM and let the firmware carry on. Only
- * r2 and r3 are clobbered, so a probe placed right after the MPU setup
- * tells us whether the R4 gets that far and can write at all, without
- * the halt itself changing the outcome.
+/* Non-halting markers: stamp DRAM and let the firmware carry on. Only
+ * r2 and r3 are clobbered, so probes along the boot say how far it gets
+ * and whether the stamps still land at each point.
  */
-static unsigned int mark_run;
-module_param(mark_run, uint, 0644);
-MODULE_PARM_DESC(mark_run, "Stamp DRAM at this firmware offset and continue (0 = off)");
+struct scsc_mark_site {
+	u32	off;		/* firmware offset of the probe */
+	u32	value;		/* DRAM offset it stamps */
+};
+
+static bool mark_run;
+module_param(mark_run, bool, 0644);
+MODULE_PARM_DESC(mark_run, "Stamp three points of the boot in shared DRAM and continue");
+
+static const struct scsc_mark_site scsc_mark_run_sites[] = {
+	{ 0x330, 0x200000 },
+	{ 0x3f6, 0x280000 },
+	{ 0x400, 0x300000 },
+};
 
 /* The entry code zeroes the stack pointer five times before it sets one
  * up, so any call that pushes during early boot lands at 0xfffffffc.
@@ -983,11 +993,6 @@ module_param(mark_mbox, bool, 0644);
 MODULE_PARM_DESC(mark_mbox, "Stamp the M4 mailbox from three early-boot points");
 
 #define SCSC_MARK_MBOX_SITES	3
-struct scsc_mark_site {
-	u32	off;		/* firmware offset of the probe */
-	u32	value;
-};
-
 /* Sequential stamps into one M4 mailbox word: the last value to land
  * says how far the R4 got. Each probe keeps r0 and r1, so the code
  * around it still runs (with stack_fix enabled).
@@ -1276,24 +1281,30 @@ static int scsc_wifibt_stack_fix(struct scsc_wifibt *scsc)
 static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 {
 	u8 stub[SCSC_MARK_RUN_LEN];
+	unsigned int i;
 	void *dram;
-
-	if (mark_run & 1 || mark_run + SCSC_MARK_RUN_LEN > scsc->mem_size - 16 ||
-	    SCSC_MARK_RUN_SLOT + 4 > scsc->mem_size) {
-		dev_err(scsc->dev, "run offset 0x%x unusable\n", mark_run);
-		return -EINVAL;
-	}
-
-	memcpy(stub, scsc_mark_run_stub, sizeof(scsc_mark_run_stub));
-	put_unaligned_le32(0x80000000u + SCSC_MARK_RUN_SLOT,
-			   stub + sizeof(scsc_mark_run_stub));
 
 	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return -ENOMEM;
 
-	put_unaligned_le32(SCSC_MARK_VALUE, dram + SCSC_MARK_RUN_SLOT);
-	memcpy(dram + mark_run, stub, sizeof(stub));
+	for (i = 0; i < ARRAY_SIZE(scsc_mark_run_sites); i++) {
+		const struct scsc_mark_site *s = &scsc_mark_run_sites[i];
+
+		if (s->off & 3 || s->off + SCSC_MARK_RUN_LEN >
+		    scsc->mem_size - 16 || s->value + 4 > scsc->mem_size) {
+			dev_err(scsc->dev, "run offset 0x%x unusable\n",
+				s->off);
+			scsc_wifibt_unmap(dram);
+			return -EINVAL;
+		}
+
+		memcpy(stub, scsc_mark_run_stub, sizeof(scsc_mark_run_stub));
+		put_unaligned_le32(0x80000000u + s->value,
+				   stub + sizeof(scsc_mark_run_stub));
+		put_unaligned_le32(SCSC_MARK_VALUE, dram + s->value);
+		memcpy(dram + s->off, stub, sizeof(stub));
+	}
 	scsc_wifibt_unmap(dram);
 
 	/* Same stamp aimed at the BT-ABOX window: if that one lands and
@@ -1308,8 +1319,9 @@ static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 		}
 	}
 
-	dev_info(scsc->dev, "marking pass at 0x%x, slot 0x%x\n",
-		 mark_run, SCSC_MARK_RUN_SLOT);
+	dev_info(scsc->dev, "passing marks at 0x%x, 0x%x, 0x%x\n",
+		 scsc_mark_run_sites[0].off, scsc_mark_run_sites[1].off,
+		 scsc_mark_run_sites[2].off);
 
 	return 0;
 }
@@ -1559,27 +1571,36 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 
 	if (mark_run) {
 		void *dram = scsc_wifibt_map(scsc);
-		u32 val = 0;
+		unsigned int i;
 
 		if (dram) {
-			val = readl(dram + SCSC_MARK_RUN_SLOT);
+			for (i = 0; i < ARRAY_SIZE(scsc_mark_run_sites); i++) {
+				const struct scsc_mark_site *s =
+					&scsc_mark_run_sites[i];
+				u32 val = readl(dram + s->value);
+
+				dev_info(scsc->dev,
+					 "mark 0x%x: slot 0x%x = 0x%08x %s\n",
+					 s->off, s->value, val,
+					 val == 0xa5a5a5a5 ? "PASSED" :
+					 "not reached");
+			}
 			scsc_wifibt_unmap(dram);
 		}
-		dev_info(scsc->dev, "mark run 0x%x: slot 0x%08x %s\n",
-			 mark_run, val,
-			 val == 0xa5a5a5a5 ? "PASSED" : "not reached");
 
 		if (abox_win) {
 			void __iomem *abox = ioremap(SCSC_ABOX_BASE, 0x1000);
 
 			if (abox) {
-				val = readl(abox + SCSC_MARK_RUN_SLOT);
-				iounmap(abox);
+				u32 val = readl(abox +
+						scsc_mark_run_sites[0].value);
+
 				dev_info(scsc->dev,
-					 "mark run 0x%x: abox slot 0x%08x %s\n",
-					 mark_run, val,
+					 "mark abox slot 0x%x = 0x%08x %s\n",
+					 scsc_mark_run_sites[0].value, val,
 					 val == 0xa5a5a5a5 ? "PASSED" :
 					 "not reached");
+				iounmap(abox);
 			}
 		}
 	}
@@ -2076,8 +2097,15 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to halt entry\n");
 		}
 
-	if (mark_mbox) {
-		ret = scsc_wifibt_mark_mbox(scsc);
+		if (skip_regions) {
+			ret = scsc_wifibt_skip_regions(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to skip regions\n");
+		}
+
+		if (mark_mbox) {
+			ret = scsc_wifibt_mark_mbox(scsc);
 		if (ret)
 			return dev_err_probe(dev, ret,
 					     "failed to install mailbox probes\n");
@@ -2090,13 +2118,12 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 					     "failed to fix early stack\n");
 	}
 
-	if (mark_run) {
-		ret = scsc_wifibt_mark_run(scsc);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to mark run 0x%x\n",
-					     mark_run);
-	}
+		if (mark_run) {
+			ret = scsc_wifibt_mark_run(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to stamp boot points\n");
+		}
 
 	if (mark_at) {
 		ret = scsc_wifibt_mark_at(scsc);
