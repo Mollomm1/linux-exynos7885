@@ -409,8 +409,8 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	 * first milliseconds (M4 status, mailbox signals) shows here.
 	 * Logs only changes.
 	 */
-	usleep_range(1000, 2000);
-	for (i = 0; i < 25; i++) {
+	usleep_range(100, 300);
+	for (i = 0; i < 200; i++) {
 		static u32 lm0, lm1, lr0, lr1, lp;
 		u32 m0 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
 		u32 m1 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(1));
@@ -429,7 +429,7 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 		lm1 = m1;
 		lr0 = r0;
 		lr1 = r1;
-		usleep_range(1500, 2500);
+		usleep_range(100, 300);
 	}
 
 	/* Immediate readback: the START bit auto-clears on UP, which takes
