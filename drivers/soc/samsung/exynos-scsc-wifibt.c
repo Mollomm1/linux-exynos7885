@@ -1509,7 +1509,7 @@ static int scsc_wifibt_mark_bisect(struct scsc_wifibt *scsc)
 static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 {
 	u8 stub[SCSC_MARK_LEN];
-	unsigned int i, n = 0;
+	unsigned int i, n, imm;
 	void *dram;
 
 	if (mark_at & 1 || mark_at + SCSC_MARK_LEN > scsc->mem_size - 16) {
@@ -1532,9 +1532,19 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 		u8 *code = stub + 8 + 4 * n;
 		u8 *lit = stub + SCSC_STUB_POOL_OFF + 4 * n;
 
+		/* Thumb-1 literal load: address is Align(PC, 4) + imm8 * 4
+		 * with PC one instruction past the load, so the immediate
+		 * follows from where the pool actually ended up.
+		 */
+		imm = (unsigned int)(lit - (code + 4)) / 4;
+		if (imm > 0xff) {
+			dev_err(scsc->dev, "stub literal out of reach\n");
+			scsc_wifibt_unmap(dram);
+			return -EINVAL;
+		}
 		put_unaligned_le32(0x80000000u + off, lit);
-		put_unaligned_le16(0x4909, code);
-		put_unaligned_le16(0x6008, code + 2);
+		put_unaligned_le16(0x4900 | imm, code);
+		put_unaligned_le16(0x6008, code + 2);	/* str r0, [r1] */
 		put_unaligned_le32(SCSC_MARK_VALUE, dram + off);
 		n++;
 	}
