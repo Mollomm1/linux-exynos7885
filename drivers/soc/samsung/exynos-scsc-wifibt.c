@@ -268,6 +268,9 @@ struct scsc_wifibt {
 	u32		gdb_ta_buf;
 	u32		mgmt_ta_buf;
 	u32		mgmt_ta_widx;
+	u32		mgmt_fa_buf;
+	u32		mgmt_fa_widx;
+	u32		mark_off;
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -639,6 +642,8 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 	scsc->gdb_ta_buf = gdb_r4_in;
 	scsc->mgmt_ta_buf = to_ap;
 	scsc->mgmt_ta_widx = to_ap + SCSC_MGMT_BUF_LEN;
+	scsc->mgmt_fa_buf = from_ap;
+	scsc->mgmt_fa_widx = from_ap + SCSC_MGMT_BUF_LEN;
 	dev_info(scsc->dev, "mxconf at DRAM offset 0x%x\n", mx_off);
 
 	return 0;
@@ -846,6 +851,21 @@ static bool halt_entry;
 module_param(halt_entry, bool, 0644);
 MODULE_PARM_DESC(halt_entry, "Replace the firmware entry with an infinite loop");
 
+/* Halt the R4 at a chosen firmware offset and leave a sign that it got
+ * there: store 0xa5 over the low half of a marker word at the top of the
+ * window, then spin. A marker that stayed untouched means the R4 never
+ * reached that offset (it stopped, looped or faulted earlier); a marker
+ * that changed means the R4 ran at least up to it. Sweeping the offset
+ * bisects where execution stops.
+ */
+static unsigned int mark_at;
+module_param(mark_at, uint, 0644);
+MODULE_PARM_DESC(mark_at, "Halt the R4 at this firmware offset and mark DRAM (0 = off)");
+
+/* mov.w r0, #0xa5; ldr r1, [pc, #2]; str r0, [r1]; b .; .word address */
+#define SCSC_MARK_LEN	14
+#define SCSC_MARK_VALUE	0xdeadbeef
+
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
 	void *dram;
@@ -951,6 +971,38 @@ static int scsc_wifibt_halt_entry(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "halted firmware entry at 0x%x\n", off);
+
+	return 0;
+}
+
+static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
+{
+	u8 stub[SCSC_MARK_LEN] = {
+		0x4f, 0xf0, 0xa5, 0x00, /* mov.w r0, #0xa5 */
+		0x02, 0x49,	       /* ldr r1, [pc, #2] */
+		0x08, 0x60,	       /* str r0, [r1] */
+		0xfe, 0xe7,	       /* b . */
+	};
+	void *dram;
+
+	if (mark_at & 3 || mark_at + SCSC_MARK_LEN > scsc->mem_size ||
+	    mark_at + SCSC_MARK_LEN > scsc->mem_size - 16) {
+		dev_err(scsc->dev, "mark offset 0x%x unusable\n", mark_at);
+		return -EINVAL;
+	}
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	scsc->mark_off = scsc->mem_size - 16;
+	put_unaligned_le32(SCSC_MARK_VALUE, dram + scsc->mark_off);
+	put_unaligned_le32(0x80000000u + scsc->mark_off, stub + 10);
+	memcpy(dram + mark_at, stub, sizeof(stub));
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "marked and halted at 0x%x, marker 0x%x\n",
+		 mark_at, scsc->mark_off);
 
 	return 0;
 }
@@ -1150,6 +1202,20 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		 stat, (seq & SCSC_PMU_STATES) >> 16, status,
 		 atomic_read(&scsc->irq_count), atomic_read(&scsc->wdog_count));
 
+	if (mark_at) {
+		void *dram = scsc_wifibt_map(scsc);
+		u32 val = 0;
+
+		if (dram) {
+			val = readl(dram + scsc->mark_off);
+			scsc_wifibt_unmap(dram);
+		}
+		dev_info(scsc->dev, "mark at 0x%x: marker 0x%08x %s\n",
+			 mark_at, val,
+			 val == (SCSC_MARK_VALUE & 0xffff0000u) + 0xa5 ?
+			 "REACHED" : "not reached");
+	}
+
 	if (r4_probe || patch_entry) {
 		void *dram = scsc_wifibt_map(scsc);
 		u32 off, found = 0;
@@ -1294,6 +1360,11 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 				 readl(dram + scsc->mgmt_ta_buf),
 				 readl(dram + scsc->mgmt_ta_buf + 4),
 				 readl(dram + scsc->mgmt_ta_widx));
+			dev_info(scsc->dev,
+				 "scan mgmt-fa %08x %08x widx %08x\n",
+				 readl(dram + scsc->mgmt_fa_buf),
+				 readl(dram + scsc->mgmt_fa_buf + 4),
+				 readl(dram + scsc->mgmt_fa_widx));
 			scsc_wifibt_unmap(dram);
 		}
 	}
@@ -1303,13 +1374,6 @@ static ssize_t scan_store(struct device *dev, struct device_attribute *attr,
 			  const char *buf, size_t count)
 {
 	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
-	int irq = platform_get_irq_byname(to_platform_device(dev), "WDOG");
-
-	/* Re-arm the watchdog so periodic pulses show as a growing count
-	 * with timestamps (rate-limited: only on manual scan).
-	 */
-	if (irq >= 0 && atomic_read(&scsc->wdog_count))
-		enable_irq(irq);
 
 	scsc_wifibt_scan(scsc);
 
@@ -1612,8 +1676,16 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to halt entry\n");
 		}
 
+		if (mark_at) {
+			ret = scsc_wifibt_mark_at(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to mark at 0x%x\n",
+						     mark_at);
+		}
+
 		if (patch_entry || nop_wait || graft_mm || skip_mpu ||
-		    halt_entry) {
+		    halt_entry || mark_at) {
 			ret = scsc_wifibt_repair_crcs(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
