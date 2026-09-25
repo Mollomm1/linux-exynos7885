@@ -195,6 +195,14 @@ MODULE_PARM_DESC(fill_gap, "Fill shared DRAM beyond the image with 0xAA before b
 #define SCSC_PMU_PERI_WIN2		0x7328
 #define SCSC_PMU_PERI_WIN3		0x732c
 
+/* Open every BAAW access window. The MIF windows read 0x55555555
+ * (per-region 01); if 01 means read-only, writes need all-ones.
+ * Experimental: if it breaks working reads, reboot restores POR.
+ */
+static bool open_wins;
+module_param(open_wins, bool, 0644);
+MODULE_PARM_DESC(open_wins, "Write all-ones to the BAAW access windows before release");
+
 /* Low-power controls touched by the power-off path. Snapshotted at
  * probe (cold defaults) and restored on power-on: releasing without
  * them leaves a warm block wedged with START held.
@@ -811,6 +819,26 @@ static void scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	if (ret)
 		dev_warn(scsc->dev, "failed to clear BOOT_TEST_RST_CFG: %d\n",
 			 ret);
+
+	if (open_wins) {
+		static const unsigned int wins[] = {
+			SCSC_PMU_MIF_WIN0, SCSC_PMU_MIF_WIN1,
+			SCSC_PMU_PERI_WIN0, SCSC_PMU_PERI_WIN1,
+			SCSC_PMU_PERI_WIN2, SCSC_PMU_PERI_WIN3,
+		};
+		unsigned int i;
+
+		for (i = 0; i < ARRAY_SIZE(wins); i++) {
+			ret = regmap_write(scsc->pmureg, wins[i], 0xffffffff);
+			if (ret) {
+				dev_warn(scsc->dev,
+					 "failed to open window 0x%x: %d\n",
+					 wins[i], ret);
+				break;
+			}
+		}
+		dev_info(scsc->dev, "access windows opened\n");
+	}
 }
 
 static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
