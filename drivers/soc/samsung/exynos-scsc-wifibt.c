@@ -806,6 +806,21 @@ static const u8 scsc_wait_loop_2021[] = {
 #define SCSC_WAIT_OFF		0x1f6
 #define SCSC_WAIT_LEN		16
 
+/* MPU setup block (2019 image, file 0x222): two MCRs with barrier.
+ * Skipping leaves whatever the ROM configured (possibly open).
+ */
+static const u8 scsc_mpu_block[] = {
+	0x06, 0xee, 0x12, 0x0f, 0x4f, 0xf0, 0x00, 0x00,
+	0xbf, 0xf3, 0x4f, 0x8f, 0x06, 0xee, 0x51, 0x0f,
+	0xbf, 0xf3, 0x6f, 0x8f,
+};
+#define SCSC_MPU_OFF		0x222
+#define SCSC_MPU_LEN		20
+
+static bool skip_mpu;
+module_param(skip_mpu, bool, 0644);
+MODULE_PARM_DESC(skip_mpu, "Replace the MPU setup block with NOPs");
+
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
 	void *dram;
@@ -862,6 +877,30 @@ static int scsc_wifibt_nop_wait(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "nopped table wait loop\n");
+
+	return 0;
+}
+
+static int scsc_wifibt_skip_mpu(struct scsc_wifibt *scsc)
+{
+	void *dram;
+	unsigned int i;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	if (memcmp(dram + SCSC_MPU_OFF, scsc_mpu_block, SCSC_MPU_LEN)) {
+		dev_err(scsc->dev, "mpu block bytes mismatch, not patching\n");
+		scsc_wifibt_unmap(dram);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < SCSC_MPU_LEN; i += 2)
+		put_unaligned_le16(0xbf00, dram + SCSC_MPU_OFF + i);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "nopped mpu setup block\n");
 
 	return 0;
 }
@@ -1502,7 +1541,14 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to nop wait\n");
 		}
 
-		if (patch_entry || nop_wait || graft_mm) {
+		if (skip_mpu) {
+			ret = scsc_wifibt_skip_mpu(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to skip mpu\n");
+		}
+
+		if (patch_entry || nop_wait || graft_mm || skip_mpu) {
 			ret = scsc_wifibt_repair_crcs(scsc);
 			if (ret)
 				return dev_err_probe(dev, ret,
