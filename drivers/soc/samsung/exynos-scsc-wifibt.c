@@ -192,6 +192,7 @@ struct scsc_wifibt {
 	u32		mxconf_off;
 	u32		sig_entry;
 	u32		sig_mbox1;
+	u32		mxlog_off;
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -533,6 +534,7 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 	scsc_wifibt_unmap(dram);
 
 	scsc->mxconf_off = mx_off;
+	scsc->mxlog_off = mxlog;
 	dev_info(scsc->dev, "mxconf at DRAM offset 0x%x\n", mx_off);
 
 	return 0;
@@ -828,9 +830,28 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 		 readl(scsc->base + SCSC_MBOX_ISSR(5)),
 		 readl(scsc->base + SCSC_MBOX_ISSR(6)),
 		 readl(scsc->base + SCSC_MBOX_ISSR(7)));
+
+	if (scsc->mxlog_off) {
+		void *dram = scsc_wifibt_map(scsc);
+
+		if (dram) {
+			dev_info(scsc->dev,
+				 "scan mxlog ridx %08x widx %08x data %08x %08x %08x %08x\n",
+				 readl(dram + scsc->mxlog_off +
+				       SCSC_MXLOG_BUF_LEN),
+				 readl(dram + scsc->mxlog_off +
+				       SCSC_MXLOG_BUF_LEN + 4),
+				 readl(dram + scsc->mxlog_off),
+				 readl(dram + scsc->mxlog_off + 4),
+				 readl(dram + scsc->mxlog_off + 8),
+				 readl(dram + scsc->mxlog_off + 12));
+			scsc_wifibt_unmap(dram);
+		}
+	}
 }
 
 static ssize_t scan_store(struct device *dev, struct device_attribute *attr,
+			  const char *buf, size_t count)
 			  const char *buf, size_t count)
 {
 	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
