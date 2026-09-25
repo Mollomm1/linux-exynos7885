@@ -680,6 +680,30 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 {
 	unsigned int i, status = 0;
 
+	/* Early timeline: sample the M4 status and mailbox every 50 ms
+	 * for 2 s after release, logging only changes. Shows the boot
+	 * choreography (who writes what when) instead of one snapshot.
+	 */
+	for (i = 0; i < 40; i++) {
+		static u32 last_m4_0, last_m4_1, last_msr;
+		u32 m4_0 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
+		u32 m4_1 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(1));
+		u32 msr = readl(scsc->base + SCSC_MBOX_INTMSR0) >> 16;
+
+		if (i == 0 || m4_0 != last_m4_0 || m4_1 != last_m4_1 ||
+		    msr != last_msr)
+			dev_info(scsc->dev,
+				 "t+%ums M4 %08x %08x MSR %04x IRQs %d WDOG %d\n",
+				 i * 50, m4_0, m4_1, msr,
+				 atomic_read(&scsc->irq_count),
+				 atomic_read(&scsc->wdog_count));
+
+		last_m4_0 = m4_0;
+		last_m4_1 = m4_1;
+		last_msr = msr;
+		msleep(50);
+	}
+
 	for (i = 0; i < 10; i++) {
 		msleep(100);
 		status = readl(scsc->base + SCSC_MBOX_INTMSR0) >> 16;
