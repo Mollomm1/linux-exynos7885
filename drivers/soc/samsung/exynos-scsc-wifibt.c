@@ -270,7 +270,8 @@ struct scsc_wifibt {
 	u32		mgmt_ta_widx;
 	u32		mgmt_fa_buf;
 	u32		mgmt_fa_widx;
-	u32		mark_off;
+	u32		mark_seen;
+	u8		mark_bits[SCSC_MARK_SLOTS];
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -852,19 +853,27 @@ module_param(halt_entry, bool, 0644);
 MODULE_PARM_DESC(halt_entry, "Replace the firmware entry with an infinite loop");
 
 /* Halt the R4 at a chosen firmware offset and leave a sign that it got
- * there: store 0xa5 over the low half of a marker word at the top of the
- * window, then spin. A marker that stayed untouched means the R4 never
- * reached that offset (it stopped, looped or faulted earlier); a marker
- * that changed means the R4 ran at least up to it. Sweeping the offset
- * bisects where execution stops.
+ * there: store 0xa5 to eight words spread over the upper window, then
+ * spin. Words that stayed preset mean the R4 never reached that offset;
+ * words that changed mean it ran at least up to it, and the pattern says
+ * which parts of the window it can write at all. Sweeping the halt
+ * offset bisects where execution stops.
  */
 static unsigned int mark_at;
 module_param(mark_at, uint, 0644);
 MODULE_PARM_DESC(mark_at, "Halt the R4 at this firmware offset and mark DRAM (0 = off)");
 
-/* mov.w r0, #0xa5; ldr r1, [pc, #2]; str r0, [r1]; b .; .word address */
-#define SCSC_MARK_LEN	14
-#define SCSC_MARK_VALUE	0xdeadbeef
+/* mov.w r0, #0xa5; then per slot: ldr r1, [pc, #imm]; str r0, [r1];
+ * b .; then one literal address per slot
+ */
+#define SCSC_MARK_VALUE		0xdeadbeef
+#define SCSC_MARK_STAMP		0xa5
+static const u32 scsc_mark_slots[] = {
+	0x150000, 0x180000, 0x200000, 0x280000,
+	0x300000, 0x340000, 0x380000,
+};
+#define SCSC_MARK_SLOTS		(ARRAY_SIZE(scsc_mark_slots) + 1)
+#define SCSC_MARK_LEN		(6 + 8 * SCSC_MARK_SLOTS)
 
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
@@ -979,14 +988,11 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 {
 	u8 stub[SCSC_MARK_LEN] = {
 		0x4f, 0xf0, 0xa5, 0x00, /* mov.w r0, #0xa5 */
-		0x02, 0x49,	       /* ldr r1, [pc, #2] */
-		0x08, 0x60,	       /* str r0, [r1] */
-		0xfe, 0xe7,	       /* b . */
 	};
+	unsigned int i;
 	void *dram;
 
-	if (mark_at & 3 || mark_at + SCSC_MARK_LEN > scsc->mem_size ||
-	    mark_at + SCSC_MARK_LEN > scsc->mem_size - 16) {
+	if (mark_at & 3 || mark_at + SCSC_MARK_LEN > scsc->mem_size - 16) {
 		dev_err(scsc->dev, "mark offset 0x%x unusable\n", mark_at);
 		return -EINVAL;
 	}
@@ -995,14 +1001,23 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
-	scsc->mark_off = scsc->mem_size - 16;
-	put_unaligned_le32(SCSC_MARK_VALUE, dram + scsc->mark_off);
-	put_unaligned_le32(0x80000000u + scsc->mark_off, stub + 10);
+	for (i = 0; i < SCSC_MARK_SLOTS; i++) {
+		u32 off = i < ARRAY_SIZE(scsc_mark_slots) ?
+			  scsc_mark_slots[i] : scsc->mem_size - 16;
+		u8 *code = stub + 4 + 4 * i;
+		u8 *lit = stub + 6 + 4 * SCSC_MARK_SLOTS + 4 * i;
+
+		put_unaligned_le32(0x80000000u + off, lit);
+		put_unaligned_le16(0x4900 | (u8)(lit - code - 4), code);
+		put_unaligned_le16(0x6008, code + 2);
+		put_unaligned_le32(SCSC_MARK_VALUE, dram + off);
+	}
+
+	put_unaligned_le16(0xe7fe, stub + 4 + 4 * SCSC_MARK_SLOTS);
 	memcpy(dram + mark_at, stub, sizeof(stub));
 	scsc_wifibt_unmap(dram);
 
-	dev_info(scsc->dev, "marked and halted at 0x%x, marker 0x%x\n",
-		 mark_at, scsc->mark_off);
+	dev_info(scsc->dev, "marked and halted at 0x%x\n", mark_at);
 
 	return 0;
 }
@@ -1204,16 +1219,28 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 
 	if (mark_at) {
 		void *dram = scsc_wifibt_map(scsc);
-		u32 val = 0;
+		unsigned int i, hits = 0;
+		u8 seen[SCSC_MARK_SLOTS] = { 0 };
 
 		if (dram) {
-			val = readl(dram + scsc->mark_off);
+			for (i = 0; i < SCSC_MARK_SLOTS; i++) {
+				u32 off = i < ARRAY_SIZE(scsc_mark_slots) ?
+					  scsc_mark_slots[i] :
+					  scsc->mem_size - 16;
+				u32 val = readl(dram + off);
+
+				seen[i] = val ==
+					  (SCSC_MARK_VALUE & 0xffff0000u) +
+					  SCSC_MARK_STAMP;
+				hits += seen[i];
+			}
 			scsc_wifibt_unmap(dram);
 		}
-		dev_info(scsc->dev, "mark at 0x%x: marker 0x%08x %s\n",
-			 mark_at, val,
-			 val == (SCSC_MARK_VALUE & 0xffff0000u) + 0xa5 ?
-			 "REACHED" : "not reached");
+		scsc->mark_seen = 0;
+		memcpy(scsc->mark_bits, seen, sizeof(seen));
+		dev_info(scsc->dev, "mark at 0x%x: %u/%u slots written %*ph\n",
+			 mark_at, hits, SCSC_MARK_SLOTS,
+			 (int)sizeof(seen), seen);
 	}
 
 	if (r4_probe || patch_entry) {
