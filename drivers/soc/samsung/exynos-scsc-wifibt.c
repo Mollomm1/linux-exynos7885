@@ -318,23 +318,17 @@ struct scsc_wifibt {
  * memremap WC refuses RAM that already has a cached linear alias, so
  * build the mapping the downstream way instead.
  */
-static bool wc_map;
-module_param(wc_map, bool, 0644);
-MODULE_PARM_DESC(wc_map,
-		 "Map the shared window Normal non-cacheable instead of as device memory");
-
 /*
- * The window is plain RAM that the R4 writes behind our back, so it has
- * to be mapped coherently.  Normal non-cacheable memory may satisfy a
- * read out of a stale speculative cache line, which is exactly what we
- * saw: two reads microseconds apart returned different values.  Device
- * memory forbids speculation and merging, and all our accesses to this
- * window are naturally aligned 32-bit ones.
+ * The window is RAM the R4 writes behind our back, so how it is mapped
+ * matters.  Normal non-cacheable (which is what pgprot_writecombine()
+ * selects on arm64) may satisfy a read out of a speculative line, but
+ * it is also what Samsung's own driver uses for this window, and
+ * Device memory cannot be used here at all: it forbids the unaligned
+ * and merged accesses memcpy() performs, which faults.
  */
 static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 {
 	struct page **pages;
-	pgprot_t prot;
 	void *vmem;
 	unsigned int i, npages = PAGE_ALIGN(scsc->mem_size) >> PAGE_SHIFT;
 
@@ -345,9 +339,8 @@ static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 	for (i = 0; i < npages; i++)
 		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
 
-	prot = wc_map ? pgprot_writecombine(PAGE_KERNEL) :
-			pgprot_noncached(PAGE_KERNEL);
-	vmem = vmap(pages, npages, VM_MAP, prot);
+	vmem = vmap(pages, npages, VM_MAP,
+		    pgprot_writecombine(PAGE_KERNEL));
 	kfree(pages);
 
 	return vmem;
@@ -1610,9 +1603,43 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 	 * registers both cores touch, at a resolution we can afford to
 	 * spin for, right here where the R4 has just been released.
 	 */
-	if (fine > 0) {
+	/* The R4 writes its panic record within microseconds of the
+	 * release and clears it again just as fast, so poll for it as
+	 * tightly as we can and keep the first complete copy.  Logging
+	 * inside the loop is far too slow: each line costs more than the
+	 * record lives.
+	 */
+	{
 		static u32 saved[64];
 		unsigned int saved_words = 0;
+		void *dram = scsc_wifibt_map(scsc);
+
+		if (dram) {
+			for (i = 0; i < 200000 && !saved_words; i++) {
+				if (readl(dram + SCSC_PANIC_OFF) == 2) {
+					unsigned int j;
+
+					saved_words = min_t(u32,
+							    ARRAY_SIZE(saved),
+							    readl(dram + SCSC_PANIC_OFF) / 4);
+					for (j = 0; j < saved_words; j++)
+						saved[j] = readl(dram + SCSC_PANIC_OFF + 4 * j);
+				}
+			}
+			scsc_wifibt_unmap(dram);
+		}
+
+		if (saved_words) {
+			dev_info(scsc->dev,
+				 "caught a record after %u polls\n", i);
+			scsc_wifibt_panic_print(scsc->dev, saved, saved_words);
+		} else {
+			dev_info(scsc->dev,
+				 "no record in %u polls\n", i);
+		}
+	}
+
+	if (fine > 0) {
 		void *dram = scsc_wifibt_map(scsc);
 
 		for (i = 0; i < fine; i++) {
@@ -1620,21 +1647,6 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			u32 r4 = readl(scsc->base + SCSC_MBOX_ISSR(0));
 			u32 r4sr = readl(scsc->base + SCSC_MBOX_INTMSR1);
 			u32 ver = dram ? readl(dram + SCSC_PANIC_OFF) : 0;
-
-			/* The record is only visible while this mapping
-			 * is up, so copy it out unconditionally on the
-			 * first sample and decode the copy later.
-			 */
-			if (i == 0 && dram) {
-				unsigned int j;
-
-				saved_words = min_t(u32, ARRAY_SIZE(saved),
-						    readl(dram + SCSC_PANIC_OFF) / 4);
-				for (j = 0; j < saved_words; j++)
-					saved[j] = readl(dram + SCSC_PANIC_OFF + 4 * j);
-				dev_info(scsc->dev, "snap %u words, first %08x\n",
-					 saved_words, saved[0]);
-			}
 
 			if (i % 10 == 0)
 				dev_info(scsc->dev,
@@ -1649,11 +1661,6 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		}
 		if (dram)
 			scsc_wifibt_unmap(dram);
-
-		if (saved_words) {
-			dev_info(scsc->dev, "record caught while sampling:\n");
-			scsc_wifibt_panic_print(scsc->dev, saved, saved_words);
-		}
 	}
 
 	scsc_wifibt_dump_panic(scsc);
