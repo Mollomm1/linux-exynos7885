@@ -1716,28 +1716,33 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		deadline = jiffies + msecs_to_jiffies(panic_poll_ms);
 		while (!saved[0] && time_before(jiffies, deadline)) {
 			if (readl(pdram + SCSC_PANIC_OFF) == 2) {
-				unsigned int j, words, round;
+				unsigned int j, words, round, good = 0;
 
-				/* The firmware writes the version word
-				 * first, so take a few spaced copies and
-				 * keep the last one, by which time the
-				 * rest of the record has landed.
+				/* The record is gone again within a couple
+				 * of hundred microseconds, so take copies
+				 * every 20us from the moment the version
+				 * word appears and keep the most complete
+				 * one we manage to catch.
 				 */
-				for (round = 0; round < 3; round++) {
-					udelay(100);
+				for (round = 0; round < 24; round++) {
 					words = min_t(u32, ARRAY_SIZE(saved),
 						      readl(pdram + SCSC_PANIC_OFF) / 4);
 					for (j = 0; j < words; j++)
 						saved[j] = readl(pdram + SCSC_PANIC_OFF + 4 * j);
+					if (saved[1] >= 8 * 4 && saved[1] <= SCSC_PANIC_LEN) {
+						if (!good++)
+							dev_info(scsc->dev,
+								 "record copy %u complete\n",
+								 round);
+						saved[0] = 2;
+					}
+					udelay(20);
 				}
-
-				/* Accept on a plausible length; whether the
-				 * checksum agrees is reported, not
-				 * required, since the firmware is not
-				 * obliged to fill it in on this path.
-				 */
-				if (saved[1] >= 8 * 4 && saved[1] <= SCSC_PANIC_LEN)
-					saved[0] = 2;
+				if (!good)
+					dev_info(scsc->dev,
+						 "record vanished before it was complete\n");
+				else
+					break;
 			}
 			/* Read gently: hammering the window starves
 			 * the R4 of shared-memory bandwidth, and it is
@@ -1755,7 +1760,8 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 			dev_info(scsc->dev,
 				 "no record in %u ms of polling\n",
 				 panic_poll_ms);
-		scsc_wifibt_panic_print(scsc->dev, saved, saved[0] ? ARRAY_SIZE(saved) : 0);
+		scsc_wifibt_panic_print(scsc->dev, saved,
+					 saved[0] ? ARRAY_SIZE(saved) : 0);
 	}
 
 	if (fine > 0) {
