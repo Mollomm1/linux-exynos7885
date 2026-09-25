@@ -830,8 +830,9 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 
 	if (poke_intgr)
 		writel(1u, scsc->base + SCSC_MBOX_INTGR1);
-	dev_info(scsc->dev, "poked FROMHOST bit 0 (pulse %s)\n",
-		 poke_intgr ? "sent" : "withheld");
+	dev_info(scsc->dev, "poked FROMHOST bit 0 (pulse %s) MR1 now %08x\n",
+		 poke_intgr ? "sent" : "withheld",
+		 readl(scsc->base + SCSC_MBOX_INTMR1));
 }
 
 static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
