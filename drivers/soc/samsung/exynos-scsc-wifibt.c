@@ -1027,6 +1027,31 @@ static ssize_t scan_store(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_WO(scan);
 
+/* Recover the block the way stock does on a reset request: full power
+ * cycle plus a fresh handshake, then observe. If the ROM boots in
+ * stages separated by reset requests, this runs stage 2.
+ */
+static ssize_t recover_store(struct device *dev,
+			     struct device_attribute *attr,
+			     const char *buf, size_t count)
+{
+	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
+
+	scsc_wifibt_power_off(scsc);
+	msleep(100);
+	scsc_wifibt_signal(scsc);
+
+	if (scsc_wifibt_power_on(scsc))
+		dev_warn(dev, "recovery power-on failed\n");
+	else
+		dev_info(dev, "recovered, watching\n");
+
+	scsc_wifibt_observe(scsc);
+
+	return count;
+}
+static DEVICE_ATTR_WO(recover);
+
 static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 				const struct firmware *fw)
 {
@@ -1140,6 +1165,10 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	ret = device_create_file(dev, &dev_attr_scan);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to create scan file\n");
+
+	ret = device_create_file(dev, &dev_attr_recover);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to create recover file\n");
 
 	/* R4 mailbox bank (index 0); M4 bank (index 1) is read-only for now. */
 	scsc->base = devm_platform_ioremap_resource(pdev, 0);
@@ -1282,6 +1311,7 @@ static void scsc_wifibt_remove(struct platform_device *pdev)
 	struct scsc_wifibt *scsc = platform_get_drvdata(pdev);
 
 	device_remove_file(&pdev->dev, &dev_attr_scan);
+	device_remove_file(&pdev->dev, &dev_attr_recover);
 	cancel_delayed_work_sync(&scsc->check_work);
 	scsc_wifibt_power_off(scsc);
 }
