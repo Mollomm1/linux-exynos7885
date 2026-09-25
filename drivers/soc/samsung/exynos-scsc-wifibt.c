@@ -154,7 +154,6 @@ struct scsc_wifibt {
 	u32		mxconf_off;
 	u32		sig_entry;
 	u32		sig_mbox1;
-	u32		lp_vals[ARRAY_SIZE(scsc_lp_regs)];
 	u32		dram_crc;
 	struct delayed_work check_work;
 	atomic_t	irq_count;
@@ -185,12 +184,16 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	unsigned int val, i;
 	int ret;
 
-	/* Restore the cold low-power defaults (see power_off asymmetry). */
+	/* NOTE: the low-power controls are NOT restored here. They read
+	 * all-ones while the block is off, so a snapshot would be garbage;
+	 * the power-off path (downstream-faithful) is the only writer.
+	 */
 	for (i = 0; i < ARRAY_SIZE(scsc_lp_regs); i++) {
-		ret = regmap_write(scsc->pmureg, scsc_lp_regs[i],
-				   scsc->lp_vals[i]);
+		ret = regmap_read(scsc->pmureg, scsc_lp_regs[i], &val);
 		if (ret)
 			return ret;
+		dev_info(scsc->dev, "LP reg 0x%03x post-power 0x%08x\n",
+			 scsc_lp_regs[i], val);
 	}
 
 	/* Expose the shared-memory carveout to the firmware block (4K units).
@@ -650,7 +653,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	struct reserved_mem *rmem;
 	struct device_node *rmem_np;
 	const struct firmware *fw;
-	unsigned int val, i;
+	unsigned int val;
 	int irq, ret;
 
 	scsc = devm_kzalloc(dev, sizeof(*scsc), GFP_KERNEL);
@@ -711,19 +714,6 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "failed to read WIFI_STAT\n");
 
 	dev_info(dev, "PMU WIFI_STAT 0x%08x\n", val);
-
-	/* Snapshot the cold low-power defaults for power_on restore. */
-	for (i = 0; i < ARRAY_SIZE(scsc_lp_regs); i++) {
-		ret = regmap_read(pmureg, scsc_lp_regs[i], &scsc->lp_vals[i]);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to snapshot LP regs\n");
-	}
-
-	dev_info(dev, "LP defaults %08x %08x %08x %08x %08x %08x %08x\n",
-		 scsc->lp_vals[0], scsc->lp_vals[1], scsc->lp_vals[2],
-		 scsc->lp_vals[3], scsc->lp_vals[4], scsc->lp_vals[5],
-		 scsc->lp_vals[6]);
 
 	irq = platform_get_irq_byname(pdev, "MBOX");
 	if (irq < 0)
