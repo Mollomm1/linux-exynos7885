@@ -1031,6 +1031,11 @@ static DEVICE_ATTR_WO(scan);
  * cycle plus a fresh handshake, then observe. If the ROM boots in
  * stages separated by reset requests, this runs stage 2.
  */
+static int scsc_wifibt_power_on(struct scsc_wifibt *scsc);
+static void scsc_wifibt_power_off(struct scsc_wifibt *scsc);
+static void scsc_wifibt_signal(struct scsc_wifibt *scsc);
+static void scsc_wifibt_observe(struct scsc_wifibt *scsc);
+
 static ssize_t recover_store(struct device *dev,
 			     struct device_attribute *attr,
 			     const char *buf, size_t count)
