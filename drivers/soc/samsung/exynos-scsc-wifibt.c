@@ -318,9 +318,23 @@ struct scsc_wifibt {
  * memremap WC refuses RAM that already has a cached linear alias, so
  * build the mapping the downstream way instead.
  */
+static bool wc_map;
+module_param(wc_map, bool, 0644);
+MODULE_PARM_DESC(wc_map,
+		 "Map the shared window Normal non-cacheable instead of as device memory");
+
+/*
+ * The window is plain RAM that the R4 writes behind our back, so it has
+ * to be mapped coherently.  Normal non-cacheable memory may satisfy a
+ * read out of a stale speculative cache line, which is exactly what we
+ * saw: two reads microseconds apart returned different values.  Device
+ * memory forbids speculation and merging, and all our accesses to this
+ * window are naturally aligned 32-bit ones.
+ */
 static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 {
 	struct page **pages;
+	pgprot_t prot;
 	void *vmem;
 	unsigned int i, npages = PAGE_ALIGN(scsc->mem_size) >> PAGE_SHIFT;
 
@@ -331,8 +345,9 @@ static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
 	for (i = 0; i < npages; i++)
 		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
 
-	vmem = vmap(pages, npages, VM_MAP,
-		    pgprot_writecombine(PAGE_KERNEL));
+	prot = wc_map ? pgprot_writecombine(PAGE_KERNEL) :
+			pgprot_noncached(PAGE_KERNEL);
+	vmem = vmap(pages, npages, VM_MAP, prot);
 	kfree(pages);
 
 	return vmem;
