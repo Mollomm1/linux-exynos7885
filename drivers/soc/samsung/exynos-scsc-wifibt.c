@@ -852,7 +852,6 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 
 static ssize_t scan_store(struct device *dev, struct device_attribute *attr,
 			  const char *buf, size_t count)
-			  const char *buf, size_t count)
 {
 	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
 
