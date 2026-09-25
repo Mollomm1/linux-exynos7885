@@ -130,6 +130,14 @@ static bool patch_entry;
 module_param(patch_entry, bool, 0644);
 MODULE_PARM_DESC(patch_entry, "Replace the firmware image at its entry point with the probe payload");
 
+/* NOP out the table_A wait loop so the firmware runs past a missing
+ * publisher. Layout-specific to the 2019 image (verified before
+ * patching); CRCs are repaired afterwards like any other patch.
+ */
+static bool nop_wait;
+module_param(nop_wait, bool, 0644);
+MODULE_PARM_DESC(nop_wait, "Replace the table wait loop with NOPs");
+
 /* Override MBOX_0 with an arbitrary value on the intact-image path.
  * Isolates whether the entry VALUE alone (independent of image
  * content) decides the firmware block's response.
@@ -669,6 +677,30 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 		return -ENOMEM;
 
 	memcpy(dram + off, scsc_probe_payload, sizeof(scsc_probe_payload));
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "patched probe payload over image at 0x%x\n",
+		 off);
+
+	return 0;
+}
+
+/* Expected bytes of the table_A wait loop (2019 image, file 0x1f6).
+ * Replaced with NOPs to run the firmware past a missing publisher.
+ */
+static const u8 scsc_wait_loop[] = {
+	0x4f, 0xf0, 0x03, 0x00, 0x53, 0xf0, 0x47, 0xfe,
+	0xc0, 0xf3, 0x00, 0x00, 0x00, 0xb1, 0xf7, 0xe7,
+};
+#define SCSC_WAIT_OFF		0x1f6
+
+static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
+{
+	void *dram;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
 
 	/* Repair the image CRCs over the patched copy so a validating ROM
 	 * still accepts it, then verify the repair.
@@ -692,8 +724,30 @@ static int scsc_wifibt_patch_entry(struct scsc_wifibt *scsc)
 	}
 	scsc_wifibt_unmap(dram);
 
-	dev_info(scsc->dev, "patched probe payload over image at 0x%x\n",
-		 off);
+	return 0;
+}
+
+static int scsc_wifibt_nop_wait(struct scsc_wifibt *scsc)
+{
+	void *dram;
+	unsigned int i;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	if (memcmp(dram + SCSC_WAIT_OFF, scsc_wait_loop,
+		   sizeof(scsc_wait_loop))) {
+		dev_err(scsc->dev, "wait loop bytes mismatch, not patching\n");
+		scsc_wifibt_unmap(dram);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < sizeof(scsc_wait_loop); i += 2)
+		put_unaligned_le16(0xbf00, dram + SCSC_WAIT_OFF + i);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "nopped table wait loop\n");
 
 	return 0;
 }
@@ -1295,6 +1349,20 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 			if (ret)
 				return dev_err_probe(dev, ret,
 						     "failed to patch entry\n");
+		}
+
+		if (nop_wait) {
+			ret = scsc_wifibt_nop_wait(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to nop wait\n");
+		}
+
+		if (patch_entry || nop_wait) {
+			ret = scsc_wifibt_repair_crcs(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to repair CRCs\n");
 		}
 
 		scsc_wifibt_signal(scsc);
