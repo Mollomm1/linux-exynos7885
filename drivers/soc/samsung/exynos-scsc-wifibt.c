@@ -929,6 +929,14 @@ MODULE_PARM_DESC(skip_regions, "NOP the R4 DRAM/MPU region descriptors");
 static unsigned int vecregion_rasr;
 module_param(vecregion_rasr, uint, 0644);
 MODULE_PARM_DESC(vecregion_rasr, "Override the vector-region attribute literal");
+
+/* Generic NOP window, for bisecting a suspect instruction sequence. */
+static unsigned int nop_at;
+module_param(nop_at, uint, 0644);
+MODULE_PARM_DESC(nop_at, "Firmware offset to NOP (0 = off)");
+static unsigned int nop_len = 4;
+module_param(nop_len, uint, 0644);
+MODULE_PARM_DESC(nop_len, "Length of the NOP window in bytes");
 static bool skip_vecregion;
 module_param(skip_vecregion, bool, 0644);
 MODULE_PARM_DESC(skip_vecregion, "NOP the R4 vector-table MPU region setup");
@@ -1177,6 +1185,31 @@ static int scsc_wifibt_skip_vecregion(struct scsc_wifibt *scsc)
 
 	dev_info(scsc->dev, "nopped vector region at 0x%x\n",
 		 SCSC_VECREGION_OFF);
+
+	return 0;
+}
+
+static int scsc_wifibt_nop_window(struct scsc_wifibt *scsc)
+{
+	void *dram;
+	unsigned int i;
+
+	if (!nop_at || nop_at & 1 || nop_len & 1 ||
+	    nop_at + nop_len > scsc->mem_size) {
+		dev_err(scsc->dev, "nop window 0x%x+0x%x unusable\n",
+			nop_at, nop_len);
+		return -EINVAL;
+	}
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	for (i = 0; i < nop_len; i += 2)
+		put_unaligned_le16(0xbf00, dram + nop_at + i);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "nopped 0x%x bytes at 0x%x\n", nop_len, nop_at);
 
 	return 0;
 }
@@ -2190,6 +2223,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 						     "failed to skip regions\n");
 		}
 
+		if (nop_at) {
+			ret = scsc_wifibt_nop_window(scsc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to nop window\n");
+		}
+
 		if (vecregion_rasr) {
 			ret = scsc_wifibt_vecregion_rasr(scsc);
 			if (ret)
@@ -2236,7 +2276,7 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (patch_entry || nop_wait || graft_mm || skip_mpu ||
 	    halt_entry || mark_at || mark_run || mark_count || mark_mbox ||
 	    stack_fix ||
-	    skip_regions || skip_vecregion || vecregion_rasr) {
+	    skip_regions || skip_vecregion || vecregion_rasr || nop_at) {
 		ret = scsc_wifibt_repair_crcs(scsc);
 		if (ret)
 			return dev_err_probe(dev, ret,
