@@ -1600,11 +1600,15 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			 "no probe landed");
 	}
 
-	if (mark_run) {
+	if (mark_run || mark_count) {
 		void *dram = scsc_wifibt_map(scsc);
 		unsigned int i;
 
-		if (dram) {
+		if (dram && mark_count) {
+			dev_info(scsc->dev, "count 0x%x passes: %u\n",
+				 SCSC_MARK_COUNT_OFF,
+				 readl(dram + SCSC_MARK_COUNT_SLOT));
+		} else if (dram) {
 			for (i = 0; i < ARRAY_SIZE(scsc_mark_run_sites); i++) {
 				const struct scsc_mark_site *s =
 					&scsc_mark_run_sites[i];
@@ -1619,11 +1623,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			scsc_wifibt_unmap(dram);
 		}
 
-		if (mark_count) {
-			dev_info(scsc->dev, "count 0x%x passes: %u\n",
-				 SCSC_MARK_COUNT_OFF,
-				 readl(dram + SCSC_MARK_COUNT_SLOT));
-		} else if (abox_win) {
+		if (abox_win) {
 			void __iomem *abox = ioremap(SCSC_ABOX_BASE, 0x1000);
 
 			if (abox) {
