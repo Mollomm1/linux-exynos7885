@@ -1122,7 +1122,11 @@ MODULE_PARM_DESC(halt_entry, "Replace the firmware entry with an infinite loop")
  * offset bisects where execution stops.
  */
 static unsigned int mark_at;
+static unsigned int mark_exec;
 module_param(mark_at, uint, 0644);
+module_param(mark_exec, uint, 0644);
+MODULE_PARM_DESC(mark_exec,
+		 "Run the instruction at mark_at before stamping, to tell an instruction that kills the R4 from a site it never reaches");
 MODULE_PARM_DESC(mark_at, "Halt the R4 at this firmware offset and mark DRAM (0 = off)");
 
 /* Non-halting markers: stamp DRAM and let the firmware carry on. Only
@@ -1436,9 +1440,7 @@ static int scsc_wifibt_halt_entry(struct scsc_wifibt *scsc)
 
 static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 {
-	u8 stub[SCSC_MARK_LEN] = {
-		0x4f, 0xf0, 0xa5, 0x00, /* mov.w r0, #0xa5 */
-	};
+	u8 stub[SCSC_MARK_LEN];
 	unsigned int i, n = 0;
 	void *dram;
 
@@ -1451,11 +1453,16 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	if (!dram)
 		return -ENOMEM;
 
+	memset(stub, 0x00, sizeof(stub));
+	put_unaligned_le16(0xbf00, stub);	/* nop */
+	put_unaligned_le16(0xbf00, stub + 2);	/* nop */
+	put_unaligned_le32(0x00a5f04f, stub + 4);	/* mov.w r0, #0xa5 */
+
 	for (i = 0; i < SCSC_MARK_SLOTS; i++) {
 		u32 off = i < ARRAY_SIZE(scsc_mark_slots) ?
 			  scsc_mark_slots[i] : scsc->mem_size - 16;
-		u8 *code = stub + 4 + 4 * n;
-		u8 *lit = stub + 0x2c + 4 * n;
+		u8 *code = stub + 8 + 4 * n;
+		u8 *lit = stub + 0x30 + 4 * n;
 
 		put_unaligned_le32(0x80000000u + off, lit);
 		put_unaligned_le16(0x4909, code);
@@ -1465,11 +1472,32 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	}
 
 	/* Spin once the stamps are out, so nothing after the halt matters. */
-	put_unaligned_le16(0xe7fe, stub + 0x28);
+	put_unaligned_le16(0xe7fe, stub + 0x2c);
+
+	/* With mark_exec, run the instruction we are replacing first and
+	 * only then stamp.  That separates "the R4 died executing this
+	 * instruction" from "the R4 died later" without moving the site.
+	 */
+	if (mark_exec) {
+		for (i = 0; i < 2; i += 2) {
+			u8 a = readb(dram + mark_at + i);
+			u8 b = readb(dram + mark_at + i + 1);
+
+			/* 0b11101/0b11110/0b11111 in the top five bits
+			 * of the first halfword means 32-bit Thumb-2.
+			 */
+			stub[i] = a;
+			stub[i + 1] = (b & 0xe0) == 0xe0 ? b : 0xbf;
+		}
+		if ((readb(dram + mark_at + 1) & 0xe0) != 0xe0)
+			stub[1] = 0x00;	/* lsls r0, r0, #0 */
+	}
+
 	scsc_win_copy(dram + mark_at, stub, sizeof(stub));
 	scsc_wifibt_unmap(dram);
 
-	dev_info(scsc->dev, "halted and marked at 0x%x\n", mark_at);
+	dev_info(scsc->dev, "halted and marked at 0x%x%s\n", mark_at,
+		 mark_exec ? " (after running the original instruction)" : "");
 
 	return 0;
 }
