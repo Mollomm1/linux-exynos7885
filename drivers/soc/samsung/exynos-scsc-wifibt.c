@@ -1680,55 +1680,48 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			"r8", "r9", "r10", "r11", "r12", "sp", "lr",
 			"spsr", "pc", "cpsr",
 		};
-		void *dram = NULL;
+		void *dram = scsc_wifibt_map(scsc);
 		u32 rec[64] = { 0 };
-		u32 words, sum = 0xa5a5a5a5;
+		u32 words = 0, sum = 0xa5a5a5a5;
 
 		if (dram) {
 			words = min_t(u32, ARRAY_SIZE(rec),
 				      readl(dram + SCSC_PANIC_OFF) / 4);
 			for (i = 0; i < words; i++)
 				rec[i] = readl(dram + SCSC_PANIC_OFF + 4 * i);
-			scsc_wifibt_unmap(dram);
 
 			/* The M4 shares this window and has been seen writing
 			 * into it; dump the literals the R4 is about to
 			 * consume to see whether the image it executes is
 			 * still intact.
 			 */
-			dram = scsc_wifibt_map(scsc);
-			if (dram) {
-				for (i = 0; i < 20; i++)
-					dev_info(scsc->dev,
-						 " lit[%02x] %08x%s",
-						 0x6b4 + 4 * i,
-						 readl(dram + 0x6b4 + 4 * i),
-						 (i % 4 == 3) ? "\n" : "");
-				scsc_wifibt_unmap(dram);
-			}
+			for (i = 0; i < 20; i++)
+				dev_info(scsc->dev, " lit[%02x] %08x%s",
+					 0x6b4 + 4 * i,
+					 readl(dram + 0x6b4 + 4 * i),
+					 (i % 4 == 3) ? "\n" : "");
+			scsc_wifibt_unmap(dram);
+		}
 
-			if (rec[0] != 2) {
-				dev_info(scsc->dev,
-					 "no R4 panic record (v=%u)\n", rec[0]);
-			} else {
-				dev_info(scsc->dev,
-					 "R4 panic: len %u bytes, t1m %u t32k %u\n",
-					 rec[1], rec[2], rec[3]);
-				for (i = 0; i < 18 && 4 + i < words; i++)
-					dev_info(scsc->dev, "  %-4s %08x\n",
-						 regs[i], rec[4 + i]);
-				for (i = 22; i + 1 < words; i++)
-					sum ^= rec[i];
-				sum ^= 0xa5a5a5a5;
-				dev_info(scsc->dev,
-					 "  info:");
-				for (i = 22; i + 1 < words; i++)
-					dev_info(scsc->dev, " %08x", rec[i]);
-				dev_info(scsc->dev,
-					 "\n  cksum rec %08x calc %08x %s\n",
-					 rec[words - 1], sum,
-					 rec[words - 1] == sum ? "OK" : "BAD");
-			}
+		if (rec[0] != 2) {
+			dev_info(scsc->dev, "no R4 panic record (v=%u)\n",
+				 rec[0]);
+		} else {
+			dev_info(scsc->dev,
+				 "R4 panic: len %u bytes, t1m %u t32k %u\n",
+				 rec[1], rec[2], rec[3]);
+			for (i = 0; i < 18 && 4 + i < words; i++)
+				dev_info(scsc->dev, "  %-4s %08x\n",
+					 regs[i], rec[4 + i]);
+			for (i = 22; i + 1 < words; i++)
+				sum ^= rec[i];
+			sum ^= 0xa5a5a5a5;
+			dev_info(scsc->dev, "  info:");
+			for (i = 22; i + 1 < words; i++)
+				dev_info(scsc->dev, " %08x", rec[i]);
+			dev_info(scsc->dev, "\n  cksum rec %08x calc %08x %s\n",
+				 rec[words - 1], sum,
+				 rec[words - 1] == sum ? "OK" : "BAD");
 		}
 	}
 
