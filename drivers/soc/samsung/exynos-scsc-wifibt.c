@@ -1026,6 +1026,10 @@ MODULE_PARM_DESC(tzasc_cmd, "Raw SMC id to call for the TZASC grant");
  */
 static bool mark_mbox;
 module_param(mark_mbox, bool, 0644);
+static int timeline;
+module_param(timeline, int, 0644);
+MODULE_PARM_DESC(timeline,
+		 "Sample the WLBT state every N ms during the boot check (0 = off)");
 MODULE_PARM_DESC(mark_mbox, "Stamp the M4 mailbox from three early-boot points");
 
 #define SCSC_MARK_MBOX_SITES	3
@@ -1656,6 +1660,27 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 	unsigned int stat, seq, status, i;
 	u32 crc;
 
+	/* A single snapshot at t+5s cannot tell an immediate fault from
+	 * a wait that times out seconds later, so sample the state the
+	 * R4 and M4 touch on a timeline and let the reader see when
+	 * progress actually stops.
+	 */
+	if (timeline > 0) {
+		unsigned int t;
+
+		for (t = 0; t < 20; t++) {
+			u32 m4 = readl(scsc->base_m4 + SCSC_MBOX_ISSR(0));
+			u32 m4sr = readl(scsc->base_m4 + SCSC_MBOX_INTMSR1);
+			u32 r4sr = readl(scsc->base + SCSC_MBOX_INTMSR1);
+
+			dev_info(scsc->dev,
+				 "tl t+%4ums crc %08x m4issr %08x m4sr %08x r4sr %08x wd %d\n",
+				 500 * t, scsc_wifibt_dram_crc(scsc), m4, m4sr,
+				 r4sr, atomic_read(&scsc->wdog_count));
+			msleep(timeline);
+		}
+	}
+
 	crc = scsc_wifibt_dram_crc(scsc);
 	regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &stat);
 	regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &seq);
@@ -1865,6 +1890,11 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 	u32 off, found = 0;
 	u32 crc;
 
+	/* A single snapshot at t+5s cannot tell an immediate fault from
+	 * a wait that times out seconds later, so sample the state the
+	 * R4 and M4 touch on a timeline and let the reader see when
+	 * progress actually stops.
+	 */
 	crc = scsc_wifibt_dram_crc(scsc);
 	regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &stat);
 	regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &seq);
