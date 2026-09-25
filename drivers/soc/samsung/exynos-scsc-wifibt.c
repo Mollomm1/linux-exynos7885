@@ -1680,7 +1680,7 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			"r8", "r9", "r10", "r11", "r12", "sp", "lr",
 			"spsr", "pc", "cpsr",
 		};
-		void *dram = scsc_wifibt_map(scsc);
+		void *dram = NULL;
 		u32 rec[64] = { 0 };
 		u32 words, sum = 0xa5a5a5a5;
 
@@ -1690,6 +1690,22 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 			for (i = 0; i < words; i++)
 				rec[i] = readl(dram + SCSC_PANIC_OFF + 4 * i);
 			scsc_wifibt_unmap(dram);
+
+			/* The M4 shares this window and has been seen writing
+			 * into it; dump the literals the R4 is about to
+			 * consume to see whether the image it executes is
+			 * still intact.
+			 */
+			dram = scsc_wifibt_map(scsc);
+			if (dram) {
+				for (i = 0; i < 20; i++)
+					dev_info(scsc->dev,
+						 " lit[%02x] %08x%s",
+						 0x6b4 + 4 * i,
+						 readl(dram + 0x6b4 + 4 * i),
+						 (i % 4 == 3) ? "\n" : "");
+				scsc_wifibt_unmap(dram);
+			}
 
 			if (rec[0] != 2) {
 				dev_info(scsc->dev,
