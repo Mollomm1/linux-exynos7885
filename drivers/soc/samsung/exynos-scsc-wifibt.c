@@ -1210,6 +1210,77 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	return 0;
 }
 
+static void scsc_mark_mov_imm(u8 *p, u32 val, bool top)
+{
+	u16 hi = 0xf240 | (top ? 0x80 : 0);
+	u16 lo;
+
+	hi |= ((val >> 11) & 1) << 10;
+	hi |= (val >> 12) & 0xf;
+	lo = ((val >> 8) & 7) << 12;
+	lo |= 3 << 8;
+	lo |= val & 0xff;
+	put_unaligned_le16(hi, p);
+	put_unaligned_le16(lo, p + 2);
+}
+
+static int scsc_wifibt_mark_mbox(struct scsc_wifibt *scsc)
+{
+	u8 stub[] = {
+		0x02, 0x4a,			/* ldr r2, [pc, #8] */
+		0x00, 0x00, 0x00, 0x00,		/* movw r3, #lo */
+		0x00, 0x00, 0x00, 0x00,		/* movt r3, #hi */
+		0x13, 0x60,			/* str r3, [r2] */
+		0x00, 0x00, 0x00, 0x00,		/* address */
+	};
+	unsigned int i;
+	void *dram;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(scsc_mark_mbox_sites); i++) {
+		const struct scsc_mark_site *s = &scsc_mark_mbox_sites[i];
+
+		scsc_mark_mov_imm(stub + 4, s->value & 0xffff, false);
+		scsc_mark_mov_imm(stub + 8, s->value >> 16, true);
+		put_unaligned_le32(0xa20e0000ul + SCSC_MARK_MBOX_REG,
+				   stub + sizeof(stub) - 4);
+		memcpy(dram + s->off, stub, sizeof(stub));
+	}
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "mailbox probes installed at 0x%x, 0x%x, 0x%x\n",
+		 scsc_mark_mbox_sites[0].off, scsc_mark_mbox_sites[1].off,
+		 scsc_mark_mbox_sites[2].off);
+
+	return 0;
+}
+
+static int scsc_wifibt_stack_fix(struct scsc_wifibt *scsc)
+{
+	void *dram;
+
+	dram = scsc_wifibt_map(scsc);
+	if (!dram)
+		return -ENOMEM;
+
+	if (memcmp(dram + 0x1b4, "\x4f\xf0\x00\x00", 4)) {
+		dev_err(scsc->dev, "stack patch site mismatch, not patching\n");
+		scsc_wifibt_unmap(dram);
+		return -EINVAL;
+	}
+
+	/* mov.w r0, #0x800: stack top of the 32K ATCM. */
+	memcpy(dram + 0x1b4, "\x4f\xf4\x00\x60", 4);
+	scsc_wifibt_unmap(dram);
+
+	dev_info(scsc->dev, "early boot stack set to 0x800\n");
+
+	return 0;
+}
+
 static int scsc_wifibt_mark_run(struct scsc_wifibt *scsc)
 {
 	static const u8 count_stub[] = {
