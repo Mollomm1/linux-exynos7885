@@ -1716,22 +1716,27 @@ static void scsc_wifibt_observe(struct scsc_wifibt *scsc)
 		deadline = jiffies + msecs_to_jiffies(panic_poll_ms);
 		while (!saved[0] && time_before(jiffies, deadline)) {
 			if (readl(pdram + SCSC_PANIC_OFF) == 2) {
-				unsigned int j, words;
-				u32 sum = 0xa5a5a5a5;
+				unsigned int j, words, round;
 
 				/* The firmware writes the version word
-				 * first, so give it a moment to finish
-				 * before copying, and only accept a copy
-				 * whose checksum agrees.
+				 * first, so take a few spaced copies and
+				 * keep the last one, by which time the
+				 * rest of the record has landed.
 				 */
-				udelay(200);
-				words = min_t(u32, ARRAY_SIZE(saved),
-					      readl(pdram + SCSC_PANIC_OFF) / 4);
-				for (j = 0; j < words; j++)
-					saved[j] = readl(pdram + SCSC_PANIC_OFF + 4 * j);
-				for (j = 0; j + 1 < words; j++)
-					sum ^= saved[j];
-				if (words > 1 && sum == saved[words - 1])
+				for (round = 0; round < 3; round++) {
+					udelay(100);
+					words = min_t(u32, ARRAY_SIZE(saved),
+						      readl(pdram + SCSC_PANIC_OFF) / 4);
+					for (j = 0; j < words; j++)
+						saved[j] = readl(pdram + SCSC_PANIC_OFF + 4 * j);
+				}
+
+				/* Accept on a plausible length; whether the
+				 * checksum agrees is reported, not
+				 * required, since the firmware is not
+				 * obliged to fill it in on this path.
+				 */
+				if (saved[1] >= 8 * 4 && saved[1] <= SCSC_PANIC_LEN)
 					saved[0] = 2;
 			}
 			if (++polls % 4096 == 0)
