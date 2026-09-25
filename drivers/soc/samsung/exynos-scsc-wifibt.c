@@ -882,17 +882,21 @@ static unsigned int mark_at;
 module_param(mark_at, uint, 0644);
 MODULE_PARM_DESC(mark_at, "Halt the R4 at this firmware offset and mark DRAM (0 = off)");
 
-/* mov.w r0, #0xa5; then per slot: ldr r1, [pc, #imm]; str r0, [r1];
- * b .; then one literal address per slot
+/* Stub: mov.w r0, #0xa5; per DRAM slot: ldr r1, [pc, #imm]; str r0, [r1];
+ * mov.w r0, #0x5a; ldr r1, [pc, #imm]; str r0, [r1]; b .; then one
+ * literal address per store. A mailbox hit proves the R4 runs and can
+ * write peripherals even if the DRAM stores fault.
  */
 #define SCSC_MARK_VALUE		0xdeadbeef
 #define SCSC_MARK_STAMP		0xa5
+#define SCSC_MARK_MBOX_STAMP	0x5a
+#define SCSC_MARK_MBOX		0xa20c0088u
 static const u32 scsc_mark_slots[] = {
 	0x150000, 0x180000, 0x200000, 0x280000,
 	0x300000, 0x340000, 0x380000,
 };
 #define SCSC_MARK_SLOTS		(ARRAY_SIZE(scsc_mark_slots) + 1)
-#define SCSC_MARK_LEN		(6 + 8 * SCSC_MARK_SLOTS)
+#define SCSC_MARK_LEN		(18 + 8 * SCSC_MARK_SLOTS)
 
 static int scsc_wifibt_repair_crcs(struct scsc_wifibt *scsc)
 {
@@ -1008,7 +1012,7 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	u8 stub[SCSC_MARK_LEN] = {
 		0x4f, 0xf0, 0xa5, 0x00, /* mov.w r0, #0xa5 */
 	};
-	unsigned int i;
+	unsigned int i, n = 0;
 	void *dram;
 
 	if (mark_at & 3 || mark_at + SCSC_MARK_LEN > scsc->mem_size - 16) {
@@ -1023,16 +1027,26 @@ static int scsc_wifibt_mark_at(struct scsc_wifibt *scsc)
 	for (i = 0; i < SCSC_MARK_SLOTS; i++) {
 		u32 off = i < ARRAY_SIZE(scsc_mark_slots) ?
 			  scsc_mark_slots[i] : scsc->mem_size - 16;
-		u8 *code = stub + 4 + 4 * i;
-		u8 *lit = stub + 6 + 4 * SCSC_MARK_SLOTS + 4 * i;
+		u8 *code = stub + 4 + 4 * n;
+		u8 *lit = stub + 14 + 4 * SCSC_MARK_SLOTS + 4 * n;
 
 		put_unaligned_le32(0x80000000u + off, lit);
 		put_unaligned_le16(0x4900 | (u8)(lit - code - 4), code);
 		put_unaligned_le16(0x6008, code + 2);
 		put_unaligned_le32(SCSC_MARK_VALUE, dram + off);
+		n++;
 	}
 
-	put_unaligned_le16(0xe7fe, stub + 4 + 4 * SCSC_MARK_SLOTS);
+	/* Same for the R4-side mailbox: readable from the AP bank. */
+	stub[4 + 4 * n] = 0x4f;
+	stub[5 + 4 * n] = 0xf0;
+	stub[6 + 4 * n] = SCSC_MARK_MBOX_STAMP;
+	stub[7 + 4 * n] = 0x00;
+	put_unaligned_le16(0x4900 | (u8)(sizeof(stub) - 8 - (8 + 4 * n)),
+			   stub + 8 + 4 * n);
+	put_unaligned_le16(0x6008, stub + 10 + 4 * n);
+	put_unaligned_le32(SCSC_MARK_MBOX, stub + sizeof(stub) - 4);
+	put_unaligned_le16(0xe7fe, stub + 12 + 4 * n);
 	memcpy(dram + mark_at, stub, sizeof(stub));
 	scsc_wifibt_unmap(dram);
 
@@ -1258,6 +1272,14 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 		dev_info(scsc->dev, "mark at 0x%x: %u/%u slots written %*ph\n",
 			 mark_at, hits, SCSC_MARK_SLOTS,
 			 (int)sizeof(seen), seen);
+		for (i = 0; i < 12; i++) {
+			u32 val = readl(scsc->base + 0x80 + 4 * i);
+
+			if (val == SCSC_MARK_MBOX_STAMP)
+				dev_info(scsc->dev,
+					 "mark at 0x%x: R4 mailbox stamp at MBOX+0x%02x\n",
+					 mark_at, 0x80 + 4 * i);
+		}
 	}
 
 	if (r4_probe || patch_entry) {
