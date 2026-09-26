@@ -16,11 +16,19 @@ read-only channel-0 request then hit a kernel Oops in `hrtimer_start_range_ns`
 immediately after the doorbell write. The mailbox framework changes a freed
 channel to `TXDONE_BY_POLL`; after a rebind, a client without
 `knows_txdone = true` retained that method even though the controller has no
-poll timer. The protocol now declares software completion, frees channels on
-remove, and retains a bounded explicit test client. The Oops boot must be
-rebooted before another query. No ACPM response or WiFi power-up has yet been
-verified. The full log is in the workspace's
-`wifi-iterations/012-acpm-channel0/device-dmesg-after-oops.txt`.
+poll timer. The protocol now declares software completion and frees channels
+on removal. The Oops boot was rebooted. On the new boot, modules loaded and
+unloaded cleanly, but a read-only channel-0 rate query timed out. BusyBox
+retried the sysfs read, leaving AP TX front/rear `2/0`, RX `0/0`, and mailbox
+status `0`. The APM did not consume either request. Targeted PMU reads gave
+cortex configuration `0`, cortex status `3`, central configuration `0x10001`,
+central status `0`. The downstream power-down path clears cortex configuration
+bit 0; these readings suggest that APM might be inactive, but the status bit
+meanings and startup path require verification. There are two stale requests
+on this boot: do not issue another one. A module-only follow-up fails closed
+after a timeout on Exynos7885, avoiding another BusyBox retry. It is a safety
+fix, not an APM startup fix. No WiFi power-up has been attempted. The old Oops
+log is in `wifi-iterations/012-acpm-channel0/device-dmesg-after-oops.txt`.
 
 The r14 development baseline supports module iteration, but its existing ACPM
 description is a GS101 placeholder. Do not turn on WiFi by merely fixing the

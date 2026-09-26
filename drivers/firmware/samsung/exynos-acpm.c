@@ -153,6 +153,7 @@ struct acpm_chan {
 	struct acpm_queue rx;
 	struct mutex tx_lock;
 	struct mutex rx_lock;
+	struct mutex xfer_lock;
 
 	unsigned int qlen;
 	unsigned int mlen;
@@ -160,6 +161,7 @@ struct acpm_chan {
 	u8 id;
 	u8 type;
 	bool poll_completion;
+	bool failed;
 
 	DECLARE_BITMAP(bitmap_seqnum, ACPM_SEQNUM_MAX - 1);
 	struct acpm_rx_data rx_data[ACPM_SEQNUM_MAX];
@@ -448,16 +450,24 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 	    (xfer->rxlen && !xfer->rxd) ||
 	    xfer->txlen > achan->mlen || xfer->rxlen > achan->mlen)
 		return -EINVAL;
+	guard(mutex)(&achan->xfer_lock);
+	/* A stale Exynos7885 queue must not receive more requests on this probe. */
+	if (acpm->exynos7885 && achan->failed)
+		return -ESHUTDOWN;
 
 	scoped_guard(mutex, &achan->tx_lock) {
 		tx_front = readl(achan->tx.front);
-		if (tx_front >= achan->qlen)
+		if (tx_front >= achan->qlen) {
+			achan->failed = true;
 			return -EIO;
+		}
 		idx = (tx_front + 1) % achan->qlen;
 
 		ret = acpm_wait_for_queue_slots(achan, idx);
-		if (ret)
+		if (ret) {
+			achan->failed = true;
 			return ret;
+		}
 
 		acpm_prepare_xfer(achan, xfer);
 
@@ -472,10 +482,14 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 	msg.chan_id = achan->id;
 	msg.chan_type = EXYNOS_MBOX_CHAN_TYPE_DOORBELL;
 	ret = mbox_send_message(achan->chan, (void *)&msg);
-	if (ret < 0)
+	if (ret < 0) {
+		achan->failed = true;
 		return ret;
+	}
 
 	ret = acpm_wait_for_message_response(achan, xfer);
+	if (ret)
+		achan->failed = true;
 
 	/*
 	 * NOTE: we might prefer not to need the mailbox ticker to manage the
@@ -664,6 +678,7 @@ static int acpm_channels_init(struct acpm_info *acpm)
 
 		mutex_init(&achan->rx_lock);
 		mutex_init(&achan->tx_lock);
+		mutex_init(&achan->xfer_lock);
 
 		cl->dev = dev;
 		/* We call mbox_client_txdone() after consuming each reply. */
