@@ -72,6 +72,15 @@ config SAMSUNG_PM_CHECK_CHUNKSIZE
 	  the CRC data block will take more memory, but will identify any
 	  faults with better precision.
 
+config EXYNOS_SCSC_WIFIBT
+	tristate "Exynos7885 WiFi/BT resource bring-up"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	depends on OF && HAS_IOMEM && m
+	help
+	  Resource-only driver for manual WiFi/BT development. This does not
+	  boot firmware or provide networking. Load with enable=1 to bind.
+	  It intentionally has no module aliases and cannot be built in.
+
 config EXYNOS_REGULATOR_COUPLER
 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
 	depends on ARCH_EXYNOS || COMPILE_TEST
