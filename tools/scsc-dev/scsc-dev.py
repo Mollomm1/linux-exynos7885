@@ -239,7 +239,9 @@ def hardware(args):
                 (logdir / f"{stamp}-cycle-{number + 1}.txt").write_text(current + "\n")
                 # Stop on new warning signatures; never clear the kernel log.
                 signatures = r"WARNING:|BUG:|Oops:|Call trace:|Kernel panic|watchdog:.*lockup"
-                require(re.findall(signatures, current) == re.findall(signatures, before),
+                old_warnings = {line for line in before.splitlines() if re.search(signatures, line)}
+                warnings = {line for line in current.splitlines() if re.search(signatures, line)}
+                require(not (warnings - old_warnings),
                         "Kernel warning detected; stop and inspect logs")
         elif args.action == "status":
             print(before)

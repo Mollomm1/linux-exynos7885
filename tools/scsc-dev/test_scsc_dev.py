@@ -107,7 +107,7 @@ class SafetyChecks(unittest.TestCase):
             ko.write_bytes(b"test")
             (out / "module.json").write_text(json.dumps({"baseline": {}, "sha256": scsc.digest(ko)}))
             remote = Mock()
-            remote.root.side_effect = ["clean", "", "", "WARNING: new fault", "WARNING: new fault"]
+            remote.root.side_effect = ["WARNING: old fault", "", "", "WARNING: new fault", "WARNING: new fault"]
             with patch.object(scsc, "Remote", return_value=remote), patch.object(scsc, "identity"):
                 with self.assertRaisesRegex(RuntimeError, "warning"):
                     scsc.hardware(argparse.Namespace(out=out, target="user@172.16.42.1", action="cycle"))
