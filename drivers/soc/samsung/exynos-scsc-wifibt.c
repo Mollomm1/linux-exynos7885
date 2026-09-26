@@ -4,6 +4,7 @@
 #include <linux/crc32.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
+#include <linux/arm-smccc.h>
 #include <linux/ktime.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
@@ -12,19 +13,31 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/sizes.h>
 #include <linux/unaligned.h>
 #include <linux/vmalloc.h>
 
 #define SCSC_FW_MIN_HEADER	188
 #define SCSC_FW_DIRECTORY	"postmarketos/mx140/"
+#define SCSC_TZASC_SMC		0x82000710
+#define SCSC_TZASC_WLBT		0
+#define SCSC_PMU_WIFI_CTRL_NS	0x0140
+#define SCSC_PMU_WIFI_CTRL_S	0x0144
+#define SCSC_PMU_WIFI_STAT	0x0148
+#define SCSC_PMU_BAAW_SIZE0	0x7300
+#define SCSC_PMU_BAAW_BASE0	0x7304
+#define SCSC_WIFI_PWRON		BIT(1)
+#define SCSC_WIFI_START		BIT(3)
 
 struct scsc_device {
 	struct regmap *pmu;
 	struct mutex lock;
 	void __iomem *memory;
+	phys_addr_t mem_start;
 	size_t mem_size;
 	bool checked;
 	bool staged;
+	bool memory_ready;
 	int firmware_result;
 	u32 runtime_length;
 	u32 entry_point;
@@ -180,6 +193,87 @@ out_unlock:
 }
 static DEVICE_ATTR_WO(stage_firmware);
 
+/* Configure only the reserved DRAM aperture; never power or release WLBT. */
+static ssize_t prepare_memory_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	struct arm_smccc_res res;
+	unsigned int ctrl_ns, ctrl_s, status, size, base;
+	u32 encoded_base;
+	int ret;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+
+	mutex_lock(&scsc->lock);
+	if (!scsc->staged) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+	if (scsc->memory_ready) {
+		ret = -EALREADY;
+		goto out_unlock;
+	}
+
+	ret = regmap_read(scsc->pmu, SCSC_PMU_WIFI_CTRL_NS, &ctrl_ns);
+	if (ret)
+		goto out_unlock;
+	ret = regmap_read(scsc->pmu, SCSC_PMU_WIFI_CTRL_S, &ctrl_s);
+	if (ret)
+		goto out_unlock;
+	ret = regmap_read(scsc->pmu, SCSC_PMU_WIFI_STAT, &status);
+	if (ret)
+		goto out_unlock;
+	if ((ctrl_ns & SCSC_WIFI_PWRON) || (ctrl_s & SCSC_WIFI_START) || status) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	if (!IS_ALIGNED(scsc->mem_start, SZ_4K) ||
+	    !IS_ALIGNED(scsc->mem_size, SZ_4K) || scsc->mem_size > SZ_1G) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	/* Match downstream's WLBT TZASC call, but fail closed on its result. */
+	arm_smccc_smc(SCSC_TZASC_SMC, SCSC_TZASC_WLBT, scsc->mem_start,
+		      scsc->mem_size, 0, 0, 0, 0, &res);
+	if ((long)res.a0) {
+		ret = (long)res.a0 < 0 ? (long)res.a0 : -EIO;
+		goto out_unlock;
+	}
+
+	encoded_base = (scsc->mem_start & 0xfffffc000ULL) >> 12;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0,
+			   scsc->mem_size >> 12);
+	if (ret)
+		goto out_unlock;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_BASE0, encoded_base);
+	if (ret)
+		goto out_unlock;
+
+	ret = regmap_read(scsc->pmu, SCSC_PMU_BAAW_SIZE0, &size);
+	if (ret)
+		goto out_unlock;
+	ret = regmap_read(scsc->pmu, SCSC_PMU_BAAW_BASE0, &base);
+	if (ret)
+		goto out_unlock;
+	if (size != scsc->mem_size >> 12 || base != encoded_base) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	scsc->memory_ready = true;
+	dev_info(dev, "reserved DRAM aperture prepared at %pa size %zu; WLBT remains off\n",
+		 &scsc->mem_start, scsc->mem_size);
+	ret = 0;
+out_unlock:
+	mutex_unlock(&scsc->lock);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(prepare_memory);
+
 static ssize_t firmware_status_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -191,9 +285,9 @@ static ssize_t firmware_status_show(struct device *dev,
 		len = sysfs_emit(buf, "unchecked\n");
 	else
 		len = sysfs_emit(buf,
-				 "result=%d runtime=%u entry=0x%x staged=%u executed=0\n",
+				 "result=%d runtime=%u entry=0x%x staged=%u memory_ready=%u executed=0\n",
 				 scsc->firmware_result, scsc->runtime_length,
-				 scsc->entry_point, scsc->staged);
+				 scsc->entry_point, scsc->staged, scsc->memory_ready);
 	mutex_unlock(&scsc->lock);
 	return len;
 }
@@ -232,6 +326,7 @@ static struct attribute *scsc_attrs[] = {
 	&dev_attr_state.attr,
 	&dev_attr_verify_firmware.attr,
 	&dev_attr_stage_firmware.attr,
+	&dev_attr_prepare_memory.attr,
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
 	NULL,
@@ -281,6 +376,7 @@ static int scsc_probe(struct platform_device *pdev)
 				     dev_name(dev)))
 		return -EBUSY;
 	scsc->mem_size = resource_size(&mem);
+	scsc->mem_start = mem.start;
 	scsc->memory = devm_ioremap_wc(dev, mem.start, scsc->mem_size);
 	if (!scsc->memory)
 		return -ENOMEM;
