@@ -111,6 +111,7 @@ struct scsc_wifibt {
 	void __iomem	*base;		/* R4 mailbox bank */
 	void __iomem	*base_m4;	/* M4 mailbox bank */
 	struct regmap	*pmureg;
+	void		*mem;		/* the shared window, mapped once */
 	phys_addr_t	mem_start;
 	size_t		mem_size;
 	u32		fw_entry;
@@ -149,28 +150,31 @@ MODULE_PARM_DESC(cachetest,
  * Device memory would be safe from speculation but rejects the unaligned
  * accesses the firmware structures need, so it is not an option here.
  */
-static void *scsc_wifibt_map(struct scsc_wifibt *scsc)
+static int scsc_wifibt_map(struct scsc_wifibt *scsc)
 {
 	struct page **pages;
-	void *vmem;
 	unsigned int i, npages = PAGE_ALIGN(scsc->mem_size) >> PAGE_SHIFT;
 
+	/* Map it once and keep it: every attribute, the firmware staging
+	 * and the check all touch this window, and mapping it on demand
+	 * means taking mmap_sem from whatever context asked - including
+	 * udev, which reads every attribute while handling a uevent.
+	 */
 	pages = kmalloc_array(npages, sizeof(*pages), GFP_KERNEL);
 	if (!pages)
-		return NULL;
+		return -ENOMEM;
 
 	for (i = 0; i < npages; i++)
 		pages[i] = phys_to_page(scsc->mem_start + i * PAGE_SIZE);
 
-	vmem = vmap(pages, npages, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
+	scsc->mem = vmap(pages, npages, VM_MAP,
+			 pgprot_writecombine(PAGE_KERNEL));
 	kfree(pages);
 
-	return vmem;
-}
+	if (!scsc->mem)
+		return -ENOMEM;
 
-static void scsc_wifibt_unmap(const void *vmem)
-{
-	vunmap(vmem);
+	return 0;
 }
 
 /*
@@ -214,14 +218,12 @@ static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
 	void *dram;
 	size_t off;
 
-	dram = scsc_wifibt_map(scsc);
+	dram = scsc->mem;
 	if (!dram)
 		return 0;
 
 	for (off = 0; off + 4 <= scsc->mem_size; off += 4)
 		crc = crc32_le(crc, (u8 *)(dram + off), 4);
-
-	scsc_wifibt_unmap(dram);
 
 	return ~crc;
 }
@@ -235,10 +237,9 @@ static u32 scsc_wifibt_dram_crc(struct scsc_wifibt *scsc)
 static void scsc_wifibt_cachetest(struct scsc_wifibt *scsc)
 {
 	const u32 off = 0x1f0000;
-	void *dram;
-	u32 first, again, fresh;
+	u8 *dram = scsc->mem;
+	u32 first, again;
 
-	dram = scsc_wifibt_map(scsc);
 	if (!dram)
 		return;
 
@@ -246,19 +247,12 @@ static void scsc_wifibt_cachetest(struct scsc_wifibt *scsc)
 	first = readl(dram + off);
 	writel(0xa5a5a5a5, dram + off);
 	again = readl(dram + off);
-	scsc_wifibt_unmap(dram);
-
-	dram = scsc_wifibt_map(scsc);
-	if (!dram)
-		return;
-	fresh = readl(dram + off);
-	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev,
-		 "window readback: pattern %08x, after write %08x, remap %08x -> %s\n",
-		 first, again, fresh,
-		 (first == 0x11223344 && again == 0xa5a5a5a5 &&
-		  fresh == 0xa5a5a5a5) ? "coherent" : "STALE");
+		 "window readback: pattern %08x, after write %08x -> %s\n",
+		 first, again,
+		 (first == 0x11223344 && again == 0xa5a5a5a5) ?
+		 "coherent" : "STALE");
 }
 
 static void scsc_wifibt_stream_conf(u8 *p, u32 buf, u32 num, u32 pktsize,
@@ -304,7 +298,7 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 	mxlog = gdb_m4_out + SCSC_GDB_BUF_LEN + 8;
 	end = mxlog + SCSC_MXLOG_BUF_LEN + 8;
 
-	dram = scsc_wifibt_map(scsc);
+	dram = scsc->mem;
 	if (!dram)
 		return -ENOMEM;
 
@@ -364,8 +358,6 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 		writel(0, dram + gdb_m4_in + i);
 		writel(0, dram + gdb_m4_out + i);
 	}
-
-	scsc_wifibt_unmap(dram);
 
 	scsc->mxconf_off = mx_off;
 	scsc->sig_entry = scsc->fw_entry;
@@ -453,7 +445,7 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 		return -EINVAL;
 	}
 
-	dram = scsc_wifibt_map(scsc);
+	dram = scsc->mem;
 	if (!dram)
 		return -ENOMEM;
 
@@ -461,11 +453,8 @@ static int scsc_wifibt_fw_stage(struct scsc_wifibt *scsc,
 
 	if (scsc_win_cmp(dram, fw->data, fw->size)) {
 		dev_err(scsc->dev, "firmware DRAM readback mismatch\n");
-		scsc_wifibt_unmap(dram);
 		return -EIO;
 	}
-
-	scsc_wifibt_unmap(dram);
 
 	dev_info(scsc->dev, "firmware staged in shared memory, verified\n");
 
@@ -667,7 +656,7 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(2)),
 		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(3)));
 
-	dram = scsc_wifibt_map(scsc);
+	dram = scsc->mem;
 	if (!dram)
 		return;
 
@@ -690,19 +679,21 @@ static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 			dev_info(scsc->dev, "mgmt slot %u: to-AP %08x from-AP %08x\n",
 				 i, ta, fa);
 	}
-
-	scsc_wifibt_unmap(dram);
 }
 
-static ssize_t scan_show(struct device *dev,
-				     struct device_attribute *attr,
-				     char *buf)
+/* Write-only on purpose: reading it cannot be allowed to map memory or
+ * print, because udev reads every attribute of a device while handling
+ * its uevent.
+ */
+static ssize_t scan_store(struct device *dev,
+			  struct device_attribute *attr,
+			  const char *buf, size_t count)
 {
 	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
 
 	scsc_wifibt_scan(scsc);
 
-	return sysfs_emit(buf, "scan written to dmesg\n");
+	return count;
 }
 
 static ssize_t recover_store(struct device *dev,
@@ -721,7 +712,7 @@ static ssize_t recover_store(struct device *dev,
 }
 
 static struct device_attribute dev_attr_scan =
-	__ATTR(scan, 0444, scan_show, NULL);
+	__ATTR(scan, 0200, NULL, scan_store);
 static struct device_attribute dev_attr_recover =
 	__ATTR(recover, 0200, NULL, recover_store);
 
@@ -819,6 +810,10 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	scsc->mem_start = rmem->base;
 	scsc->mem_size = rmem->size;
 
+	ret = scsc_wifibt_map(scsc);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to map shared memory\n");
+
 	irq = platform_get_irq_byname(pdev, "MBOX");
 	if (irq < 0)
 		return dev_err_probe(dev, irq, "failed to get MBOX irq\n");
@@ -892,6 +887,8 @@ static void scsc_wifibt_remove(struct platform_device *pdev)
 	device_remove_file(&pdev->dev, &dev_attr_recover);
 	cancel_delayed_work_sync(&scsc->check_work);
 	scsc_wifibt_power_off(scsc);
+	vunmap(scsc->mem);
+	scsc->mem = NULL;
 }
 
 static const struct of_device_id scsc_wifibt_of_match[] = {
