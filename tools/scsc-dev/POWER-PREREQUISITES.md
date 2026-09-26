@@ -116,5 +116,12 @@ neither image has been executed by this driver. The installed image is unchanged
 
 The r15 image supplies the Exynos7885-specific ACPM transport resources. Its
 protocol can bind as a module, but the first request received no response and
-the APM did not service its queue or acknowledge the doorbell. The next step is
-to determine why before any WiFi power operation.
+the APM did not service its queue or acknowledge the doorbell. A targeted read
+of the APM SRAM log found `hard_fau` followed by a register dump ending at
+`PC(R15)=0x7800`, then `nmi` and a second dump ending at `PC(R15)=0x1274`.
+The log front stayed at 116 across two 0.2-second-spaced samples. The entries
+cannot yet be tied to the current Linux boot or DVFS request. A new opt-in
+protocol module refuses further transfers if its TX queue or AP-to-APM
+doorbell is already pending; it is built but not loaded. The next step is to
+determine why the APM faulted or stopped acknowledging its doorbell before
+any WiFi power operation.
