@@ -19,14 +19,25 @@ properties:
     const: samsung,exynos7885-wifibt
 
   reg:
-    items:
-      - description: R4 mailbox
-      - description: M4 mailbox
+    minItems: 2
+    maxItems: 3
+    description: |
+      R4 and M4 mailbox resources, optionally preceded by the CP mailbox used
+      for shared-regulator coordination.
 
   reg-names:
-    items:
-      - const: r4
-      - const: m4
+    oneOf:
+      - items:
+          - const: r4
+          - const: m4
+        minItems: 2
+        maxItems: 2
+      - items:
+          - const: cp
+          - const: r4
+          - const: m4
+        minItems: 3
+        maxItems: 3
 
   interrupts:
     items:
