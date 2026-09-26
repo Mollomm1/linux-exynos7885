@@ -1,5 +1,32 @@
 # Exynos7885 WiFi startup prerequisites
 
+## Current r17 state (2026-09-26)
+
+After flashing r17, boot `8c3f4049-8e46-4692-83b3-45a086006dd0` runs kernel
+commit `78e1f99c4291b3861151c4f900d967d56e60543f` (`#18`). The live DT has
+`r4`, `m4` and `cp` mailbox resources. Module iteration 044 mapped the CP
+window, passed the fake MIF IRQ self-test, and unloaded cleanly; firmware start
+remains disabled and only `lo`/`usb0` exist.
+
+Bounded PMU reads on this boot returned `CP_STAT=0x1`,
+`EXT_REGULATOR_SHARED_STATUS=0x20001`, and
+`EXT_REGULATOR_SHARED_OPTION=0x6`. WiFi START/PWRON remain clear and the
+central sequencer reports `0`. The option's bit 2 was already set before any
+driver operation. Therefore a test that sets and clears only that bit would
+not restore the observed initial state, and is not a safe substitute for the
+downstream CP-coordinated, reference-counted shared-rail operation. No CP
+mailbox register has been accessed and no rail, reset, power, or firmware
+operation has been attempted on this boot.
+
+The only exposed writes in the current module validate firmware and prepare
+reserved-memory/TZASC/BAAW/configuration. There is no start or reset attribute;
+probe only maps resources. Keep it that way until the ACPM request's device
+behavior, CP mailbox handshake/IRQ semantics, shared-rail ownership, and a
+bounded recoverable stop path are all established. The prior r15 ACPM request
+did not receive an acknowledgment and was followed by ambiguous APM fault-log
+entries; module load/unload without requests was inert. Do not issue another
+request or write CP/PMU state as part of this diagnostic iteration.
+
 ## Safe diagnostic and latest reboot (2026-09-26)
 
 An attempted wildcard read of the complete regmap debugfs `registers` file

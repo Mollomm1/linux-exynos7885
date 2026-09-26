@@ -1,10 +1,11 @@
 # T510 WiFi module iteration
 
-The current `gta3xl` baseline is aport r15, pinned to kernel commit
-`40f6ee3140196cccad7fd652e69e5159414abbea`. It boots as
+The current `gta3xl` baseline is aport r17, pinned to kernel commit
+`78e1f99c4291b3861151c4f900d967d56e60543f`. It boots as
 `6.15.0-rc1-exynos7904-wifi-dev1`; its DT reserves 4 MiB at `0xe9000000`.
-The recovery image has already been flashed. Keep this baseline and its saved
-build archive while iterating on code that fits in the out-of-tree module.
+The image has been flashed. Its DT now exposes the R4, M4 and CP mailbox
+windows. Keep this baseline and its saved build archive while iterating on code
+that fits in the out-of-tree module.
 
 The explicit `enable=1` module does not autoload. It can validate and stage the
 installed `postmarketos/mx140/mx140.bin`, configure its reserved DRAM window
@@ -31,7 +32,7 @@ normal boot, touchscreen and USB SSH. The user handles flashing.
 
 The build saves the complete kernel source and output in pmbootstrap's
 `cache_distfiles`, under an archive named
-`gta3xl-wifi-baseline-<commit>-r15.tar.gz`. Keep it with the matching image and
+`gta3xl-wifi-baseline-<commit>-r17.tar.gz`. Keep it with the matching image and
 native compiler environment. The archive includes generated headers, symbol
 tables, configuration, DT images and compiler identity. It remains on the host;
 only a small manifest is installed on the tablet. Never mix modules from two
@@ -39,11 +40,11 @@ baseline archives with the same `uname -r`.
 
 ## Build module-only iterations
 
-Select the matching r15 archive explicitly:
+Select the matching r17 archive explicitly:
 
 ```sh
-SCSC_BASELINE_DIR="$HOME/.cache/t510-wifi-dev/baseline-r15" \
-    bash wifi-dev/build-module.sh 031
+SCSC_BASELINE_DIR="$HOME/.cache/t510-wifi-dev/baseline-r17" \
+    bash wifi-dev/build-module.sh 045
 ```
 
 Or use `scsc-dev.py pmb-build` with the matching archive in pmbootstrap's
@@ -186,3 +187,10 @@ iterations on this baseline do not need a reboot.
 See [POWER-PREREQUISITES.md](POWER-PREREQUISITES.md) for the measurements and
 source audit, and `wifi-iterations/027-stage-firmware/README.md` plus
 `wifi-iterations/030-prepare-memory/README.md` for device results.
+Iteration 044 was built against r17 and checked on boot
+`8c3f4049-8e46-4692-83b3-45a086006dd0`. The driver mapped `cp` and reported
+`state=inert`; the fake MIF test passed. Its bounded PMU read showed
+`CP_STAT=0x1`, shared status `0x20001`, and shared option `0x6`. The module was
+unloaded. The shared-option state already has bit 2 set, so do not infer that a
+standalone acquire/release test would restore the previous state. Firmware
+start remains disabled and the device has no WLAN interface.
