@@ -16,7 +16,7 @@ import time
 
 MODULE = "exynos-scsc-wifibt"
 MANIFEST = "scsc-baseline.json"
-DRIVER = "drivers/soc/samsung/exynos-scsc-wifibt.c"
+DRIVER = "drivers/soc/samsung/exynos-scsc-wifibt-main.c"
 SOURCES = {
     MODULE + "-main.c": DRIVER,
     "exynos-scsc-mif-intr.c": "drivers/soc/samsung/exynos-scsc-mif-intr.c",
