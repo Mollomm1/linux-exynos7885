@@ -122,9 +122,16 @@ the driver itself still has to be ported before a real interface can appear.
 Iteration 038 adds the SCSC MIF interrupt-bit allocator/dispatcher as a
 software component in the composite module. It reserves from-host bit 0 for
 R4/M4 panic signaling and supports callback allocation, pending-bit dispatch
-and acknowledgment. `mif_intr_selftest` passed on the current boot using fake
-callbacks only. The manager is not yet connected to the mailbox IRQ/MMIO path;
-no radio events or firmware handoff are handled yet.
+and acknowledgment. Iteration 039 adds Exynos7885 register callbacks using the
+downstream-verified INTMSR0/INTMR0/INTCR0/INTGR1 layout. The production manager
+remains inactive: no callback touches MMIO until a future explicit lifecycle
+enables it. The self-test now verifies inactive calls fail without invoking
+callbacks, then exercises allocations and dispatch through fake registers.
+Iteration 039 built against the r15 baseline, loaded, reported `state=inert`,
+passed `mif_intr_selftest`, and unloaded on boot
+`3e212fde-60e7-4649-9e77-75ac2ada202c`. The module is unloaded. No IRQ is
+requested or dispatched, and no radio event, firmware handoff, or hardware
+mailbox operation has been tested.
 
 Iteration 034 now retains bounds-checked pointers to the eight R4/M4 mailbox
 slots from the DT resources. It validates and maps the ranges without MMIO

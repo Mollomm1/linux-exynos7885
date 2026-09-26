@@ -47,6 +47,7 @@ void scsc_mif_intr_deinit(struct scsc_mif_intr *intr)
 	unsigned int bit;
 
 	spin_lock_irqsave(&intr->lock, flags);
+	intr->active = false;
 	for (bit = 0; bit < SCSC_MIF_INTR_COUNT; bit++) {
 		intr->slot[bit].handler = scsc_mif_intr_default_handler;
 		intr->slot[bit].data = intr;
@@ -56,6 +57,15 @@ void scsc_mif_intr_deinit(struct scsc_mif_intr *intr)
 	bitmap_zero(intr->from_host_m4, SCSC_MIF_INTR_COUNT);
 	set_bit(0, intr->from_host_r4);
 	set_bit(0, intr->from_host_m4);
+	spin_unlock_irqrestore(&intr->lock, flags);
+}
+
+void scsc_mif_intr_set_active(struct scsc_mif_intr *intr, bool active)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&intr->lock, flags);
+	intr->active = active;
 	spin_unlock_irqrestore(&intr->lock, flags);
 }
 
@@ -69,6 +79,10 @@ int scsc_mif_intr_alloc_to_host(struct scsc_mif_intr *intr,
 		return -EINVAL;
 
 	spin_lock_irqsave(&intr->lock, flags);
+	if (!intr->active) {
+		spin_unlock_irqrestore(&intr->lock, flags);
+		return -EHOSTDOWN;
+	}
 	bit = find_first_zero_bit(intr->to_host, SCSC_MIF_INTR_COUNT);
 	if (bit >= SCSC_MIF_INTR_COUNT) {
 		spin_unlock_irqrestore(&intr->lock, flags);
@@ -99,10 +113,12 @@ int scsc_mif_intr_free_to_host(struct scsc_mif_intr *intr, int bit)
 		return -ENOENT;
 	}
 
-	intr->ops->mask_to_host(intr->context, bit);
+	if (intr->active) {
+		intr->ops->mask_to_host(intr->context, bit);
+		intr->ops->clear_to_host(intr->context, bit);
+	}
 	intr->slot[bit].handler = scsc_mif_intr_default_handler;
 	intr->slot[bit].data = intr;
-	intr->ops->clear_to_host(intr->context, bit);
 	clear_bit(bit, intr->to_host);
 	spin_unlock_irqrestore(&intr->lock, flags);
 
@@ -186,6 +202,10 @@ int scsc_mif_intr_raise(struct scsc_mif_intr *intr, unsigned int bit,
 		return -EINVAL;
 
 	spin_lock_irqsave(&intr->lock, flags);
+	if (!intr->active) {
+		spin_unlock_irqrestore(&intr->lock, flags);
+		return -EHOSTDOWN;
+	}
 	if (!test_bit(bit, bitmap)) {
 		spin_unlock_irqrestore(&intr->lock, flags);
 		return -ENOENT;
@@ -198,22 +218,31 @@ int scsc_mif_intr_raise(struct scsc_mif_intr *intr, unsigned int bit,
 
 void scsc_mif_intr_ack(struct scsc_mif_intr *intr, unsigned int bit)
 {
-	if (intr && bit < SCSC_MIF_INTR_COUNT)
+	if (intr && intr->active && bit < SCSC_MIF_INTR_COUNT)
 		intr->ops->clear_to_host(intr->context, bit);
 }
 
-void scsc_mif_intr_dispatch(struct scsc_mif_intr *intr)
+int scsc_mif_intr_dispatch(struct scsc_mif_intr *intr)
 {
 	unsigned long flags;
 	u32 pending;
 	unsigned int bit;
 
+	if (!intr)
+		return -EINVAL;
+
 	spin_lock_irqsave(&intr->lock, flags);
+	if (!intr->active) {
+		spin_unlock_irqrestore(&intr->lock, flags);
+		return -EHOSTDOWN;
+	}
 	pending = intr->ops->get_pending(intr->context);
 	for (bit = 0; bit < SCSC_MIF_INTR_COUNT; bit++)
 		if (pending & BIT(bit))
 			intr->slot[bit].handler(bit, intr->slot[bit].data);
 	spin_unlock_irqrestore(&intr->lock, flags);
+
+	return 0;
 }
 
 struct scsc_mif_intr_test_context {
@@ -288,6 +317,16 @@ int scsc_mif_intr_selftest(void)
 	ret = scsc_mif_intr_init(&intr, &scsc_mif_intr_test_ops, &test);
 	if (ret)
 		return ret;
+	if (scsc_mif_intr_alloc_to_host(&intr,
+					scsc_mif_intr_test_handler, &test) !=
+		    -EHOSTDOWN || scsc_mif_intr_dispatch(&intr) != -EHOSTDOWN ||
+	    scsc_mif_intr_raise(&intr, 0, SCSC_MIF_TARGET_R4) != -EHOSTDOWN ||
+	    test.masked || test.cleared || test.unmasked || test.raised_r4 ||
+	    test.raised_m4) {
+		ret = -EINVAL;
+		goto out;
+	}
+	scsc_mif_intr_set_active(&intr, true);
 
 	for (i = 0; i < ARRAY_SIZE(allocated); i++) {
 		bit = scsc_mif_intr_alloc_from_host(&intr, SCSC_MIF_TARGET_R4);
@@ -332,7 +371,9 @@ int scsc_mif_intr_selftest(void)
 		goto out;
 	}
 	test.pending = BIT(5);
-	scsc_mif_intr_dispatch(&intr);
+	ret = scsc_mif_intr_dispatch(&intr);
+	if (ret)
+		goto out;
 	if (test.handled != 1 || test.pending) {
 		ret = -EINVAL;
 		goto out;
@@ -345,7 +386,9 @@ int scsc_mif_intr_selftest(void)
 		goto out;
 	}
 	test.pending = BIT(5);
-	scsc_mif_intr_dispatch(&intr);
+	ret = scsc_mif_intr_dispatch(&intr);
+	if (ret)
+		goto out;
 	if (test.pending || !(test.cleared & BIT(5))) {
 		ret = -EINVAL;
 		goto out;

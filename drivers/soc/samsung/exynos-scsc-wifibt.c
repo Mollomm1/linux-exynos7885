@@ -15,6 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/sizes.h>
+#include <linux/spinlock.h>
 #include <linux/unaligned.h>
 #include <linux/vmalloc.h>
 
@@ -79,8 +80,12 @@ struct scsc_device {
 	struct mutex lock;
 	void __iomem *memory;
 	void __iomem *cp_mailbox;
+	void __iomem *r4_regs;
+	void __iomem *m4_regs;
 	void __iomem *r4_mailbox[SCSC_MIF_NUM_MAILBOXES];
 	void __iomem *m4_mailbox[SCSC_MIF_NUM_MAILBOXES];
+	spinlock_t mif_reg_lock;
+	struct scsc_mif_intr mif_intr;
 	phys_addr_t mem_start;
 	size_t mem_size;
 	resource_size_t r4_reg_size;
@@ -93,6 +98,63 @@ struct scsc_device {
 	int firmware_result;
 	u32 runtime_length;
 	u32 entry_point;
+};
+
+static u32 scsc_mif_get_pending(void *context)
+{
+	struct scsc_device *scsc = context;
+
+	return readl(scsc->r4_regs + SCSC_MIF_INTMSR0) >> 16;
+}
+
+static void scsc_mif_mask_to_host(void *context, unsigned int bit)
+{
+	struct scsc_device *scsc = context;
+	unsigned long flags;
+	u32 mask;
+
+	spin_lock_irqsave(&scsc->mif_reg_lock, flags);
+	mask = readl(scsc->r4_regs + SCSC_MIF_INTMR0);
+	writel(mask | BIT(bit + 16), scsc->r4_regs + SCSC_MIF_INTMR0);
+	spin_unlock_irqrestore(&scsc->mif_reg_lock, flags);
+}
+
+static void scsc_mif_clear_to_host(void *context, unsigned int bit)
+{
+	struct scsc_device *scsc = context;
+
+	writel(BIT(bit + 16), scsc->r4_regs + SCSC_MIF_INTCR0);
+}
+
+static void scsc_mif_unmask_to_host(void *context, unsigned int bit)
+{
+	struct scsc_device *scsc = context;
+	unsigned long flags;
+	u32 mask;
+
+	spin_lock_irqsave(&scsc->mif_reg_lock, flags);
+	mask = readl(scsc->r4_regs + SCSC_MIF_INTMR0);
+	writel(mask & ~BIT(bit + 16), scsc->r4_regs + SCSC_MIF_INTMR0);
+	spin_unlock_irqrestore(&scsc->mif_reg_lock, flags);
+}
+
+static void scsc_mif_raise_from_host(void *context,
+				     enum scsc_mif_target target,
+				     unsigned int bit)
+{
+	struct scsc_device *scsc = context;
+	void __iomem *regs;
+
+	regs = target == SCSC_MIF_TARGET_R4 ? scsc->r4_regs : scsc->m4_regs;
+	writel(BIT(bit), regs + SCSC_MIF_INTGR1);
+}
+
+static const struct scsc_mif_intr_ops scsc_mif_intr_ops = {
+	.get_pending = scsc_mif_get_pending,
+	.mask_to_host = scsc_mif_mask_to_host,
+	.clear_to_host = scsc_mif_clear_to_host,
+	.unmask_to_host = scsc_mif_unmask_to_host,
+	.raise_from_host = scsc_mif_raise_from_host,
 };
 
 static bool enable;
@@ -682,7 +744,6 @@ static int scsc_probe(struct platform_device *pdev)
 	struct scsc_device *scsc;
 	struct device_node *np;
 	struct resource mem, r4_regs, m4_regs, cp_regs;
-	void __iomem *r4_base, *m4_base;
 	ktime_t start = ktime_get();
 	int ret, i;
 
@@ -692,6 +753,7 @@ static int scsc_probe(struct platform_device *pdev)
 	if (!scsc)
 		return -ENOMEM;
 	mutex_init(&scsc->lock);
+	spin_lock_init(&scsc->mif_reg_lock);
 	scsc->pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
 						  "samsung,pmu-syscon");
 	if (IS_ERR(scsc->pmu))
@@ -711,16 +773,19 @@ static int scsc_probe(struct platform_device *pdev)
 	    scsc->m4_reg_size < SCSC_MIF_ISSR_BASE +
 	    SCSC_MIF_NUM_MAILBOXES * sizeof(u32))
 		return -EINVAL;
-	r4_base = devm_platform_ioremap_resource_byname(pdev, "r4");
-	if (IS_ERR(r4_base))
-		return PTR_ERR(r4_base);
-	m4_base = devm_platform_ioremap_resource_byname(pdev, "m4");
-	if (IS_ERR(m4_base))
-		return PTR_ERR(m4_base);
+	scsc->r4_regs = devm_platform_ioremap_resource_byname(pdev, "r4");
+	if (IS_ERR(scsc->r4_regs))
+		return PTR_ERR(scsc->r4_regs);
+	scsc->m4_regs = devm_platform_ioremap_resource_byname(pdev, "m4");
+	if (IS_ERR(scsc->m4_regs))
+		return PTR_ERR(scsc->m4_regs);
+	ret = scsc_mif_intr_init(&scsc->mif_intr, &scsc_mif_intr_ops, scsc);
+	if (ret)
+		return ret;
 	for (i = 0; i < SCSC_MIF_NUM_MAILBOXES; i++) {
-		scsc->r4_mailbox[i] = scsc_mailbox_slot(r4_base,
+		scsc->r4_mailbox[i] = scsc_mailbox_slot(scsc->r4_regs,
 						       scsc->r4_reg_size, i);
-		scsc->m4_mailbox[i] = scsc_mailbox_slot(m4_base,
+		scsc->m4_mailbox[i] = scsc_mailbox_slot(scsc->m4_regs,
 						       scsc->m4_reg_size, i);
 		if (!scsc->r4_mailbox[i] || !scsc->m4_mailbox[i])
 			return -EINVAL;
