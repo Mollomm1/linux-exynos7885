@@ -12,6 +12,7 @@
 #include <linux/container_of.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/firmware.h>
 #include <linux/firmware/samsung/exynos-acpm-protocol.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -47,6 +48,13 @@
 #define ACPM_EXYNOS7885_INTSR0		0x14
 #define ACPM_EXYNOS7885_INTCR1		0x20
 #define ACPM_EXYNOS7885_INTMR1		0x24
+#define ACPM_EXYNOS7885_PLUGIN_TABLE	0x4b80
+#define ACPM_EXYNOS7885_PLUGIN_SIZE	44
+#define ACPM_EXYNOS7885_FVP_PLUGIN_ID	3
+#define ACPM_EXYNOS7885_PLUGIN_CHANNEL	4
+#define ACPM_EXYNOS7885_DP_ATTACH	BIT(25)
+#define ACPM_EXYNOS7885_PROTOCOL_ID	26
+#define ACPM_EXYNOS7885_FVP_FW		"exynos7885_acpm_fvp.fw"
 
 /**
  * struct acpm_shmem - shared memory configuration information.
@@ -186,8 +194,84 @@ struct acpm_info {
 	u32 num_chans;
 	resource_size_t sram_size;
 	bool exynos7885;
+	struct mutex plugin_lock;
 	void __iomem *mbox_regs;
 	u32 original_mbox_mask;
+};
+
+/* Opt-in recovery hook for the FVP dynamic plugin discovered in SRAM. */
+static ssize_t attach_fvp_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct acpm_info *acpm = dev_get_drvdata(dev);
+	struct acpm_xfer xfer;
+	const struct firmware *fw;
+	void __iomem *plugin;
+	u32 table, num_plugins, base, size, attached, stay;
+	u32 cmd[4] = { 0 };
+	int ret;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+	if (!acpm->exynos7885)
+		return -EOPNOTSUPP;
+
+	guard(mutex)(&acpm->plugin_lock);
+	table = readl(acpm->sram_base + ACPM_EXYNOS7885_PLUGIN_TABLE);
+	num_plugins = readl(acpm->sram_base + ACPM_EXYNOS7885_PLUGIN_TABLE + 4);
+	if (table & 3 || table > acpm->sram_size || num_plugins <=
+	    ACPM_EXYNOS7885_FVP_PLUGIN_ID || num_plugins >
+	    (acpm->sram_size - table) / ACPM_EXYNOS7885_PLUGIN_SIZE)
+		return -EINVAL;
+
+	plugin = acpm->sram_base + table + ACPM_EXYNOS7885_FVP_PLUGIN_ID *
+		 ACPM_EXYNOS7885_PLUGIN_SIZE;
+	base = readl(plugin + 4) & ~1U;
+	size = readl(plugin + 32);
+	attached = readb(plugin + 28);
+	stay = readb(plugin + 36);
+	if (attached || !stay || !base || !size || base > acpm->sram_size ||
+	    size > acpm->sram_size - base)
+		return -EINVAL;
+
+	ret = request_firmware_direct(&fw, ACPM_EXYNOS7885_FVP_FW, dev);
+	if (ret)
+		return ret;
+	if (fw->size != size) {
+		ret = -EINVAL;
+		goto out_release_fw;
+	}
+
+	memcpy_toio(acpm->sram_base + base, fw->data, fw->size);
+	release_firmware(fw);
+
+	cmd[0] = ACPM_EXYNOS7885_DP_ATTACH |
+		 (ACPM_EXYNOS7885_FVP_PLUGIN_ID << ACPM_EXYNOS7885_PROTOCOL_ID);
+	xfer.txd = cmd;
+	xfer.rxd = cmd;
+	xfer.txlen = sizeof(cmd);
+	xfer.rxlen = sizeof(cmd);
+	xfer.acpm_chan_id = ACPM_EXYNOS7885_PLUGIN_CHANNEL;
+	ret = acpm_do_xfer(&acpm->handle, &xfer);
+	if (ret)
+		return ret;
+
+	return count;
+
+out_release_fw:
+	release_firmware(fw);
+	return ret;
+}
+static DEVICE_ATTR_WO(attach_fvp);
+
+static struct attribute *acpm_attrs[] = {
+	&dev_attr_attach_fvp.attr,
+	NULL,
+};
+
+static const struct attribute_group acpm_attr_group = {
+	.attrs = acpm_attrs,
 };
 
 /**
@@ -848,6 +932,7 @@ static int acpm_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL, "Invalid ACPM initdata offset\n");
 	acpm->exynos7885 =
 		match_data->initdata_base == ACPM_EXYNOS7885_INITDATA_BASE;
+	mutex_init(&acpm->plugin_lock);
 
 	acpm->shmem = acpm->sram_base + match_data->initdata_base;
 	acpm->dev = dev;
@@ -866,6 +951,11 @@ static int acpm_probe(struct platform_device *pdev)
 	acpm_setup_ops(acpm);
 
 	platform_set_drvdata(pdev, acpm);
+	if (acpm->exynos7885) {
+		ret = devm_device_add_group(dev, &acpm_attr_group);
+		if (ret)
+			return ret;
+	}
 
 	ret = devm_of_platform_populate(dev);
 	if (ret)
