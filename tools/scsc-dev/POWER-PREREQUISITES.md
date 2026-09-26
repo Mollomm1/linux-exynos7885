@@ -112,7 +112,7 @@ CRCs with header v1.0/API v0.2 and entry `0x1a9`. Their runtime lengths differ
 (1,890,552 vs 1,895,976 bytes). Preserve matching firmware/config provenance;
 neither image has been executed by this driver. The installed image is unchanged.
 
-The next platform change must provide an Exynos7885-specific ACPM transport and
-correct DT resources, with activation opt-in. Correcting the DT resources will
-require a new boot image; the installed baseline cannot gain them by replacing
-the WiFi module. Keep r14 pinned until that change is concrete and ready to test.
+The r15 image supplies the Exynos7885-specific ACPM transport resources. Its
+protocol can bind as a module, but the first request received no response and
+the APM appears not to service its queue. The next step is to establish why
+the APM core is inactive or unreachable before any WiFi power operation.
