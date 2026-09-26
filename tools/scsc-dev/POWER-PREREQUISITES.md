@@ -175,6 +175,28 @@ CRCs with header v1.0/API v0.2 and entry `0x1a9`. Their runtime lengths differ
 (1,890,552 vs 1,895,976 bytes). Preserve matching firmware/config provenance;
 neither image has been executed by this driver. The installed image is unchanged.
 
+## Firmware handoff ABI (source audit)
+
+The downstream `mxman_start()` initializes the management, R4 GDB, M4 GDB and
+mxlog transports, then writes the boot handoff before calling
+`mif->reset(mif, false)`: MBOX0 receives the firmware entry (`0x1a9` for the installed image),
+MBOX1 receives the R4-relative mxconf offset (`0x1d4248` for iteration 033),
+MBOX2 receives magic `0xbcdeedcb`, and MBOX3 receives
+`firmware_startup_flags` (default zero). It issues a write barrier before
+reset release. The config and entry values are now verified independently;
+this driver has not written any mailbox register or released either core.
+
+The downstream release path also invokes `exynos_pmu_shared_reg_enable()`,
+then enables WIFI_PWRON, clears WIFI_RESET_SET, and asserts WIFI_START. Its
+reset path changes reset-ahead, CLEANY bus, logic-reset, TCXO, isolation and
+central-sequencer controls, waits up to 500 ms for state `0x80`, and may
+separately power down or hold reset. The shared-regulator implementation and
+CP mailbox coordination are Samsung-only and are not yet mapped to a safe
+mainline equivalent. Do not implement or invoke this sequence until those
+board-specific dependencies, IRQ behavior and a recoverable stop path are
+resolved. Successful staging, TZASC, BAAW and mxconf readback alone do not
+make firmware release safe.
+
 The r15 image supplies the Exynos7885-specific ACPM transport resources. Its
 protocol can bind as a module, but the first request received no response and
 the APM did not service its queue or acknowledge the doorbell. A targeted read

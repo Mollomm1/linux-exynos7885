@@ -112,6 +112,13 @@ into Linux 6.15 unchanged: `platform_mif.c` uses removed `exynos_smc()` and
 the required interfaces in mainline style. Do not restore the abandoned
 `gta3xl-scsc` probe machinery or copy Samsung-only Android dependencies.
 
+The downstream boot handoff writes the firmware entry to MBOX0, the verified
+R4-relative config offset to MBOX1, `0xbcdeedcb` to MBOX2, and the startup flags
+to MBOX3 before reset release. The values are understood, but this module does
+not access those registers. The board's shared-regulator and CP-mailbox release
+dependencies plus a recoverable stop path are still unresolved; keep firmware
+release disabled until they are mapped and reviewed.
+
 Before any processor release, establish the board-specific power/reset
 sequence, ACPM voltage handshake, IRQ handling and firmware configuration
 handoff. The tablet has been soft-bricked by earlier startup experiments. Keep
