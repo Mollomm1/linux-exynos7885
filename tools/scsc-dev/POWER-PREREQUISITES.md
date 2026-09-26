@@ -122,6 +122,17 @@ of the APM SRAM log found `hard_fau` followed by a register dump ending at
 The log front stayed at 116 across two 0.2-second-spaced samples. The entries
 cannot yet be tied to the current Linux boot or DVFS request. A new opt-in
 protocol module refuses further transfers if its TX queue or AP-to-APM
-doorbell is already pending; it is built but not loaded. The next step is to
+doorbell is already pending; it is built as an opt-in module. The next step is to
 determine why the APM faulted or stopped acknowledging its doorbell before
 any WiFi power operation.
+
+After a full tablet power cycle, boot `e98accc8-9d37-4d93-b2e1-3b9df2c46dde`
+started with channel-0 TX `0/0`, outgoing doorbell clear, and log front 104;
+the old fault records at indices 104–115 were absent. Explicitly loading the
+mailbox and guarded protocol modules one at a time did not change any of those
+values, and both unloaded cleanly. No ACPM request was made on this boot.
+Two read-only attempts to inspect the plugin table ended with SSH exit 255,
+although normal SSH and bounded state reads continued on the same boot; do not
+repeat the inspection without understanding that failure. The downstream
+kernel calls `plugins_init()` before clients; the mainline transport does not.
+Whether this tablet needs a dynamic plugin attachment remains unknown.
