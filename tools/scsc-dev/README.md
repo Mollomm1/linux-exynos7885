@@ -117,6 +117,13 @@ slots from the DT resources. It validates and maps the ranges without MMIO
 access; IRQ delivery, interrupt-bit operations and mailbox handoff are still
 not implemented.
 
+Iteration 035 reads three additional PMU registers, without writes: CP state
+(`0x0038`), shared-regulator status (`0x3644`) and option (`0x3648`). The
+observed values were `0x1`, `0x20001` and `0x6`; the CP state differs from the
+downstream release helper's expected `0x10`. The required CP mailbox ISSR2
+request/ack is not yet supported by this driver or the mainline T510 DTS, so
+firmware release remains gated.
+
 The downstream boot handoff writes the firmware entry to MBOX0, the verified
 R4-relative config offset to MBOX1, `0xbcdeedcb` to MBOX2, and the startup flags
 to MBOX3 before reset release. The values are understood, but this module does

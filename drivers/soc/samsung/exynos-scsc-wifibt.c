@@ -27,6 +27,9 @@
 #define SCSC_PMU_WIFI_STAT	0x0148
 #define SCSC_PMU_BAAW_SIZE0	0x7300
 #define SCSC_PMU_BAAW_BASE0	0x7304
+#define SCSC_PMU_CP_STATUS	0x0038
+#define SCSC_PMU_SHARED_REG_STATUS	0x3644
+#define SCSC_PMU_SHARED_REG_OPTION	0x3648
 #define SCSC_WIFI_PWRON		BIT(1)
 #define SCSC_WIFI_START		BIT(3)
 #define SCSC_MXCONF_MAGIC	0x79828486
@@ -576,8 +579,11 @@ static ssize_t pmu_state_show(struct device *dev,
 {
 	struct scsc_device *scsc = dev_get_drvdata(dev);
 	/* Always-on PMU only: never scan a range or read unpowered mailboxes. */
-	static const u32 offsets[] = { 0x0140, 0x0144, 0x0148, 0x0384,
-				       0x7300, 0x7304 };
+	static const u32 offsets[] = {
+		SCSC_PMU_CP_STATUS, 0x0140, 0x0144, 0x0148, 0x0384,
+		0x7300, 0x7304, SCSC_PMU_SHARED_REG_STATUS,
+		SCSC_PMU_SHARED_REG_OPTION,
+	};
 	unsigned int values[ARRAY_SIZE(offsets)];
 	ssize_t len = 0;
 	int i, ret;

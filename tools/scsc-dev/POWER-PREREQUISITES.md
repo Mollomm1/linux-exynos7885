@@ -29,6 +29,16 @@ validating each mapped `0x180`-byte resource covers offsets `0x80..0x9c`. The
 single opt-in bind logged all slots mapped in 79 us and unloaded cleanly. The
 driver did not read or write those registers or request IRQs; WLBT stayed off.
 
+Iteration 035 added only three targeted always-on PMU reads for the downstream
+shared-regulator path. On this boot they returned `CP_STAT=0x1`,
+`EXT_REGULATOR_SHARED_STATUS=0x20001`, and
+`EXT_REGULATOR_SHARED_OPTION=0x6`; the existing WiFi power/reset readings were
+unchanged. The downstream helper reports expected `CP_STAT=0x10` and shared
+status `0x20001`. It also updates ISSR2 in the CP mailbox before setting the
+shared regulator option, but the CP mailbox is not mapped in the mainline T510
+DTS and has not been accessed here. Treat this mismatch as unresolved; do not
+release WLBT based only on the apparently matching regulator status.
+
 ## r15 follow-up, same boot as firmware staging (2026-09-26)
 
 Boot ID `e5fc02de-0a93-4cec-8384-3d160b26580c` stayed healthy throughout
