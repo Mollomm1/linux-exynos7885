@@ -154,6 +154,24 @@ The reference release path also temporarily enables the shared-regulator option
 and coordinates with the CP mailbox. The matching WiFi-only tablet behavior
 needs to be established before substituting an arbitrary PMU bit write.
 
+The downstream implementation is specifically stateful, not a standalone
+`EXT_REGULATOR_SHARED_OPTION` bit toggle. Under a lock, its first user writes
+ISSR2 bit 0 to `1` at CP mailbox offset `0x88`, sets option bit 2 at PMU offset
+`0x3648`, then reads ISSR3 bits 4:1 at offset `0x8c`. It returns a delay
+indication when those bits are zero; the CP mailbox interrupt helper uses that
+indication to wait 3 ms after generating a CP interrupt before releasing its
+temporary shared-rail reference.
+The last user clears option bit 2 and then clears ISSR2 bit 0. The downstream
+helper also treats `EXT_REGULATOR_SHARED_STATUS == 0x20001` and
+`CP_STAT == 0x10` as its expected state. Our targeted reading saw the rail
+status match but `CP_STAT == 1`; this is not a green light to perform the
+handshake. The CP mailbox node is at `0x12080000` in the downstream T510 DT,
+but it is absent from the currently installed mainline T510 DT. Any mainline
+implementation must first add and validate that resource, then fail closed on
+unexpected CP status or handshake state. Do not touch the mailbox through a
+hard-coded physical address, and do not add an implicit rail operation to
+probe or module removal.
+
 DRAM access requires secure-monitor setup (`0x82000710`, subsystem 0, carveout
 base and size) and PMU memory-window setup. Both have now been performed and
 read back successfully for the reserved 4 MiB region on r15. Keep checking the
