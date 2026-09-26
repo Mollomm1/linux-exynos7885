@@ -1,5 +1,27 @@
 # Exynos7885 WiFi startup prerequisites
 
+## r15 module-only ACPM findings (2026-09-26)
+
+The r15 image has the Exynos7885 SRAM and mailbox DT resources. Both ACPM
+modules remain explicitly loaded. The firmware reports eight channel
+descriptors: some are notification buffers (`type=2`), and some queues are
+interrupt-driven. A queue-only driver must skip those until it has an IRQ
+handler. The downstream DVFS request channel is **0**, inherited from the
+clock driver's `acpm-ipc-channel = <0>`; `acpm_dvfs` channel 5 receives MIF
+notifications and is a buffer, not the request channel.
+
+An early protocol revision rejected channel 3 because its buffer length is
+one. A revised module bound after skipping unsupported descriptors. The first
+read-only channel-0 request then hit a kernel Oops in `hrtimer_start_range_ns`
+before the doorbell could be sent. The mailbox framework changes a freed
+channel to `TXDONE_BY_POLL`; after a rebind, a client without
+`knows_txdone = true` retained that method even though the controller has no
+poll timer. The protocol now declares software completion, frees channels on
+remove, and retains a bounded explicit test client. The Oops boot must be
+rebooted before another query. No ACPM response or WiFi power-up has yet been
+verified. The full log is in the workspace's
+`wifi-iterations/012-acpm-channel0/device-dmesg-after-oops.txt`.
+
 The r14 development baseline supports module iteration, but its existing ACPM
 description is a GS101 placeholder. Do not turn on WiFi by merely fixing the
 clock lookup or ignoring the missing voltage-management handshake.

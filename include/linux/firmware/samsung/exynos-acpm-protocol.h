@@ -31,8 +31,14 @@ struct acpm_pmic_ops {
 			  u8 value, u8 mask);
 };
 
+struct acpm_dvfs_ops {
+	int (*get_rate)(const struct acpm_handle *handle, u32 id, u32 *rate);
+	int (*set_wlbt_flag)(const struct acpm_handle *handle);
+};
+
 struct acpm_ops {
 	struct acpm_pmic_ops pmic_ops;
+	struct acpm_dvfs_ops dvfs_ops;
 };
 
 /**

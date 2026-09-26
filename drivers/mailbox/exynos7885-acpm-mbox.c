@@ -9,12 +9,10 @@
 #include <linux/platform_device.h>
 
 #define EXYNOS7885_INTGR0	0x08
-#define EXYNOS7885_INTMR1	0x24
 #define EXYNOS7885_CHANNELS	16
 
 struct exynos7885_mbox {
 	void __iomem *regs;
-	u32 original_mask;
 	struct mbox_controller controller;
 	struct mbox_chan channels[EXYNOS7885_CHANNELS];
 };
@@ -52,18 +50,11 @@ static struct mbox_chan *exynos7885_mbox_xlate(struct mbox_controller *ctl,
 	return ERR_PTR(-EBUSY);
 }
 
-static void exynos7885_mbox_restore_mask(void *data)
-{
-	struct exynos7885_mbox *mbox = data;
-
-	writel(mbox->original_mask, mbox->regs + EXYNOS7885_INTMR1);
-}
-
 static int exynos7885_mbox_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct exynos7885_mbox *mbox;
-	int i, ret;
+	int i;
 
 	mbox = devm_kzalloc(dev, sizeof(*mbox), GFP_KERNEL);
 	if (!mbox)
@@ -82,13 +73,7 @@ static int exynos7885_mbox_probe(struct platform_device *pdev)
 		mbox->channels[i].mbox = &mbox->controller;
 
 	platform_set_drvdata(pdev, mbox);
-	/* Polling clients do not service the APM-to-AP interrupt. */
-	mbox->original_mask = readl(mbox->regs + EXYNOS7885_INTMR1);
-	ret = devm_add_action_or_reset(dev, exynos7885_mbox_restore_mask, mbox);
-	if (ret)
-		return ret;
-	writel(mbox->original_mask | GENMASK(15, 0),
-	       mbox->regs + EXYNOS7885_INTMR1);
+	/* Register only; the protocol decides how to handle incoming IRQs. */
 	return devm_mbox_controller_register(dev, &mbox->controller);
 }
 

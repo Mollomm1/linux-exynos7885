@@ -39,6 +39,13 @@
 #define ACPM_GS101_INITDATA_BASE	0xa000
 #define ACPM_EXYNOS7885_INITDATA_BASE	0x4b80
 #define ACPM_MAX_CHANNELS		16
+#define ACPM_CHAN_QUEUE			1
+#define ACPM_CHAN_BUFFER		2
+#define ACPM_DVFS_CHANNEL		0
+#define ACPM_DVFS_GET_RATE		1
+#define ACPM_DVFS_SET_FLAG		6
+#define ACPM_EXYNOS7885_INTCR1		0x20
+#define ACPM_EXYNOS7885_INTMR1		0x24
 
 /**
  * struct acpm_shmem - shared memory configuration information.
@@ -151,6 +158,7 @@ struct acpm_chan {
 	unsigned int mlen;
 	u8 seqnum;
 	u8 id;
+	u8 type;
 	bool poll_completion;
 
 	DECLARE_BITMAP(bitmap_seqnum, ACPM_SEQNUM_MAX - 1);
@@ -174,6 +182,9 @@ struct acpm_info {
 	struct acpm_handle handle;
 	u32 num_chans;
 	resource_size_t sram_size;
+	bool exynos7885;
+	void __iomem *mbox_regs;
+	u32 original_mbox_mask;
 };
 
 /**
@@ -283,6 +294,9 @@ static int acpm_get_rx(struct acpm_chan *achan, const struct acpm_xfer *xfer)
 
 	/* We saved all responses, mark RX empty. */
 	writel(rx_front, achan->rx.rear);
+	if (achan->acpm->mbox_regs && achan->id == ACPM_DVFS_CHANNEL)
+		writel(BIT(achan->id), achan->acpm->mbox_regs +
+		       ACPM_EXYNOS7885_INTCR1);
 
 	/*
 	 * If the response was not in this iteration of the queue, check if the
@@ -426,17 +440,14 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 		return -EINVAL;
 
 	achan = &acpm->chans[xfer->acpm_chan_id];
+	if (achan->type != ACPM_CHAN_QUEUE || !achan->poll_completion)
+		return -EOPNOTSUPP;
 
 	if (!xfer->txd || xfer->txlen < sizeof(u32) ||
 	    (xfer->txlen & 3) || (xfer->rxlen & 3) ||
 	    (xfer->rxlen && !xfer->rxd) ||
 	    xfer->txlen > achan->mlen || xfer->rxlen > achan->mlen)
 		return -EINVAL;
-
-	if (!achan->poll_completion) {
-		dev_err(achan->acpm->dev, "Interrupt mode not supported\n");
-		return -EOPNOTSUPP;
-	}
 
 	scoped_guard(mutex, &achan->tx_lock) {
 		tx_front = readl(achan->tx.front);
@@ -617,22 +628,46 @@ static int acpm_channels_init(struct acpm_info *acpm)
 		struct mbox_client *cl = &achan->cl;
 
 		achan->acpm = acpm;
+		achan->id = readl(&chan_shmem->id);
+		achan->type = readl(&chan_shmem->reserved[2]);
+		if (achan->id >= ACPM_MAX_CHANNELS)
+			return -EINVAL;
+		if (achan->type == ACPM_CHAN_BUFFER)
+			continue;
+		if (achan->type != ACPM_CHAN_QUEUE)
+			return dev_err_probe(dev, -EINVAL,
+					     "Unsupported ACPM channel type\n");
+		/* Poll the DVFS queue explicitly; no RX IRQ handler is installed. */
+		if (!readl(&chan_shmem->poll_completion) &&
+		    achan->id != ACPM_DVFS_CHANNEL)
+			continue;
 
 		ret = acpm_chan_shmem_get_params(achan, chan_shmem);
 		if (ret) {
-			dev_err(dev, "Invalid ACPM channel %d\n", i);
+			dev_err(dev,
+				"Invalid ACPM channel %d: id=%u type=%u qlen=%u mlen=%u poll=%u rx=%#x tx=%#x\n",
+				i, achan->id, readl(&chan_shmem->reserved[2]),
+				achan->qlen, achan->mlen, achan->poll_completion,
+				readl(&chan_shmem->rx_base),
+				readl(&chan_shmem->tx_base));
 			acpm_free_mbox_chans(acpm);
 			return ret;
 		}
+		if (acpm->exynos7885 && achan->id == ACPM_DVFS_CHANNEL)
+			achan->poll_completion = true;
 
 		ret = acpm_achan_alloc_cmds(achan);
-		if (ret)
+		if (ret) {
+			acpm_free_mbox_chans(acpm);
 			return ret;
+		}
 
 		mutex_init(&achan->rx_lock);
 		mutex_init(&achan->tx_lock);
 
 		cl->dev = dev;
+		/* We call mbox_client_txdone() after consuming each reply. */
+		cl->knows_txdone = true;
 
 		achan->chan = mbox_request_channel(cl, 0);
 		if (IS_ERR(achan->chan)) {
@@ -640,8 +675,46 @@ static int acpm_channels_init(struct acpm_info *acpm)
 			return PTR_ERR(achan->chan);
 		}
 	}
+	dev_info(dev, "Registered polling queues from %u ACPM descriptors\n",
+		 acpm->num_chans);
 
 	return 0;
+}
+
+static int acpm_dvfs_get_rate(const struct acpm_handle *handle, u32 id,
+			      u32 *rate)
+{
+	u32 cmd[4] = { id, 0, ACPM_DVFS_GET_RATE, 0 };
+	struct acpm_xfer xfer = {
+		.txd = cmd,
+		.rxd = cmd,
+		.txlen = sizeof(cmd),
+		.rxlen = sizeof(cmd),
+		.acpm_chan_id = ACPM_DVFS_CHANNEL,
+	};
+	int ret;
+
+	if (!rate)
+		return -EINVAL;
+
+	ret = acpm_do_xfer(handle, &xfer);
+	if (!ret)
+		*rate = cmd[1];
+	return ret;
+}
+
+static int acpm_dvfs_set_wlbt_flag(const struct acpm_handle *handle)
+{
+	u32 cmd[4] = { 7, 1, ACPM_DVFS_SET_FLAG, 0 };
+	struct acpm_xfer xfer = {
+		.txd = cmd,
+		.rxd = cmd,
+		.txlen = sizeof(cmd),
+		.rxlen = sizeof(cmd),
+		.acpm_chan_id = ACPM_DVFS_CHANNEL,
+	};
+
+	return acpm_do_xfer(handle, &xfer);
 }
 
 /**
@@ -657,6 +730,60 @@ static void acpm_setup_ops(struct acpm_info *acpm)
 	pmic_ops->write_reg = acpm_pmic_write_reg;
 	pmic_ops->bulk_write = acpm_pmic_bulk_write;
 	pmic_ops->update_reg = acpm_pmic_update_reg;
+	if (acpm->exynos7885) {
+		acpm->handle.ops.dvfs_ops.get_rate = acpm_dvfs_get_rate;
+		acpm->handle.ops.dvfs_ops.set_wlbt_flag =
+			acpm_dvfs_set_wlbt_flag;
+	}
+}
+
+static void acpm_restore_mbox_mask(void *data)
+{
+	struct acpm_info *acpm = data;
+
+	writel(acpm->original_mbox_mask,
+	       acpm->mbox_regs + ACPM_EXYNOS7885_INTMR1);
+}
+
+static int acpm_setup_exynos7885_polling(struct platform_device *pdev,
+					 struct acpm_info *acpm)
+{
+	struct device *dev = &pdev->dev;
+	struct device_node *np;
+	struct resource res;
+	int ret;
+
+	if (acpm->num_chans <= ACPM_DVFS_CHANNEL ||
+	    acpm->chans[ACPM_DVFS_CHANNEL].id != ACPM_DVFS_CHANNEL ||
+	    !acpm->chans[ACPM_DVFS_CHANNEL].chan)
+		return dev_err_probe(dev, -EINVAL,
+				     "Missing DVFS queue: id=%u type=%u poll=%u qlen=%u\n",
+				     acpm->chans[ACPM_DVFS_CHANNEL].id,
+				     acpm->chans[ACPM_DVFS_CHANNEL].type,
+				     acpm->chans[ACPM_DVFS_CHANNEL].poll_completion,
+				     acpm->chans[ACPM_DVFS_CHANNEL].qlen);
+
+	np = of_parse_phandle(dev->of_node, "mboxes", 0);
+	if (!np)
+		return dev_err_probe(dev, -EINVAL, "Missing ACPM mailbox\n");
+	ret = of_address_to_resource(np, 0, &res);
+	of_node_put(np);
+	if (ret || resource_size(&res) <
+	    ACPM_EXYNOS7885_INTMR1 + sizeof(u32))
+		return dev_err_probe(dev, -EINVAL, "Invalid ACPM mailbox\n");
+
+	acpm->mbox_regs = devm_ioremap(dev, res.start, resource_size(&res));
+	if (!acpm->mbox_regs)
+		return -ENOMEM;
+	acpm->original_mbox_mask = readl(acpm->mbox_regs +
+					 ACPM_EXYNOS7885_INTMR1);
+	ret = devm_add_action_or_reset(dev, acpm_restore_mbox_mask, acpm);
+	if (ret)
+		return ret;
+	writel(acpm->original_mbox_mask | BIT(ACPM_DVFS_CHANNEL),
+	       acpm->mbox_regs + ACPM_EXYNOS7885_INTMR1);
+
+	return 0;
 }
 
 static int acpm_probe(struct platform_device *pdev)
@@ -696,6 +823,8 @@ static int acpm_probe(struct platform_device *pdev)
 	if (match_data->initdata_base > size ||
 	    sizeof(*acpm->shmem) > size - match_data->initdata_base)
 		return dev_err_probe(dev, -EINVAL, "Invalid ACPM initdata offset\n");
+	acpm->exynos7885 =
+		match_data->initdata_base == ACPM_EXYNOS7885_INITDATA_BASE;
 
 	acpm->shmem = acpm->sram_base + match_data->initdata_base;
 	acpm->dev = dev;
@@ -703,12 +832,29 @@ static int acpm_probe(struct platform_device *pdev)
 	ret = acpm_channels_init(acpm);
 	if (ret)
 		return ret;
+	if (acpm->exynos7885) {
+		ret = acpm_setup_exynos7885_polling(pdev, acpm);
+		if (ret) {
+			acpm_free_mbox_chans(acpm);
+			return ret;
+		}
+	}
 
 	acpm_setup_ops(acpm);
 
 	platform_set_drvdata(pdev, acpm);
 
-	return devm_of_platform_populate(dev);
+	ret = devm_of_platform_populate(dev);
+	if (ret)
+		acpm_free_mbox_chans(acpm);
+	return ret;
+}
+
+static void acpm_remove(struct platform_device *pdev)
+{
+	struct acpm_info *acpm = platform_get_drvdata(pdev);
+
+	acpm_free_mbox_chans(acpm);
 }
 
 /**
@@ -834,6 +980,7 @@ MODULE_DEVICE_TABLE(of, acpm_modaliases);
 
 static struct platform_driver acpm_driver = {
 	.probe	= acpm_probe,
+	.remove	= acpm_remove,
 	.driver	= {
 		.name = "exynos-acpm-protocol",
 		.of_match_table	= acpm_match,
