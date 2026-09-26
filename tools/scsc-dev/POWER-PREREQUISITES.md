@@ -13,7 +13,7 @@ notifications and is a buffer, not the request channel.
 An early protocol revision rejected channel 3 because its buffer length is
 one. A revised module bound after skipping unsupported descriptors. The first
 read-only channel-0 request then hit a kernel Oops in `hrtimer_start_range_ns`
-before the doorbell could be sent. The mailbox framework changes a freed
+immediately after the doorbell write. The mailbox framework changes a freed
 channel to `TXDONE_BY_POLL`; after a rebind, a client without
 `knows_txdone = true` retained that method even though the controller has no
 poll timer. The protocol now declares software completion, frees channels on
