@@ -90,6 +90,7 @@ struct scsc_device {
 	size_t mem_size;
 	resource_size_t r4_reg_size;
 	resource_size_t m4_reg_size;
+	int mbox_irq;
 	bool checked;
 	bool staged;
 	bool memory_ready;
@@ -754,6 +755,10 @@ static int scsc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	mutex_init(&scsc->lock);
 	spin_lock_init(&scsc->mif_reg_lock);
+	scsc->mbox_irq = platform_get_irq_byname(pdev, "mbox");
+	if (scsc->mbox_irq < 0)
+		return dev_err_probe(dev, scsc->mbox_irq,
+				     "failed to get mailbox IRQ\n");
 	scsc->pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
 						  "samsung,pmu-syscon");
 	if (IS_ERR(scsc->pmu))
@@ -824,8 +829,9 @@ static int scsc_probe(struct platform_device *pdev)
 
 	/* Bind only; firmware staging is a separate explicit sysfs operation. */
 	dev_info(dev,
-		 "inert: reserved %pr and mapped %u R4/M4 mailbox slots in %lld us; no MMIO access or firmware execution\n",
+		 "inert: reserved %pr, mapped %u R4/M4 slots and mailbox IRQ %d in %lld us; no MMIO access, IRQ request or firmware execution\n",
 		 &mem, SCSC_MIF_NUM_MAILBOXES,
+		 scsc->mbox_irq,
 		 ktime_us_delta(ktime_get(), start));
 	return 0;
 }

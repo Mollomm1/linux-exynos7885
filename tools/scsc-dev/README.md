@@ -140,6 +140,12 @@ unrequested: it must only be armed as part of a reviewed startup sequence after
 WLBT is powered, otherwise an asserted level interrupt could not safely be
 acknowledged. No hardware IRQ was generated or tested.
 
+Iteration 041 looks up the DT resource named `mbox` without requesting it or
+accessing mailbox registers. On boot `3e212fde-60e7-4649-9e77-75ac2ada202c`,
+the kernel resolved it to Linux IRQ 55 (the DT specifier is GIC SPI 57). The
+module remained `inert`, the fake MIF self-test passed, and it unloaded; no
+hardware IRQ was requested or triggered.
+
 Iteration 034 now retains bounds-checked pointers to the eight R4/M4 mailbox
 slots from the DT resources. It validates and maps the ranges without MMIO
 access; IRQ delivery, interrupt-bit operations and mailbox handoff are still
