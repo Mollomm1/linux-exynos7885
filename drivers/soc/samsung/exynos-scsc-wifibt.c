@@ -30,8 +30,8 @@
 #define SCSC_PMU_CP_STATUS	0x0038
 #define SCSC_PMU_SHARED_REG_STATUS	0x3644
 #define SCSC_PMU_SHARED_REG_OPTION	0x3648
-#define SCSC_PMU_CP_READY		0x10
-#define SCSC_PMU_SHARED_REG_READY	0x20001
+#define SCSC_PMU_CP_REFERENCE		0x10
+#define SCSC_PMU_SHARED_REG_REFERENCE	0x20001
 #define SCSC_CP_ISSR3_OFFSET		0x8c
 #define SCSC_WIFI_PWRON		BIT(1)
 #define SCSC_WIFI_START		BIT(3)
@@ -83,7 +83,6 @@ struct scsc_device {
 	size_t mem_size;
 	resource_size_t r4_reg_size;
 	resource_size_t m4_reg_size;
-	resource_size_t cp_reg_size;
 	bool checked;
 	bool staged;
 	bool memory_ready;
@@ -604,8 +603,8 @@ static ssize_t pmu_state_show(struct device *dev,
 }
 static DEVICE_ATTR_ADMIN_RO(pmu_state);
 
-static ssize_t shared_rail_gate_show(struct device *dev,
-				     struct device_attribute *attr, char *buf)
+static ssize_t shared_rail_state_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
 {
 	struct scsc_device *scsc = dev_get_drvdata(dev);
 	unsigned int cp_status, shared_status;
@@ -620,15 +619,12 @@ static ssize_t shared_rail_gate_show(struct device *dev,
 		return ret;
 
 	return sysfs_emit(buf,
-			  "cp_mailbox=%s cp_status=0x%x shared_status=0x%x pmu_ready=%u firmware_start=disabled\n",
+			  "cp_mailbox=%s cp_status=0x%x cp_status_matches_reference=%u shared_status=0x%x shared_status_matches_reference=%u firmware_start=disabled\n",
 			  scsc->cp_mailbox ? "mapped" : "missing", cp_status,
-			  shared_status,
-			  scsc->cp_mailbox &&
-			  scsc->cp_reg_size >= SCSC_CP_ISSR3_OFFSET + sizeof(u32) &&
-			  cp_status == SCSC_PMU_CP_READY &&
-			  shared_status == SCSC_PMU_SHARED_REG_READY);
+			  cp_status == SCSC_PMU_CP_REFERENCE, shared_status,
+			  shared_status == SCSC_PMU_SHARED_REG_REFERENCE);
 }
-static DEVICE_ATTR_ADMIN_RO(shared_rail_gate);
+static DEVICE_ATTR_ADMIN_RO(shared_rail_state);
 
 static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
@@ -660,7 +656,7 @@ static struct attribute *scsc_attrs[] = {
 	&dev_attr_prepare_config.attr,
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
-	&dev_attr_shared_rail_gate.attr,
+	&dev_attr_shared_rail_state.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(scsc);
@@ -719,8 +715,8 @@ static int scsc_probe(struct platform_device *pdev)
 	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "cp")) {
 		cp_regs = *platform_get_resource_byname(pdev, IORESOURCE_MEM,
 							"cp");
-		scsc->cp_reg_size = resource_size(&cp_regs);
-		if (scsc->cp_reg_size < SCSC_CP_ISSR3_OFFSET + sizeof(u32))
+		if (resource_size(&cp_regs) <
+		    SCSC_CP_ISSR3_OFFSET + sizeof(u32))
 			return -EINVAL;
 		scsc->cp_mailbox = devm_platform_ioremap_resource_byname(pdev,
 									"cp");

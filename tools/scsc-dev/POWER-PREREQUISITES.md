@@ -40,12 +40,13 @@ DTS and has not been accessed here. Treat this mismatch as unresolved; do not
 release WLBT based only on the apparently matching regulator status.
 
 Iteration 036 rebuilt the opt-in module against r15 and added a read-only
-`shared_rail_gate`. On the same boot it reported `cp_mailbox=missing`,
+shared-rail status attribute. On the same boot it reported `cp_mailbox=missing`,
 `cp_status=0x1`, `shared_status=0x20001`, and `pmu_ready=0`; the driver returned
 to `inert` and unloaded cleanly. This confirms both the absent DT resource and
 the CP-state mismatch without touching the CP mailbox or writing PMU state.
-The current firmware start remains disabled. Device logs and module hash are in
-`wifi-iterations/036-cp-mailbox-gate/`.
+The downstream helper only logs the CP-state mismatch; it does not abort. The
+shared-rail operation and firmware start remain unimplemented. Device logs and
+module hash are in `wifi-iterations/036-cp-mailbox-gate/`.
 
 ## r15 follow-up, same boot as firmware staging (2026-09-26)
 
@@ -170,15 +171,16 @@ indication when those bits are zero; the CP mailbox interrupt helper uses that
 indication to wait 3 ms after generating a CP interrupt before releasing its
 temporary shared-rail reference.
 The last user clears option bit 2 and then clears ISSR2 bit 0. The downstream
-helper also treats `EXT_REGULATOR_SHARED_STATUS == 0x20001` and
-`CP_STAT == 0x10` as its expected state. Our targeted reading saw the rail
-status match but `CP_STAT == 1`; this is not a green light to perform the
-handshake. The CP mailbox node is at `0x12080000` in the downstream T510 DT,
-but it is absent from the currently installed mainline T510 DT. Any mainline
-implementation must first add and validate that resource, then fail closed on
-unexpected CP status or handshake state. Do not touch the mailbox through a
-hard-coded physical address, and do not add an implicit rail operation to
-probe or module removal.
+helper logs when `EXT_REGULATOR_SHARED_STATUS != 0x20001` or `CP_STAT != 0x10`,
+but these comparisons do not abort the operation. Our targeted reading saw the
+rail status match but `CP_STAT == 1`. This is a reference-state discrepancy to
+record, not by itself proof that shared-rail enable cannot work. The CP mailbox
+node is at `0x12080000` in the downstream T510 DT, but it is absent from the
+currently installed mainline T510 DT. Any mainline implementation must add and
+validate that resource before using the CP mailbox, then reproduce and verify
+the sequenced ISSR/PMU operation. Do not touch the mailbox through a hard-coded
+physical address, and do not add an implicit rail operation to probe or module
+removal.
 
 DRAM access requires secure-monitor setup (`0x82000710`, subsystem 0, carveout
 base and size) and PMU memory-window setup. Both have now been performed and

@@ -126,12 +126,13 @@ firmware release remains gated.
 
 The opt-in module can map the downstream-confirmed CP mailbox window at
 `0x12080000` when a future T510 DT supplies it, without touching the mapped
-registers. Its `shared_rail_gate` attribute reads only fixed PMU status values
-and reports whether the mapping and documented PMU prerequisites are present.
-A passing check is not a shared-rail handshake and does not enable firmware
-start; the CP ISSR protocol and an explicit recoverable lifecycle are still
-required. The installed DT lacks this resource, so the current module reports
-it as missing and fails closed.
+registers. Its `shared_rail_state` attribute reads only fixed PMU status values
+and reports whether the mapping and downstream reference values match. The CP
+status comparison is diagnostic in Samsung's helper, not a hard startup gate.
+This read-only attribute is not a shared-rail handshake and does not enable
+firmware start; the CP ISSR protocol and an explicit recoverable lifecycle are
+still required. The installed DT lacks this resource, so the current module
+reports it as missing.
 
 The downstream boot handoff writes the firmware entry to MBOX0, the verified
 R4-relative config offset to MBOX1, `0xbcdeedcb` to MBOX2, and the startup flags

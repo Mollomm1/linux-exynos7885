@@ -39,13 +39,13 @@ Description:
 		not an atomic snapshot. No register writes, range dumps or mailbox
 		accesses are performed. Nothing is sampled automatically in probe.
 
-What:		/sys/bus/platform/devices/120c0000.wifibt/shared_rail_gate
+What:		/sys/bus/platform/devices/120c0000.wifibt/shared_rail_state
 Date:		September 2026
 Contact:	Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
 Description:
 		Root-only read of fixed always-on PMU shared-rail status and CP
 		status, plus whether the named CP mailbox resource is mapped. It
 		does not access CP mailbox registers or change power state. The
-		pmu_ready field reports only the currently documented status
-		prerequisites; it does not perform the CP handshake and never
-		enables firmware start.
+		*_matches_reference fields compare with values logged by the
+		downstream driver; they do not gate firmware start. This attribute
+		does not perform the CP handshake and never enables firmware start.
