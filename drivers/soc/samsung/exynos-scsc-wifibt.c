@@ -13,6 +13,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/unaligned.h>
+#include <linux/vmalloc.h>
 
 #define SCSC_FW_MIN_HEADER	188
 #define SCSC_FW_DIRECTORY	"postmarketos/mx140/"
@@ -20,8 +21,10 @@
 struct scsc_device {
 	struct regmap *pmu;
 	struct mutex lock;
+	void __iomem *memory;
 	size_t mem_size;
 	bool checked;
+	bool staged;
 	int firmware_result;
 	u32 runtime_length;
 	u32 entry_point;
@@ -116,6 +119,67 @@ static ssize_t verify_firmware_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(verify_firmware);
 
+static ssize_t stage_firmware_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	const struct firmware *fw;
+	void *readback;
+	size_t fw_size;
+	int ret;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+
+	mutex_lock(&scsc->lock);
+	if (scsc->staged) {
+		ret = -EALREADY;
+		goto out_unlock;
+	}
+
+	ret = request_firmware_direct(&fw,
+				      SCSC_FW_DIRECTORY "mx140.bin", dev);
+	if (ret)
+		goto out_unlock;
+
+	ret = scsc_check_firmware(scsc, fw);
+	scsc->checked = true;
+	scsc->firmware_result = ret;
+	if (ret)
+		goto out_release_fw;
+	fw_size = fw->size;
+
+	readback = kvzalloc(fw_size, GFP_KERNEL);
+	if (!readback) {
+		ret = -ENOMEM;
+		goto out_release_fw;
+	}
+
+	memcpy_toio(scsc->memory, fw->data, fw_size);
+	/* Ensure posted writes reach reserved memory before reading it back. */
+	wmb();
+	memcpy_fromio(readback, scsc->memory, fw_size);
+	if (memcmp(fw->data, readback, fw_size))
+		ret = -EIO;
+	else {
+		scsc->staged = true;
+		ret = 0;
+		scsc->firmware_result = 0;
+	}
+	kvfree(readback);
+
+out_release_fw:
+	release_firmware(fw);
+	if (!ret)
+		dev_info(dev, "staged and verified %zu bytes; firmware not started\n",
+			 fw_size);
+out_unlock:
+	mutex_unlock(&scsc->lock);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(stage_firmware);
+
 static ssize_t firmware_status_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -126,9 +190,10 @@ static ssize_t firmware_status_show(struct device *dev,
 	if (!scsc->checked)
 		len = sysfs_emit(buf, "unchecked\n");
 	else
-		len = sysfs_emit(buf, "result=%d runtime=%u entry=0x%x executed=0\n",
-				scsc->firmware_result, scsc->runtime_length,
-				scsc->entry_point);
+		len = sysfs_emit(buf,
+				 "result=%d runtime=%u entry=0x%x staged=%u executed=0\n",
+				 scsc->firmware_result, scsc->runtime_length,
+				 scsc->entry_point, scsc->staged);
 	mutex_unlock(&scsc->lock);
 	return len;
 }
@@ -166,6 +231,7 @@ static DEVICE_ATTR_RO(state);
 static struct attribute *scsc_attrs[] = {
 	&dev_attr_state.attr,
 	&dev_attr_verify_firmware.attr,
+	&dev_attr_stage_firmware.attr,
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
 	NULL,
@@ -215,8 +281,11 @@ static int scsc_probe(struct platform_device *pdev)
 				     dev_name(dev)))
 		return -EBUSY;
 	scsc->mem_size = resource_size(&mem);
+	scsc->memory = devm_ioremap_wc(dev, mem.start, scsc->mem_size);
+	if (!scsc->memory)
+		return -ENOMEM;
 
-	/* No IRQs, work, PMU changes or firmware activity to tear down. */
+	/* Bind only; firmware staging is a separate explicit sysfs operation. */
 	dev_info(dev, "inert: reserved %pr in %lld us; no firmware execution\n",
 		 &mem, ktime_us_delta(ktime_get(), start));
 	return 0;
