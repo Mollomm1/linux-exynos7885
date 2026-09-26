@@ -7,8 +7,9 @@ module-only work. The opt-in ACPM FVP plugin attach on channel 4 succeeded;
 the WLBT ACPM flag write returned success, and one bounded MIF-rate request
 completed with response value `0`. Queue indices remained synchronized. These
 observations supersede the earlier blanket statement that no ACPM request
-received a response, but they do not prove the separate BUCK2 voltage
-preparation request `[7, 1, 6, 0]` completed correctly.
+received a response. Source inspection confirms `set_wlbt_flag` sends the exact
+four-word BUCK2 preparation request `[7, 1, 6, 0]` on channel 0 and waits for
+the response; its successful return validates that prerequisite on this boot.
 
 The staging module's root-only `pmu_state` read on this boot returned:
 
@@ -104,19 +105,21 @@ the Exynos7885 SRAM and let it probe automatically.
 ## Rail, security and reset requirements
 
 The reference board enables `CONFIG_ACPM_DVFS`. Before WiFi reset release,
-`platform_mif_reset()` calls `exynos_acpm_set_flag()`. That function sends four
-words `[7, 1, 6, 0]` through the DVFS IPC channel, requesting a response. Its
-comment identifies BUCK2 voltage preparation. The current mainline public ACPM
-interface exposes PMIC operations, not this DVFS operation. Correct transport
-and a checked response are needed before relying on that prerequisite.
+`platform_mif_reset()` calls `exynos_acpm_set_flag()`, which sends four words
+`[7, 1, 6, 0]` through DVFS IPC and waits for a response. The r15 opt-in
+`set_wlbt_flag` call completed successfully on the current boot, so the
+voltage-preparation request itself is validated. The request still needs to be
+ordered immediately before any future reset release.
 
 The reference release path also temporarily enables the shared-regulator option
 and coordinates with the CP mailbox. The matching WiFi-only tablet behavior
 needs to be established before substituting an arbitrary PMU bit write.
 
 DRAM access requires secure-monitor setup (`0x82000710`, subsystem 0, carveout
-base and size) and PMU memory-window setup. The secure-call result must be checked;
-do not copy the downstream behavior of proceeding after failure.
+base and size) and PMU memory-window setup. Both have now been performed and
+read back successfully for the reserved 4 MiB region on r15. Keep checking the
+secure-call result and aperture readback in future boots; do not copy the
+downstream behavior of proceeding after failure.
 
 Reset is a sequence through reset-ahead, bus cleanup, logic reset, TCXO gating,
 isolation and the central sequencer, followed by assertion and bounded polling
