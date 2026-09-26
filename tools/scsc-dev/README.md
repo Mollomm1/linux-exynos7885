@@ -112,6 +112,11 @@ into Linux 6.15 unchanged: `platform_mif.c` uses removed `exynos_smc()` and
 the required interfaces in mainline style. Do not restore the abandoned
 `gta3xl-scsc` probe machinery or copy Samsung-only Android dependencies.
 
+Iteration 034 now retains bounds-checked pointers to the eight R4/M4 mailbox
+slots from the DT resources. It validates and maps the ranges without MMIO
+access; IRQ delivery, interrupt-bit operations and mailbox handoff are still
+not implemented.
+
 The downstream boot handoff writes the firmware entry to MBOX0, the verified
 R4-relative config offset to MBOX1, `0xbcdeedcb` to MBOX2, and the startup flags
 to MBOX3 before reset release. The values are understood, but this module does

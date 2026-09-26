@@ -24,6 +24,11 @@ unloaded cleanly. The device still has only `lo` and `usb0`. Do not start WLBT
 firmware as part of the config test; transport, reset and power prerequisites
 remain unimplemented.
 
+Iteration 034 retained pointers to all eight R4/M4 ISSR mailbox slots after
+validating each mapped `0x180`-byte resource covers offsets `0x80..0x9c`. The
+single opt-in bind logged all slots mapped in 79 us and unloaded cleanly. The
+driver did not read or write those registers or request IRQs; WLBT stayed off.
+
 ## r15 follow-up, same boot as firmware staging (2026-09-26)
 
 Boot ID `e5fc02de-0a93-4cec-8384-3d160b26580c` stayed healthy throughout

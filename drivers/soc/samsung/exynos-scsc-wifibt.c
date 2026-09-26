@@ -42,6 +42,8 @@
 #define SCSC_MXLOG_BUFFER_SIZE	(16 * 1024)
 #define SCSC_MXLOG_PACKET_SIZE	4
 #define SCSC_MXCONF_STREAM_SIZE	22
+#define SCSC_MIF_NUM_MAILBOXES	8
+#define SCSC_MIF_ISSR_BASE	0x80
 
 struct scsc_stream_config {
 	u32 buffer;
@@ -68,8 +70,12 @@ struct scsc_device {
 	struct regmap *pmu;
 	struct mutex lock;
 	void __iomem *memory;
+	void __iomem *r4_mailbox[SCSC_MIF_NUM_MAILBOXES];
+	void __iomem *m4_mailbox[SCSC_MIF_NUM_MAILBOXES];
 	phys_addr_t mem_start;
 	size_t mem_size;
+	resource_size_t r4_reg_size;
+	resource_size_t m4_reg_size;
 	bool checked;
 	bool staged;
 	bool memory_ready;
@@ -594,6 +600,21 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(state);
 
+/* Build an ISSR pointer without accessing the powered-down mailbox bank. */
+static void __iomem *scsc_mailbox_slot(void __iomem *base,
+				      resource_size_t reg_size, u32 index)
+{
+	size_t offset;
+
+	if (index >= SCSC_MIF_NUM_MAILBOXES ||
+	    check_mul_overflow((size_t)index, sizeof(u32), &offset) ||
+	    check_add_overflow(offset, (size_t)SCSC_MIF_ISSR_BASE, &offset) ||
+	    offset > reg_size || reg_size - offset < sizeof(u32))
+		return NULL;
+
+	return base + offset;
+}
+
 static struct attribute *scsc_attrs[] = {
 	&dev_attr_state.attr,
 	&dev_attr_verify_firmware.attr,
@@ -611,10 +632,10 @@ static int scsc_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct scsc_device *scsc;
 	struct device_node *np;
-	struct resource mem;
-	void __iomem *base;
+	struct resource mem, r4_regs, m4_regs;
+	void __iomem *r4_base, *m4_base;
 	ktime_t start = ktime_get();
-	int ret;
+	int ret, i;
 
 	if (!enable)
 		return -ENODEV;
@@ -628,13 +649,33 @@ static int scsc_probe(struct platform_device *pdev)
 		return PTR_ERR(scsc->pmu);
 	platform_set_drvdata(pdev, scsc);
 
-	/* Map the mailboxes, but never access an unpowered register bank. */
-	base = devm_platform_ioremap_resource_byname(pdev, "r4");
-	if (IS_ERR(base))
-		return PTR_ERR(base);
-	base = devm_platform_ioremap_resource_byname(pdev, "m4");
-	if (IS_ERR(base))
-		return PTR_ERR(base);
+	/* Map and validate mailbox slots, but never access the powered-down bank. */
+	if (!platform_get_resource_byname(pdev, IORESOURCE_MEM, "r4") ||
+	    !platform_get_resource_byname(pdev, IORESOURCE_MEM, "m4"))
+		return -EINVAL;
+	r4_regs = *platform_get_resource_byname(pdev, IORESOURCE_MEM, "r4");
+	m4_regs = *platform_get_resource_byname(pdev, IORESOURCE_MEM, "m4");
+	scsc->r4_reg_size = resource_size(&r4_regs);
+	scsc->m4_reg_size = resource_size(&m4_regs);
+	if (scsc->r4_reg_size < SCSC_MIF_ISSR_BASE +
+	    SCSC_MIF_NUM_MAILBOXES * sizeof(u32) ||
+	    scsc->m4_reg_size < SCSC_MIF_ISSR_BASE +
+	    SCSC_MIF_NUM_MAILBOXES * sizeof(u32))
+		return -EINVAL;
+	r4_base = devm_platform_ioremap_resource_byname(pdev, "r4");
+	if (IS_ERR(r4_base))
+		return PTR_ERR(r4_base);
+	m4_base = devm_platform_ioremap_resource_byname(pdev, "m4");
+	if (IS_ERR(m4_base))
+		return PTR_ERR(m4_base);
+	for (i = 0; i < SCSC_MIF_NUM_MAILBOXES; i++) {
+		scsc->r4_mailbox[i] = scsc_mailbox_slot(r4_base,
+						       scsc->r4_reg_size, i);
+		scsc->m4_mailbox[i] = scsc_mailbox_slot(m4_base,
+						       scsc->m4_reg_size, i);
+		if (!scsc->r4_mailbox[i] || !scsc->m4_mailbox[i])
+			return -EINVAL;
+	}
 
 	np = of_parse_phandle(dev->of_node, "memory-region", 0);
 	if (!np)
@@ -655,8 +696,10 @@ static int scsc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	/* Bind only; firmware staging is a separate explicit sysfs operation. */
-	dev_info(dev, "inert: reserved %pr in %lld us; no firmware execution\n",
-		 &mem, ktime_us_delta(ktime_get(), start));
+	dev_info(dev,
+		 "inert: reserved %pr and mapped %u R4/M4 mailbox slots in %lld us; no MMIO access or firmware execution\n",
+		 &mem, SCSC_MIF_NUM_MAILBOXES,
+		 ktime_us_delta(ktime_get(), start));
 	return 0;
 }
 
