@@ -115,7 +115,16 @@ def pmb_build(args):
     require(not args.out.exists(), "Use a new output directory")
     identifier = digest(archive)
     shared = archive.parent / "scsc-dev" / identifier
-    shared.mkdir(parents=True, exist_ok=True)
+
+    def inside(path):
+        return "/var/cache/distfiles/" + str(path.relative_to(archive.parent))
+
+    pmb = ["pmbootstrap", "-w", str(archive.parent.parent), "chroot", "--"]
+    # Distfiles is owned by abuild, not by the host login user. Let the
+    # existing pmbootstrap privilege path create just our staging directory.
+    if not shared.exists():
+        run(pmb + ["install", "-d", "-m", "0755", "-o", str(os.getuid()),
+                   "-g", str(os.getgid()), inside(shared)])
     tree = shared / "baseline"
     if not tree.exists():
         temporary = shared / "extracting"
@@ -130,10 +139,7 @@ def pmb_build(args):
     script = iteration / "scsc-dev.py"
     shutil.copy2(Path(__file__), script)
 
-    def inside(path):
-        return "/var/cache/distfiles/" + str(path.relative_to(archive.parent))
-
-    run(["pmbootstrap", "-w", str(archive.parent.parent), "chroot", "--", "python3",
+    run(pmb + ["python3",
          inside(script), "build", "--baseline", inside(tree),
          "--source", inside(source), "--out", inside(iteration / "out")])
     args.out.mkdir(parents=True)
