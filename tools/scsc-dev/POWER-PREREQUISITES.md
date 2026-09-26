@@ -136,3 +136,8 @@ although normal SSH and bounded state reads continued on the same boot; do not
 repeat the inspection without understanding that failure. The downstream
 kernel calls `plugins_init()` before clients; the mainline transport does not.
 Whether this tablet needs a dynamic plugin attachment remains unknown.
+The corrected diagnostic client was also loaded without reading its rate
+attribute; the queue, doorbell and log front remained unchanged, and the
+modules unloaded cleanly. The prior APM fault is temporally associated with
+the first rate transaction or a later unrelated event, rather than with
+these module probes alone. No second rate transaction has been attempted.
