@@ -112,6 +112,13 @@ into Linux 6.15 unchanged: `platform_mif.c` uses removed `exynos_smc()` and
 the required interfaces in mainline style. Do not restore the abandoned
 `gta3xl-scsc` probe machinery or copy Samsung-only Android dependencies.
 
+The saved r15 baseline already has `CONFIG_CFG80211=m` and `CONFIG_MAC80211=m`;
+its `Module.symvers` exports `wiphy_register()`, `wiphy_unregister()` and
+`cfg80211_register_netdevice()`. This permits developing the host WLAN stack as
+external modules without changing kernel configuration or rebuilding the
+recovery image. The current mainline checkout has no SCSC/HIP WLAN subtree, so
+the driver itself still has to be ported before a real interface can appear.
+
 Iteration 034 now retains bounds-checked pointers to the eight R4/M4 mailbox
 slots from the DT resources. It validates and maps the ranges without MMIO
 access; IRQ delivery, interrupt-bit operations and mailbox handoff are still
