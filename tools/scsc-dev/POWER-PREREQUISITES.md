@@ -1,5 +1,29 @@
 # Exynos7885 WiFi startup prerequisites
 
+## Safe diagnostic and latest reboot (2026-09-26)
+
+An attempted wildcard read of the complete regmap debugfs `registers` file
+caused a synchronous external abort in the diagnostic `cat` process at
+`regmap_mmio_read32le`; the shell exited and the kernel logged that the task
+exited with IRQs disabled. SSH remained available. The inert SCSC module was
+unloaded cleanly. Do not repeat that read; use the driver's bounded
+`pmu_state` attribute. After the user rebooted, boot ID changed to
+`3e212fde-60e7-4649-9e77-75ac2ada202c`; only `lo` and `usb0` were present and
+the old fault was gone. The read-only ACPM stale-state check showed channel-0
+TX `0/0`, clear AP-to-APM doorbell, and `stale_channel0: false`. The packaged
+`acpm_protocol` module rejected descriptor 3, so it was unloaded and replaced
+with the already-tested r15 module from iteration 026. That module registered
+all eight queues; FVP plugin 3 attached on channel 4, and one WLBT preparation
+request completed with channel-0 TX/RX `1/1`.
+
+Iteration 033 then staged and verified the 1,360,017-byte image, prepared the
+TZASC/BAAW aperture, and wrote/read back the mxconf v0.1 configuration at
+`0x1d4248` using 424 allocator blocks. SCSC remained `inert`; no WiFi power,
+reset, mailbox or IRQ access occurred. SCSC and ACPM test/protocol modules were
+unloaded cleanly. The device still has only `lo` and `usb0`. Do not start WLBT
+firmware as part of the config test; transport, reset and power prerequisites
+remain unimplemented.
+
 ## r15 follow-up, same boot as firmware staging (2026-09-26)
 
 Boot ID `e5fc02de-0a93-4cec-8384-3d160b26580c` stayed healthy throughout

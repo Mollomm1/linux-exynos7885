@@ -8,9 +8,10 @@ build archive while iterating on code that fits in the out-of-tree module.
 
 The explicit `enable=1` module does not autoload. It can validate and stage the
 installed `postmarketos/mx140/mx140.bin`, configure its reserved DRAM window
-through the WLBT TZASC secure call and PMU BAAW registers, and read back each
-operation. It does not power WLBT, alter reset, access the mailbox registers,
-request IRQs, release either processor, or register a network interface.
+through the WLBT TZASC secure call and PMU BAAW registers, and build the
+firmware's shared-memory ring/configuration layout in reserved DRAM. It does not
+power WLBT, alter reset, access the mailbox registers, request IRQs, release
+either processor, or register a network interface.
 `state=inert` means firmware is not running; TZASC and the BAAW aperture may
 remain configured after the module is unloaded. No `wlan` interface exists yet.
 
@@ -66,31 +67,42 @@ that device, so build a new artifact for each iteration.
 
 ```sh
 python3 linux-exynos7885/tools/scsc-dev/scsc-dev.py upload \
-    --target root@172.16.42.1 --out wifi-iterations/031
+    --target root@172.16.42.1 --out wifi-iterations/033-prepare-config-errors
 python3 linux-exynos7885/tools/scsc-dev/scsc-dev.py load \
-    --target root@172.16.42.1 --out wifi-iterations/031
+    --target root@172.16.42.1 --out wifi-iterations/033-prepare-config-errors
 ssh root@172.16.42.1 'd=/sys/bus/platform/devices/120c0000.wifibt; \
     printf 1 > "$d/stage_firmware"; printf 1 > "$d/prepare_memory"; \
+    printf 1 > "$d/prepare_config"; \
     cat "$d/firmware_status"; cat "$d/pmu_state"'
 python3 linux-exynos7885/tools/scsc-dev/scsc-dev.py unload \
-    --target root@172.16.42.1 --out wifi-iterations/031
+    --target root@172.16.42.1 --out wifi-iterations/033-prepare-config-errors
 ```
 
 Run only the operation being tested. Firmware staging writes and verifies the
 firmware in reserved DRAM. `prepare_memory` additionally configures the EL3
 TZASC grant and PMU BAAW aperture after confirming PWRON, START and WIFI_STAT
 show the block off. Neither operation starts firmware. Both return promptly.
-The helper's `load`, `unload` and `cycle` commands are intended for this
-non-running state only. If bind/unbind fails, preserve the logs and inspect
-them; do not force unload. A failed SSH command is not proof that a kernel
-operation stopped.
+`prepare_config` allocates the seven downstream-defined management, GDB and
+mxlog rings after the firmware runtime image, writes the mxconf v0.1 header and
+stream records, and verifies the config readback. It only touches the reserved
+DRAM aperture. On boot `3e212fde-60e7-4649-9e77-75ac2ada202c`, the config
+readback passed at offset `0x1d4248` after ACPM preparation, firmware staging
+and DRAM setup. `state` remained `inert`; both modules unloaded cleanly, and
+only `lo` and `usb0` were present. Firmware was not started. The helper's
+`load`, `unload` and `cycle` commands are intended for the non-running state
+only. If bind/unbind fails, preserve the logs and inspect them; do not force
+unload. A failed SSH command is not proof that a kernel operation stopped.
+Never read the whole regmap debugfs `registers` file; use the driver's bounded
+`pmu_state` attribute.
 
 ## Current status and remaining implementation
 
-On boot `e5fc02de-0a93-4cec-8384-3d160b26580c`, firmware staging and memory
-preparation both succeeded over SSH. The TZASC call returned zero; PMU BAAW
-registers read back as size `0x400` and base `0xe9000`. The module was unloaded
-cleanly afterward. `ip link` still lists only `lo` and `usb0`.
+On boot `3e212fde-60e7-4649-9e77-75ac2ada202c`, ACPM FVP attachment, the WLBT
+preparation request, firmware staging, and memory preparation all succeeded.
+The TZASC call returned zero; PMU BAAW registers read back as size `0x400` and
+base `0xe9000`. The mxconf v0.1 shared-memory layout was written and verified
+at `0x1d4248`, using 424 allocator blocks. The module was unloaded cleanly
+afterward. `ip link` still lists only `lo` and `usb0`.
 
 The next implementation must provide the Exynos7885 MIF transport, safe
 firmware boot/stop lifecycle and the SCSC management/HIP WLAN stack that
