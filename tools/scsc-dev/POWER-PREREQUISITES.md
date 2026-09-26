@@ -19,12 +19,14 @@ channel to `TXDONE_BY_POLL`; after a rebind, a client without
 poll timer. The protocol now declares software completion and frees channels
 on removal. The Oops boot was rebooted. On the new boot, modules loaded and
 unloaded cleanly, but a read-only channel-0 rate query timed out. BusyBox
-retried the sysfs read, leaving AP TX front/rear `2/0`, RX `0/0`, and mailbox
-status `0`. The APM did not consume either request. Targeted PMU reads gave
-cortex configuration `0`, cortex status `3`, central configuration `0x10001`,
-central status `0`. The downstream power-down path clears cortex configuration
-bit 0; these readings suggest that APM might be inactive, but the status bit
-meanings and startup path require verification. There are two stale requests
+retried the sysfs read, leaving AP TX front/rear `2/0` and RX `0/0`. The
+APM-to-AP mailbox status was `0`; AP-to-APM status was `0x00010000`, meaning
+the channel-0 doorbell remained pending and unmasked. The APM did not consume
+either request. An initial PMU diagnostic mistakenly read cortex registers
+at `0x11c80100/104`; the downstream node maps them at `0x11c88100/104`.
+Correct values were cortex configuration `1`, cortex status `0x10000001`,
+central configuration `0x10001`, central status `0`. The cause of the missing
+APM response remains unknown. There are two stale requests
 on this boot: do not issue another one. A module-only follow-up fails closed
 after a timeout on Exynos7885, avoiding another BusyBox retry. It is a safety
 fix, not an APM startup fix. No WiFi power-up has been attempted. The old Oops
@@ -114,5 +116,5 @@ neither image has been executed by this driver. The installed image is unchanged
 
 The r15 image supplies the Exynos7885-specific ACPM transport resources. Its
 protocol can bind as a module, but the first request received no response and
-the APM appears not to service its queue. The next step is to establish why
-the APM core is inactive or unreachable before any WiFi power operation.
+the APM did not service its queue or acknowledge the doorbell. The next step is
+to determine why before any WiFi power operation.
