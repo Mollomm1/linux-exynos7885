@@ -11,6 +11,8 @@
  * Copyright (c) 2026 T510 mainlining project
  */
 
+#include <linux/arm-smccc.h>
+
 #include <linux/atomic.h>
 #include <linux/crc32.h>
 #include <linux/delay.h>
@@ -69,6 +71,11 @@
 #define SCSC_MBOX_ISSR(i)	(SCSC_MBOX_ISSR_BASE + 4 * (i))
 
 /* Shared-memory configuration published to the firmware. */
+#define SCSC_MBOX_MAGIC		0xbcdeedcb
+#define SCSC_MBOX_FW_FLAGS		0
+/* The WLBT TZASC channel that sizes the shared window, like downstream. */
+#define SCSC_SMC_WLBT_TZASC		0x82000710
+
 #define SCSC_MXCONF_MAGIC		0x79828486
 #define SCSC_MXCONF_VER_MAJOR		0
 #define SCSC_MXCONF_VER_MINOR		1
@@ -93,8 +100,10 @@
 #define SCSC_PMU_WIFI_STAT		0x148
 #define SCSC_PMU_WIFI_PWRDN_DONE	BIT(0)
 #define SCSC_PMU_CENTRAL_SEQ_STAT	0x13c
+#define SCSC_PMU_STATES		0xf0000
 #define SCSC_PMU_CENTRAL_SEQ_CFG	0x138
 #define SCSC_PMU_SYS_PWR_CFG_16		BIT(16)
+#define SCSC_PMU_BOOT_TEST_RST_CFG	0x7330	/* 0 = boot from external DRAM */
 #define SCSC_PMU_MEM_CONFIG0		0x7300	/* WiFi window size (4K units) */
 #define SCSC_PMU_MEM_CONFIG1		0x7304	/* WiFi window base (4K units) */
 
@@ -536,19 +545,9 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 	if (ret)
 		return ret;
 
-	/* Power on, release reset: mirrors the downstream 8.6.6 sequence. */
-	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
-				 SCSC_PMU_WIFI_PWRON, SCSC_PMU_WIFI_PWRON);
-	if (ret)
-		return ret;
-
-	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
-				 SCSC_PMU_WIFI_RESET_SET, 0);
-	if (ret)
-		return ret;
-
 	/* Read back what we programmed: a blocked write here would explain
-	 * a firmware block that never comes up.
+	 * a firmware block that never comes up.  Power, reset and START
+	 * themselves are handled in scsc_wifibt_start().
 	 */
 	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS, &val);
 	if (ret)
@@ -567,39 +566,99 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 		return ret;
 	dev_info(scsc->dev, "MEM_CONFIG1 (base) readback 0x%08x\n", val);
 
-	/* Read the sequencer state while the block is still held in reset:
-	 * with the firmware running, this register does not read back.
-	 */
-	ret = regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &val);
-	if (ret)
-		return ret;
-	dev_info(scsc->dev, "central sequencer state 0x%02x\n",
-		 (val & 0xf0000) >> 16);
-
 	return 0;
 }
 
 /* Hand the mailbox to the firmware and start it. */
-static int scsc_wifibt_signal(struct scsc_wifibt *scsc)
+/*
+ * Everything that has to be in place *before* the block is released: the
+ * TZASC that lets it reach the shared window, the mailbox in the state the
+ * firmware expects, the entry handoff, and the boot source that makes it
+ * run the staged image instead of the ROM's own.  The order matters and
+ * matches the sequence that worked before the driver was trimmed.
+ */
+static void scsc_wifibt_prepare(struct scsc_wifibt *scsc)
+{
+	struct arm_smccc_res res;
+	unsigned long a1 = 0, a2 = scsc->mem_start, a3 = scsc->mem_size;
+	unsigned int i;
+	int ret;
+
+	/* Let the firmware block access DRAM. Ignored on failure, like
+	 * downstream.
+	 */
+	arm_smccc_smc(SCSC_SMC_WLBT_TZASC, a1, a2, a3, 0, 0, 0, 0, &res);
+	dev_info(scsc->dev, "TZASC smc 0x%x result 0x%lx\n",
+		 SCSC_SMC_WLBT_TZASC, res.a0);
+
+	/* Clear all shared registers on both banks first, like downstream
+	 * map() does.
+	 */
+	for (i = 0; i < 8; i++) {
+		writel(0, scsc->base + SCSC_MBOX_ISSR(i));
+		writel(0, scsc->base_m4 + SCSC_MBOX_ISSR(i));
+	}
+
+	/* Mask and clear everything. The firmware unmasks what it uses as
+	 * the transports come up; starting masked is the state it expects,
+	 * and TOHOST still shows in INTMSR0.
+	 */
+	writel(0xffff0000, scsc->base + SCSC_MBOX_INTMR0);
+	writel(0x0000ffff, scsc->base + SCSC_MBOX_INTMR1);
+	writel(0x0000ffff, scsc->base_m4 + SCSC_MBOX_INTMR1);
+	writel(0xffff0000, scsc->base + SCSC_MBOX_INTCR0);
+	writel(0x0000ffff, scsc->base + SCSC_MBOX_INTCR1);
+	writel(0x0000ffff, scsc->base_m4 + SCSC_MBOX_INTCR1);
+
+	/* Tell the R4 ROM where to jump: MBOX_0 = entry, MBOX_1 = the
+	 * configuration block, MBOX_2 = magic, MBOX_3 = startup flags
+	 * (downstream mbox_init()).
+	 */
+	writel(scsc->sig_entry, scsc->base + SCSC_MBOX_ISSR(0));
+	writel(scsc->sig_mbox1, scsc->base + SCSC_MBOX_ISSR(1));
+	writel(SCSC_MBOX_MAGIC, scsc->base + SCSC_MBOX_ISSR(2));
+	writel(SCSC_MBOX_FW_FLAGS, scsc->base + SCSC_MBOX_ISSR(3));
+	/* The registers have to land before the reset is released. */
+	wmb();
+
+	/* Boot the block from external DRAM. Without this it never looks at
+	 * the staged image, no matter the handshake.
+	 */
+	ret = regmap_write(scsc->pmureg, SCSC_PMU_BOOT_TEST_RST_CFG, 0);
+	if (ret)
+		dev_warn(scsc->dev, "failed to clear BOOT_TEST_RST_CFG: %d\n",
+			 ret);
+}
+
+/* Power on, release reset, start, then let the firmware run. */
+static int scsc_wifibt_start(struct scsc_wifibt *scsc)
 {
 	unsigned int val;
 	int ret;
 
-	/* MBOX_0 = firmware entry, MBOX_1 = configuration pointer,
-	 * MBOX_2 = magic, MBOX_3 = startup flags (downstream mbox_init()).
-	 */
-	writel(scsc->sig_entry, scsc->base + SCSC_MBOX_ISSR(0));
-	writel(scsc->sig_mbox1, scsc->base + SCSC_MBOX_ISSR(1));
-	writel(SCSC_MXCONF_MAGIC, scsc->base + SCSC_MBOX_ISSR(2));
-	writel(0, scsc->base + SCSC_MBOX_ISSR(3));
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+				 SCSC_PMU_WIFI_PWRON, SCSC_PMU_WIFI_PWRON);
+	if (ret)
+		return ret;
 
-	/* Clear anything the ROM left pending, then release START. */
-	writel(0xffffffff, scsc->base + SCSC_MBOX_INTCR1);
+	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_NS,
+				 SCSC_PMU_WIFI_RESET_SET, 0);
+	if (ret)
+		return ret;
 
 	ret = regmap_update_bits(scsc->pmureg, SCSC_PMU_WIFI_CTRL_S,
 				 SCSC_PMU_WIFI_START, SCSC_PMU_WIFI_START);
 	if (ret)
 		return ret;
+
+	/* Nudge the firmware so it notices the mailbox. */
+	writel(1u, scsc->base + SCSC_MBOX_INTGR1);
+	writel(0u, scsc->base + SCSC_MBOX_INTGR1);
+
+	/* Give it a moment, then read back: START auto-clears once the
+	 * block is up, so a set bit here means the write landed.
+	 */
+	msleep(20);
 
 	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_CTRL_S, &val);
 	if (ret)
@@ -610,11 +669,13 @@ static int scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	ret = regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &val);
 	if (ret)
 		return ret;
-	dev_info(scsc->dev, "WIFI_STAT 0x%08x after release\n", val);
+	dev_info(scsc->dev, "powered on, WIFI_STAT 0x%08x\n", val);
 
-	/* Nudge the firmware so it notices the mailbox. */
-	writel(0x1, scsc->base + SCSC_MBOX_INTGR1);
-	writel(0x0, scsc->base + SCSC_MBOX_INTGR1);
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &val);
+	if (ret)
+		return ret;
+	dev_info(scsc->dev, "central sequencer state 0x%02x\n",
+		 (val & SCSC_PMU_STATES) >> 16);
 
 	return 0;
 }
@@ -714,8 +775,15 @@ static ssize_t recover_store(struct device *dev,
 	struct scsc_wifibt *scsc = dev_get_drvdata(dev);
 	int ret;
 
-	/* Re-run the release sequence without touching the staged image. */
-	ret = scsc_wifibt_signal(scsc);
+	/* Power cycle the block and release it again, without touching the
+	 * staged image: the same order the probe uses.
+	 */
+	scsc_wifibt_power_off(scsc);
+	msleep(100);
+	scsc_wifibt_prepare(scsc);
+	ret = scsc_wifibt_power_on(scsc);
+	if (!ret)
+		ret = scsc_wifibt_start(scsc);
 	if (ret)
 		return ret;
 
@@ -872,11 +940,13 @@ static int scsc_wifibt_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to set mxconf\n");
 
+	scsc_wifibt_prepare(scsc);
+
 	ret = scsc_wifibt_power_on(scsc);
 	if (ret)
-		return dev_err_probe(dev, ret, "failed to power on\n");
+		return dev_err_probe(dev, ret, "failed to configure the block\n");
 
-	ret = scsc_wifibt_signal(scsc);
+	ret = scsc_wifibt_start(scsc);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to release the block\n");
 
