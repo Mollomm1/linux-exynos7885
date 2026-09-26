@@ -39,19 +39,19 @@
 
 /* Maxwell firmware image header, same layout as downstream fwhdr.c. */
 #define SCSC_FW_MAGIC		"smxf"
-#define SCSC_FW_MAGIC_OFF	0x08
-#define SCSC_FW_VER_MINOR_OFF	0x10
-#define SCSC_FW_VER_MAJOR_OFF	0x12
-#define SCSC_FW_API_MINOR_OFF	0x1c
-#define SCSC_FW_API_MAJOR_OFF	0x1e
-#define SCSC_FW_LEN_OFF		0x14
-#define SCSC_FW_ENTRY_OFF	0x28
-#define SCSC_FW_RUNTIME_LEN_OFF	0x24
-#define SCSC_FW_CONST_LEN_OFF	0x2c
-#define SCSC_FW_CRC_OFF		0x30
-#define SCSC_FW_CONST_CRC_OFF	0x34
-#define SCSC_FW_BUILD_ID_OFF	0x38
-#define SCSC_FW_BUILD_ID_SZ	64
+#define SCSC_FW_MAGIC_OFF	8
+#define SCSC_FW_VER_MINOR_OFF	12
+#define SCSC_FW_VER_MAJOR_OFF	14
+#define SCSC_FW_API_MINOR_OFF	20
+#define SCSC_FW_API_MAJOR_OFF	22
+#define SCSC_FW_LEN_OFF		16
+#define SCSC_FW_ENTRY_OFF	40
+#define SCSC_FW_RUNTIME_LEN_OFF	36
+#define SCSC_FW_CONST_LEN_OFF	28
+#define SCSC_FW_CRC_OFF		24
+#define SCSC_FW_CONST_CRC_OFF	32
+#define SCSC_FW_BUILD_ID_OFF	48
+#define SCSC_FW_BUILD_ID_SZ	128
 
 /* DBUS mailbox: four shared registers per bank, at 0x80. */
 #define SCSC_MBOX_INTGR0	0x008	/* interrupt generate, lower half */
