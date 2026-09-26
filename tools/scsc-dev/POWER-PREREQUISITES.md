@@ -48,6 +48,12 @@ The downstream helper only logs the CP-state mismatch; it does not abort. The
 shared-rail operation and firmware start remain unimplemented. Device logs and
 module hash are in `wifi-iterations/036-cp-mailbox-gate/`.
 
+Iteration 038 added the software MIF interrupt-bit manager. Its device-side
+self-test passed on the same boot with fake register callbacks; the driver
+remained inert and unloaded. This verifies software allocation/dispatch only,
+not the hardware MIF IRQ path. No mailbox or PMU writes occurred; see
+`wifi-iterations/038-mif-intr/`.
+
 ## r15 follow-up, same boot as firmware staging (2026-09-26)
 
 Boot ID `e5fc02de-0a93-4cec-8384-3d160b26580c` stayed healthy throughout

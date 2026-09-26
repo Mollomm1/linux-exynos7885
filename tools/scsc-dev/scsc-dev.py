@@ -17,6 +17,11 @@ import time
 MODULE = "exynos-scsc-wifibt"
 MANIFEST = "scsc-baseline.json"
 DRIVER = "drivers/soc/samsung/exynos-scsc-wifibt.c"
+SOURCES = {
+    MODULE + "-main.c": DRIVER,
+    "exynos-scsc-mif-intr.c": "drivers/soc/samsung/exynos-scsc-mif-intr.c",
+    "exynos-scsc-mif-intr.h": "drivers/soc/samsung/exynos-scsc-mif-intr.h",
+}
 STATE = "/sys/bus/platform/devices/120c0000.wifibt/state"
 
 
@@ -92,8 +97,11 @@ def build(args):
     require(not out.exists(), "Use a new output directory for each iteration")
     require(tree not in out.parents, "Module output must be outside the frozen tree")
     out.mkdir(parents=True)
-    shutil.copy2(args.source.resolve() / DRIVER, out / (MODULE + ".c"))
-    (out / "Makefile").write_text(f"obj-m := {MODULE}.o\n")
+    for output_name, source_name in SOURCES.items():
+        shutil.copy2(args.source.resolve() / source_name, out / output_name)
+    (out / "Makefile").write_text(
+        f"obj-m := {MODULE}.o\n"
+        f"{MODULE}-y := {MODULE}-main.o exynos-scsc-mif-intr.o\n")
     run(["make", "-C", str(tree), "ARCH=arm64", "CC=" + data["cc"],
          "CROSS_COMPILE=" + data["cross_compile"], "M=" + str(out), "modules"])
     require(fingerprints(tree) == data["files"], "Build modified baseline artifacts")
@@ -101,8 +109,11 @@ def build(args):
     vermagic = output(["modinfo", "-F", "vermagic", str(ko)])
     require(vermagic.split()[0] == data["release"], "Module release differs from baseline")
     require(not output(["modinfo", "-F", "alias", str(ko)]), "Unexpected module autoload alias")
+    source_hashes = {name: digest(out / name) for name in SOURCES}
+    source_index = json.dumps(source_hashes, sort_keys=True).encode()
     bundle = {"baseline": data, "sha256": digest(ko), "vermagic": vermagic,
-              "source_sha256": digest(out / (MODULE + ".c"))}
+              "source_sha256": hashlib.sha256(source_index).hexdigest(),
+              "sources": source_hashes}
     (out / "module.json").write_text(json.dumps(bundle, indent=2) + "\n")
     print(f"Built {ko}; upload does not load it")
 
@@ -135,7 +146,10 @@ def pmb_build(args):
     iteration = shared / str(time.time_ns())
     source = iteration / "source"
     (source / DRIVER).parent.mkdir(parents=True)
-    shutil.copy2(args.source / DRIVER, source / DRIVER)
+    for source_name in SOURCES.values():
+        destination = source / source_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.source / source_name, destination)
     script = iteration / "scsc-dev.py"
     shutil.copy2(Path(__file__), script)
 

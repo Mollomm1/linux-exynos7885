@@ -18,6 +18,8 @@
 #include <linux/unaligned.h>
 #include <linux/vmalloc.h>
 
+#include "exynos-scsc-mif-intr.h"
+
 #define SCSC_FW_MIN_HEADER	188
 #define SCSC_FW_DIRECTORY	"postmarketos/mx140/"
 #define SCSC_TZASC_SMC		0x82000710
@@ -626,6 +628,18 @@ static ssize_t shared_rail_state_show(struct device *dev,
 }
 static DEVICE_ATTR_ADMIN_RO(shared_rail_state);
 
+static ssize_t mif_intr_selftest_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	int ret = scsc_mif_intr_selftest();
+
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "pass\n");
+}
+static DEVICE_ATTR_ADMIN_RO(mif_intr_selftest);
+
 static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
@@ -657,6 +671,7 @@ static struct attribute *scsc_attrs[] = {
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
 	&dev_attr_shared_rail_state.attr,
+	&dev_attr_mif_intr_selftest.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(scsc);

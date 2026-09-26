@@ -119,6 +119,13 @@ external modules without changing kernel configuration or rebuilding the
 recovery image. The current mainline checkout has no SCSC/HIP WLAN subtree, so
 the driver itself still has to be ported before a real interface can appear.
 
+Iteration 038 adds the SCSC MIF interrupt-bit allocator/dispatcher as a
+software component in the composite module. It reserves from-host bit 0 for
+R4/M4 panic signaling and supports callback allocation, pending-bit dispatch
+and acknowledgment. `mif_intr_selftest` passed on the current boot using fake
+callbacks only. The manager is not yet connected to the mailbox IRQ/MMIO path;
+no radio events or firmware handoff are handled yet.
+
 Iteration 034 now retains bounds-checked pointers to the eight R4/M4 mailbox
 slots from the DT resources. It validates and maps the ranges without MMIO
 access; IRQ delivery, interrupt-bit operations and mailbox handoff are still

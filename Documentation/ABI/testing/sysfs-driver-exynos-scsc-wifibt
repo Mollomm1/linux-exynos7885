@@ -49,3 +49,12 @@ Description:
 		*_matches_reference fields compare with values logged by the
 		downstream driver; they do not gate firmware start. This attribute
 		does not perform the CP handshake and never enables firmware start.
+
+What:		/sys/bus/platform/devices/120c0000.wifibt/mif_intr_selftest
+Date:		September 2026
+Contact:	Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+Description:
+		Root-only read that tests software allocation, reserved interrupt
+		bits, callback registration, dispatch and acknowledgment using fake
+		callbacks. It does not access mailbox registers, request an IRQ or
+		touch radio power state. Returns "pass" or an errno.
