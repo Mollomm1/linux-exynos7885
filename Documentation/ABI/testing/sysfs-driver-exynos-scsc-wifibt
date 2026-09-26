@@ -1,0 +1,40 @@
+What:		/sys/bus/platform/devices/120c0000.wifibt/state
+Date:		September 2026
+Contact:	Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+Description:
+		Returns "inert". This experimental driver never powers the
+		wireless subsystem, writes shared memory, or starts firmware.
+
+What:		/sys/bus/platform/devices/120c0000.wifibt/verify_firmware
+Date:		September 2026
+Contact:	Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+Description:
+		Root-only write. Write a firmware name under postmarketos/mx140/
+		(relative to the firmware search path) to check the image without
+		staging or executing it. Uses direct filesystem firmware loading,
+		without the userspace fallback. Checks magic, header/API version,
+		lengths, entry-point bounds and header/constant/payload CRCs.
+		Returns the loader or validation errno on failure. Paths containing
+		".." are rejected. Normal use is:
+		  echo postmarketos/mx140/mx140.bin > verify_firmware
+
+What:		/sys/bus/platform/devices/120c0000.wifibt/firmware_status
+Date:		September 2026
+Contact:	Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+Description:
+		Returns "unchecked" before the first accepted check request.
+		After a request, reports result (0 or negative errno), runtime
+		length, entry point, and executed=0. A failed check clears the
+		previous image metadata. Successful CRC checks do not establish
+		firmware authenticity, board compatibility or runtime readiness.
+
+What:		/sys/bus/platform/devices/120c0000.wifibt/pmu_state
+Date:		September 2026
+Contact:	Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+Description:
+		Root-only read of six fixed always-on PMU registers: WiFi control
+		nonsecure/secure (0x140/0x144), status (0x148), central sequencer
+		status (0x384), and shared-memory size/base (0x7300/0x7304).
+		Each line is "offset: value" in hexadecimal. Reads are sequential,
+		not an atomic snapshot. No register writes, range dumps or mailbox
+		accesses are performed. Nothing is sampled automatically in probe.

@@ -76,6 +76,9 @@ config EXYNOS_SCSC_WIFIBT
 	tristate "Exynos7885 WiFi/BT resource bring-up"
 	depends on ARCH_EXYNOS || COMPILE_TEST
 	depends on OF && HAS_IOMEM && m
+	select CRC32
+	select FW_LOADER
+	select MFD_SYSCON
 	help
 	  Resource-only driver for manual WiFi/BT development. This does not
 	  boot firmware or provide networking. Load with enable=1 to bind.

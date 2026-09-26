@@ -1,8 +1,9 @@
 # T510 WiFi module iteration
 
-This first stage binds an **inert** module. It does not power the wireless
-subsystem, touch mailbox/PMU registers, request interrupts, load firmware, or
-create a network interface. It is fresh work on `gta3xl`; the abandoned
+This stage binds an **inert** module. It does not power the wireless
+subsystem, write PMU registers, access mailboxes, request interrupts, or
+create a network interface. Firmware can be explicitly read and validated in
+host memory, but is never staged or executed. It is fresh work on `gta3xl`; the abandoned
 `gta3xl-scsc` implementation is not used.
 
 ## Build and flash the baseline once
@@ -100,9 +101,17 @@ An SSH timeout is not proof that a remote kernel operation has stopped.
 
 ## Firmware restart gate and remaining work
 
-Firmware start/stop and missing/rejected-firmware tests are not implemented yet.
-They must follow successful inert device testing and a reviewed reset path.
-No command in this revision starts either wireless processor.
+Firmware start/stop is not implemented. An explicit root write of
+`postmarketos/mx140/mx140.bin` to the device's `verify_firmware` attribute checks
+header/API version, lengths, entry bounds and all three CRCs. `firmware_status`
+reports the result; `state` remains `inert`. `pmu_state` is a root-only read of
+six fixed PMU registers, with no register writes or mailbox access. See
+`Documentation/ABI/testing/sysfs-driver-exynos-scsc-wifibt` for the interfaces.
+
+Installed/stock images and malformed/missing image cases have been tested on
+the tablet. No command in this revision starts either wireless processor.
+The source audit and remaining ACPM/rail prerequisites are recorded in
+[POWER-PREREQUISITES.md](POWER-PREREQUISITES.md).
 
 Downstream `platform_mif.c:platform_mif_pmu_reset()` configures reset-ahead,
 bus cleanup, logic reset, TCXO gating, isolation and the central sequencer, then
