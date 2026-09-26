@@ -245,6 +245,21 @@ int scsc_mif_intr_dispatch(struct scsc_mif_intr *intr)
 	return 0;
 }
 
+irqreturn_t scsc_mif_intr_irq(int irq, void *data)
+{
+	struct scsc_mif_intr *intr = data;
+	int ret;
+
+	(void)irq;
+	ret = scsc_mif_intr_dispatch(intr);
+	if (ret == -EHOSTDOWN)
+		return IRQ_NONE;
+	if (ret)
+		return IRQ_NONE;
+
+	return IRQ_HANDLED;
+}
+
 struct scsc_mif_intr_test_context {
 	u32 pending;
 	u32 masked;
@@ -320,6 +335,7 @@ int scsc_mif_intr_selftest(void)
 	if (scsc_mif_intr_alloc_to_host(&intr,
 					scsc_mif_intr_test_handler, &test) !=
 		    -EHOSTDOWN || scsc_mif_intr_dispatch(&intr) != -EHOSTDOWN ||
+	    scsc_mif_intr_irq(0, &intr) != IRQ_NONE ||
 	    scsc_mif_intr_raise(&intr, 0, SCSC_MIF_TARGET_R4) != -EHOSTDOWN ||
 	    test.masked || test.cleared || test.unmasked || test.raised_r4 ||
 	    test.raised_m4) {
@@ -371,9 +387,10 @@ int scsc_mif_intr_selftest(void)
 		goto out;
 	}
 	test.pending = BIT(5);
-	ret = scsc_mif_intr_dispatch(&intr);
-	if (ret)
+	if (scsc_mif_intr_irq(0, &intr) != IRQ_HANDLED) {
+		ret = -EINVAL;
 		goto out;
+	}
 	if (test.handled != 1 || test.pending) {
 		ret = -EINVAL;
 		goto out;

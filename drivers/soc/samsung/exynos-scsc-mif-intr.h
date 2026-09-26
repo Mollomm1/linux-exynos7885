@@ -3,6 +3,7 @@
 #define __EXYNOS_SCSC_MIF_INTR_H
 
 #include <linux/bitmap.h>
+#include <linux/interrupt.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
@@ -64,6 +65,7 @@ int scsc_mif_intr_raise(struct scsc_mif_intr *intr, unsigned int bit,
 			enum scsc_mif_target target);
 void scsc_mif_intr_ack(struct scsc_mif_intr *intr, unsigned int bit);
 int scsc_mif_intr_dispatch(struct scsc_mif_intr *intr);
+irqreturn_t scsc_mif_intr_irq(int irq, void *data);
 int scsc_mif_intr_selftest(void);
 
 #endif /* __EXYNOS_SCSC_MIF_INTR_H */

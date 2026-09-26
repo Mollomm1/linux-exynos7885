@@ -133,6 +133,13 @@ passed `mif_intr_selftest`, and unloaded on boot
 requested or dispatched, and no radio event, firmware handoff, or hardware
 mailbox operation has been tested.
 
+Iteration 040 adds the generic Linux IRQ entry point and exercises its inactive
+and handled return paths in the fake-register self-test. It built, loaded, and
+passed the self-test on the same boot, then unloaded. The real `mbox` IRQ stays
+unrequested: it must only be armed as part of a reviewed startup sequence after
+WLBT is powered, otherwise an asserted level interrupt could not safely be
+acknowledged. No hardware IRQ was generated or tested.
+
 Iteration 034 now retains bounds-checked pointers to the eight R4/M4 mailbox
 slots from the DT resources. It validates and maps the ranges without MMIO
 access; IRQ delivery, interrupt-bit operations and mailbox handoff are still
