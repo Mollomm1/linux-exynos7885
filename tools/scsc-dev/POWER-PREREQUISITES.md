@@ -39,6 +39,14 @@ shared regulator option, but the CP mailbox is not mapped in the mainline T510
 DTS and has not been accessed here. Treat this mismatch as unresolved; do not
 release WLBT based only on the apparently matching regulator status.
 
+Iteration 036 rebuilt the opt-in module against r15 and added a read-only
+`shared_rail_gate`. On the same boot it reported `cp_mailbox=missing`,
+`cp_status=0x1`, `shared_status=0x20001`, and `pmu_ready=0`; the driver returned
+to `inert` and unloaded cleanly. This confirms both the absent DT resource and
+the CP-state mismatch without touching the CP mailbox or writing PMU state.
+The current firmware start remains disabled. Device logs and module hash are in
+`wifi-iterations/036-cp-mailbox-gate/`.
+
 ## r15 follow-up, same boot as firmware staging (2026-09-26)
 
 Boot ID `e5fc02de-0a93-4cec-8384-3d160b26580c` stayed healthy throughout
