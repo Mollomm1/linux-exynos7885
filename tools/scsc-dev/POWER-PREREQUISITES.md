@@ -1,5 +1,39 @@
 # Exynos7885 WiFi startup prerequisites
 
+## r15 follow-up, same boot as firmware staging (2026-09-26)
+
+Boot ID `e5fc02de-0a93-4cec-8384-3d160b26580c` stayed healthy throughout
+module-only work. The opt-in ACPM FVP plugin attach on channel 4 succeeded;
+the WLBT ACPM flag write returned success, and one bounded MIF-rate request
+completed with response value `0`. Queue indices remained synchronized. These
+observations supersede the earlier blanket statement that no ACPM request
+received a response, but they do not prove the separate BUCK2 voltage
+preparation request `[7, 1, 6, 0]` completed correctly.
+
+The staging module's root-only `pmu_state` read on this boot returned:
+
+```
+0140: 00100ea0
+0144: 00000000
+0148: 00000000
+0384: 00000000
+7300: 00000400
+7304: 00060000
+```
+
+The module was unloaded afterward. No PMU writes, IRQ requests, reset,
+processor release, or radio power-up occurred. `ip link` still showed only
+`lo` and `usb0`. The firmware copy was separately verified in
+`wifi-iterations/027-stage-firmware/README.md`.
+
+The opt-in memory preparation operation then succeeded on the same boot:
+the EL3 TZASC call returned zero, and PMU aperture registers read back as
+size `0x400` (4 MiB) and base `0xe9000` (physical `0xe9000000`). The driver
+rechecked WiFi PWRON, START and status before changing them and confirmed the
+block stayed off afterward. It was unloaded cleanly. This validates the DRAM
+access setup only; processor release, radio startup and `cfg80211` registration
+remain untested. The operation and build are in `wifi-iterations/030-prepare-memory/`.
+
 ## r15 module-only ACPM findings (2026-09-26)
 
 The r15 image has the Exynos7885 SRAM and mailbox DT resources. Both ACPM
