@@ -47,6 +47,13 @@ config EXYNOS_MBOX
 	  is ignored and the mailbox controller acts as a doorbell that raises
 	  the interrupt to the ACPM firmware.
 
+config EXYNOS7885_ACPM_MBOX
+	tristate "Exynos7885 ACPM mailbox (explicit load)"
+	depends on ARCH_EXYNOS && OF
+	help
+	  Doorbell mailbox for the Exynos7885 ACPM firmware. Build as a module
+	  to leave the boot path untouched until ACPM support is requested.
+
 config IMX_MBOX
 	tristate "i.MX Mailbox"
 	depends on ARCH_MXC || COMPILE_TEST

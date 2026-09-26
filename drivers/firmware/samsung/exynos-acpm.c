@@ -37,6 +37,8 @@
 #define ACPM_TX_TIMEOUT_US		500000
 
 #define ACPM_GS101_INITDATA_BASE	0xa000
+#define ACPM_EXYNOS7885_INITDATA_BASE	0x4b80
+#define ACPM_MAX_CHANNELS		16
 
 /**
  * struct acpm_shmem - shared memory configuration information.
@@ -171,6 +173,7 @@ struct acpm_info {
 	struct device *dev;
 	struct acpm_handle handle;
 	u32 num_chans;
+	resource_size_t sram_size;
 };
 
 /**
@@ -226,6 +229,8 @@ static int acpm_get_rx(struct acpm_chan *achan, const struct acpm_xfer *xfer)
 
 	rx_front = readl(achan->rx.front);
 	i = readl(achan->rx.rear);
+	if (rx_front >= achan->qlen || i >= achan->qlen)
+		return -EIO;
 
 	tx_seqnum = FIELD_GET(ACPM_PROTOCOL_SEQNUM, xfer->txd[0]);
 
@@ -244,7 +249,7 @@ static int acpm_get_rx(struct acpm_chan *achan, const struct acpm_xfer *xfer)
 		val = readl(addr);
 
 		rx_seqnum = FIELD_GET(ACPM_PROTOCOL_SEQNUM, val);
-		if (!rx_seqnum)
+		if (!rx_seqnum || rx_seqnum >= ACPM_SEQNUM_MAX)
 			return -EIO;
 		/*
 		 * mssg seqnum starts with value 1, whereas the driver considers
@@ -422,7 +427,10 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 
 	achan = &acpm->chans[xfer->acpm_chan_id];
 
-	if (!xfer->txd || xfer->txlen > achan->mlen || xfer->rxlen > achan->mlen)
+	if (!xfer->txd || xfer->txlen < sizeof(u32) ||
+	    (xfer->txlen & 3) || (xfer->rxlen & 3) ||
+	    (xfer->rxlen && !xfer->rxd) ||
+	    xfer->txlen > achan->mlen || xfer->rxlen > achan->mlen)
 		return -EINVAL;
 
 	if (!achan->poll_completion) {
@@ -432,6 +440,8 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 
 	scoped_guard(mutex, &achan->tx_lock) {
 		tx_front = readl(achan->tx.front);
+		if (tx_front >= achan->qlen)
+			return -EIO;
 		idx = (tx_front + 1) % achan->qlen;
 
 		ret = acpm_wait_for_queue_slots(achan, idx);
@@ -448,7 +458,7 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 		writel(idx, achan->tx.front);
 	}
 
-	msg.chan_id = xfer->acpm_chan_id;
+	msg.chan_id = achan->id;
 	msg.chan_type = EXYNOS_MBOX_CHAN_TYPE_DOORBELL;
 	ret = mbox_send_message(achan->chan, (void *)&msg);
 	if (ret < 0)
@@ -473,28 +483,62 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
  * @achan:	ACPM channel info.
  * @chan_shmem:	__iomem pointer to a channel described in shared memory.
  */
-static void acpm_chan_shmem_get_params(struct acpm_chan *achan,
+static bool acpm_sram_valid(struct acpm_info *acpm, u32 offset, size_t size)
+{
+	return !(offset & 3) && offset <= acpm->sram_size &&
+	       size <= acpm->sram_size - offset;
+}
+
+static int acpm_chan_shmem_get_params(struct acpm_chan *achan,
 				struct acpm_chan_shmem __iomem *chan_shmem)
 {
-	void __iomem *base = achan->acpm->sram_base;
+	struct acpm_info *acpm = achan->acpm;
+	void __iomem *base = acpm->sram_base;
 	struct acpm_queue *rx = &achan->rx;
 	struct acpm_queue *tx = &achan->tx;
+	u32 tx_base, tx_rear, tx_front, rx_base, rx_rear, rx_front;
+	size_t queue_size;
 
 	achan->mlen = readl(&chan_shmem->mlen);
 	achan->poll_completion = readl(&chan_shmem->poll_completion);
 	achan->id = readl(&chan_shmem->id);
 	achan->qlen = readl(&chan_shmem->qlen);
+	if (achan->id >= ACPM_MAX_CHANNELS || achan->qlen < 2 ||
+	    achan->qlen > 1024 || !achan->mlen || achan->mlen > 256 ||
+	    (achan->mlen & 3))
+		return -EINVAL;
 
-	tx->base = base + readl(&chan_shmem->rx_base);
-	tx->rear = base + readl(&chan_shmem->rx_rear);
-	tx->front = base + readl(&chan_shmem->rx_front);
+	queue_size = achan->qlen * achan->mlen;
+	tx_base = readl(&chan_shmem->rx_base);
+	tx_rear = readl(&chan_shmem->rx_rear);
+	tx_front = readl(&chan_shmem->rx_front);
+	rx_base = readl(&chan_shmem->tx_base);
+	rx_rear = readl(&chan_shmem->tx_rear);
+	rx_front = readl(&chan_shmem->tx_front);
+	if (!acpm_sram_valid(acpm, tx_base, queue_size) ||
+	    !acpm_sram_valid(acpm, rx_base, queue_size) ||
+	    !acpm_sram_valid(acpm, tx_rear, sizeof(u32)) ||
+	    !acpm_sram_valid(acpm, tx_front, sizeof(u32)) ||
+	    !acpm_sram_valid(acpm, rx_rear, sizeof(u32)) ||
+	    !acpm_sram_valid(acpm, rx_front, sizeof(u32)))
+		return -EINVAL;
+	if (readl(base + tx_rear) >= achan->qlen ||
+	    readl(base + tx_front) >= achan->qlen ||
+	    readl(base + rx_rear) >= achan->qlen ||
+	    readl(base + rx_front) >= achan->qlen)
+		return -EINVAL;
 
-	rx->base = base + readl(&chan_shmem->tx_base);
-	rx->rear = base + readl(&chan_shmem->tx_rear);
-	rx->front = base + readl(&chan_shmem->tx_front);
+	tx->base = base + tx_base;
+	tx->rear = base + tx_rear;
+	tx->front = base + tx_front;
+
+	rx->base = base + rx_base;
+	rx->rear = base + rx_rear;
+	rx->front = base + rx_front;
 
 	dev_vdbg(achan->acpm->dev, "ID = %d poll = %d, mlen = %d, qlen = %d\n",
 		 achan->id, achan->poll_completion, achan->mlen, achan->qlen);
+	return 0;
 }
 
 /**
@@ -556,6 +600,10 @@ static int acpm_channels_init(struct acpm_info *acpm)
 	int i, ret;
 
 	acpm->num_chans = readl(&shmem->num_chans);
+	if (!acpm->num_chans || acpm->num_chans > ACPM_MAX_CHANNELS ||
+	    !acpm_sram_valid(acpm, readl(&shmem->chans),
+			     acpm->num_chans * sizeof(*chans_shmem)))
+		return dev_err_probe(dev, -EINVAL, "Invalid ACPM channel table\n");
 	acpm->chans = devm_kcalloc(dev, acpm->num_chans, sizeof(*acpm->chans),
 				   GFP_KERNEL);
 	if (!acpm->chans)
@@ -570,7 +618,12 @@ static int acpm_channels_init(struct acpm_info *acpm)
 
 		achan->acpm = acpm;
 
-		acpm_chan_shmem_get_params(achan, chan_shmem);
+		ret = acpm_chan_shmem_get_params(achan, chan_shmem);
+		if (ret) {
+			dev_err(dev, "Invalid ACPM channel %d\n", i);
+			acpm_free_mbox_chans(acpm);
+			return ret;
+		}
 
 		ret = acpm_achan_alloc_cmds(achan);
 		if (ret)
@@ -621,6 +674,8 @@ static int acpm_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	shmem = of_parse_phandle(dev->of_node, "shmem", 0);
+	if (!shmem)
+		return dev_err_probe(dev, -EINVAL, "Missing shared memory\n");
 	ret = of_address_to_resource(shmem, 0, &res);
 	of_node_put(shmem);
 	if (ret)
@@ -628,6 +683,7 @@ static int acpm_probe(struct platform_device *pdev)
 				     "Failed to get shared memory.\n");
 
 	size = resource_size(&res);
+	acpm->sram_size = size;
 	acpm->sram_base = devm_ioremap(dev, res.start, size);
 	if (!acpm->sram_base)
 		return dev_err_probe(dev, -ENOMEM,
@@ -637,6 +693,9 @@ static int acpm_probe(struct platform_device *pdev)
 	if (!match_data)
 		return dev_err_probe(dev, -EINVAL,
 				     "Failed to get match data.\n");
+	if (match_data->initdata_base > size ||
+	    sizeof(*acpm->shmem) > size - match_data->initdata_base)
+		return dev_err_probe(dev, -EINVAL, "Invalid ACPM initdata offset\n");
 
 	acpm->shmem = acpm->sram_base + match_data->initdata_base;
 	acpm->dev = dev;
@@ -750,14 +809,28 @@ static const struct acpm_match_data acpm_gs101 = {
 	.initdata_base = ACPM_GS101_INITDATA_BASE,
 };
 
+static const struct acpm_match_data acpm_exynos7885 = {
+	.initdata_base = ACPM_EXYNOS7885_INITDATA_BASE,
+};
+
 static const struct of_device_id acpm_match[] = {
 	{
 		.compatible = "google,gs101-acpm-ipc",
 		.data = &acpm_gs101,
 	},
+	{
+		.compatible = "samsung,exynos7885-acpm-ipc",
+		.data = &acpm_exynos7885,
+	},
 	{},
 };
-MODULE_DEVICE_TABLE(of, acpm_match);
+
+/* Preserve GS101 autoloading; Exynos7885 requires an explicit module load. */
+static const struct of_device_id acpm_modaliases[] = {
+	{ .compatible = "google,gs101-acpm-ipc" },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, acpm_modaliases);
 
 static struct platform_driver acpm_driver = {
 	.probe	= acpm_probe,
