@@ -44,6 +44,7 @@
 #define ACPM_DVFS_CHANNEL		0
 #define ACPM_DVFS_GET_RATE		1
 #define ACPM_DVFS_SET_FLAG		6
+#define ACPM_EXYNOS7885_INTSR0		0x14
 #define ACPM_EXYNOS7885_INTCR1		0x20
 #define ACPM_EXYNOS7885_INTMR1		0x24
 
@@ -454,6 +455,13 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 	/* A stale Exynos7885 queue must not receive more requests on this probe. */
 	if (acpm->exynos7885 && achan->failed)
 		return -ESHUTDOWN;
+	if (acpm->exynos7885 &&
+	    (readl(achan->tx.front) != readl(achan->tx.rear) ||
+	     readl(acpm->mbox_regs + ACPM_EXYNOS7885_INTSR0) &
+	     BIT(achan->id + 16))) {
+		achan->failed = true;
+		return -EBUSY;
+	}
 
 	scoped_guard(mutex, &achan->tx_lock) {
 		tx_front = readl(achan->tx.front);
