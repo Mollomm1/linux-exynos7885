@@ -194,6 +194,17 @@ static void scsc_win_copy(void *dst, const void *src, size_t n)
 		writeb(s[i], d + i);
 }
 
+static void scsc_win_set(void *win, u32 val, size_t n)
+{
+	u8 *w = win;
+	size_t i;
+
+	for (i = 0; i + 4 <= n; i += 4)
+		writel(val, w + i);
+	for (; i < n; i++)
+		writeb(val, w + i);
+}
+
 static int scsc_win_cmp(const void *win, const void *buf, size_t n)
 {
 	const u8 *b = buf;
@@ -303,7 +314,7 @@ static int scsc_wifibt_mxconf(struct scsc_wifibt *scsc)
 		return -ENOMEM;
 
 	mxconf = dram + mx_off;
-	memset(mxconf, 0, SCSC_MXCONF_SIZE);
+	scsc_win_set(mxconf, 0, SCSC_MXCONF_SIZE);
 	put_unaligned_le32(SCSC_MXCONF_MAGIC, mxconf + 0);
 	put_unaligned_le16(SCSC_MXCONF_VER_MAJOR, mxconf + 4);
 	put_unaligned_le16(SCSC_MXCONF_VER_MINOR, mxconf + 6);
@@ -556,6 +567,15 @@ static int scsc_wifibt_power_on(struct scsc_wifibt *scsc)
 		return ret;
 	dev_info(scsc->dev, "MEM_CONFIG1 (base) readback 0x%08x\n", val);
 
+	/* Read the sequencer state while the block is still held in reset:
+	 * with the firmware running, this register does not read back.
+	 */
+	ret = regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &val);
+	if (ret)
+		return ret;
+	dev_info(scsc->dev, "central sequencer state 0x%02x\n",
+		 (val & 0xf0000) >> 16);
+
 	return 0;
 }
 
@@ -591,12 +611,6 @@ static int scsc_wifibt_signal(struct scsc_wifibt *scsc)
 	if (ret)
 		return ret;
 	dev_info(scsc->dev, "WIFI_STAT 0x%08x after release\n", val);
-
-	ret = regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &val);
-	if (ret)
-		return ret;
-	dev_info(scsc->dev, "central sequencer state 0x%02x\n",
-		 (val & 0xf0000) >> 16);
 
 	/* Nudge the firmware so it notices the mailbox. */
 	writel(0x1, scsc->base + SCSC_MBOX_INTGR1);
@@ -635,14 +649,11 @@ static void scsc_wifibt_power_off(struct scsc_wifibt *scsc)
  */
 static void scsc_wifibt_scan(struct scsc_wifibt *scsc)
 {
-	unsigned int stat, seq, i;
+	unsigned int stat, i;
 	void *dram;
 
 	regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &stat);
-	regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &seq);
-
-	dev_info(scsc->dev, "STAT 0x%08x seq 0x%02x\n", stat,
-		 (seq & 0xf0000) >> 16);
+	dev_info(scsc->dev, "WIFI_STAT 0x%08x\n", stat);
 
 	dev_info(scsc->dev, "R4 MBOX %08x %08x %08x %08x\n",
 		 readl(scsc->base + SCSC_MBOX_ISSR(0)),
@@ -721,19 +732,17 @@ static void scsc_wifibt_check_work(struct work_struct *work)
 	struct scsc_wifibt *scsc = container_of(to_delayed_work(work),
 						struct scsc_wifibt,
 						check_work);
-	unsigned int stat, seq;
+	unsigned int stat;
 	u32 crc;
 
 	crc = scsc_wifibt_dram_crc(scsc);
 	regmap_read(scsc->pmureg, SCSC_PMU_WIFI_STAT, &stat);
-	regmap_read(scsc->pmureg, SCSC_PMU_CENTRAL_SEQ_STAT, &seq);
 
 	dev_info(scsc->dev,
-		 "5s check: DRAM crc 0x%08x (was 0x%08x) %s, WIFI_STAT 0x%08x, seq 0x%02x, M4 %08x, IRQs %d, WDOG %d\n",
+		 "5s check: DRAM crc 0x%08x (was 0x%08x) %s, WIFI_STAT 0x%08x, M4 %08x, IRQs %d, WDOG %d\n",
 		 crc, scsc->dram_crc,
 		 crc == scsc->dram_crc ? "unchanged" : "CHANGED",
-		 stat, (seq & 0xf0000) >> 16,
-		 readl(scsc->base_m4 + SCSC_MBOX_ISSR(0)),
+		 stat, readl(scsc->base_m4 + SCSC_MBOX_ISSR(0)),
 		 atomic_read(&scsc->irq_count),
 		 atomic_read(&scsc->wdog_count));
 
