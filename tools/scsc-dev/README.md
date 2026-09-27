@@ -11,8 +11,9 @@ The explicit `enable=1` module does not autoload. It can validate and stage the
 installed `postmarketos/mx140/mx140.bin`, configure its reserved DRAM window
 through the WLBT TZASC secure call and PMU BAAW registers, and build the
 firmware's shared-memory ring/configuration layout in reserved DRAM. It does not
-power WLBT, alter reset, access the mailbox registers, request IRQs, release
-either processor, or register a network interface.
+power WLBT, alter reset, access the mailbox registers, enable the mailbox IRQ,
+release either processor, or register a network interface. Probe reserves the
+MBOX IRQ with `IRQF_NO_AUTOEN`; the interrupt dispatcher remains inactive.
 `state=inert` means firmware is not running; TZASC and the BAAW aperture may
 remain configured after the module is unloaded. No `wlan` interface exists yet.
 
@@ -194,3 +195,8 @@ Iteration 044 was built against r17 and checked on boot
 unloaded. The shared-option state already has bit 2 set, so do not infer that a
 standalone acquire/release test would restore the previous state. Firmware
 start remains disabled and the device has no WLAN interface.
+Iteration 045 added the disabled MBOX IRQ reservation. It bound on the same
+r17 boot in 211 us, logged `reserved inactive mailbox IRQ 55`, stayed inert,
+and unloaded cleanly. It performed no mailbox MMIO; interfaces remained only
+`lo` and `usb0`. See `wifi-iterations/045-r17-inactive-irq/` for the build and
+device logs.

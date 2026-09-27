@@ -787,6 +787,11 @@ static int scsc_probe(struct platform_device *pdev)
 	ret = scsc_mif_intr_init(&scsc->mif_intr, &scsc_mif_intr_ops, scsc);
 	if (ret)
 		return ret;
+	ret = devm_request_irq(dev, scsc->mbox_irq, scsc_mif_intr_irq,
+			       IRQF_NO_AUTOEN, dev_name(dev), &scsc->mif_intr);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to reserve inactive mailbox IRQ\n");
 	for (i = 0; i < SCSC_MIF_NUM_MAILBOXES; i++) {
 		scsc->r4_mailbox[i] = scsc_mailbox_slot(scsc->r4_regs,
 						       scsc->r4_reg_size, i);
@@ -829,7 +834,7 @@ static int scsc_probe(struct platform_device *pdev)
 
 	/* Bind only; firmware staging is a separate explicit sysfs operation. */
 	dev_info(dev,
-		 "inert: reserved %pr, mapped %u R4/M4 slots and mailbox IRQ %d in %lld us; no MMIO access, IRQ request or firmware execution\n",
+		 "inert: reserved %pr, mapped %u R4/M4 slots and reserved inactive mailbox IRQ %d in %lld us; no MMIO access or firmware execution\n",
 		 &mem, SCSC_MIF_NUM_MAILBOXES,
 		 scsc->mbox_irq,
 		 ktime_us_delta(ktime_get(), start));

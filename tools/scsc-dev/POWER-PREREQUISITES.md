@@ -41,6 +41,14 @@ module was unloaded, while the mailbox/protocol modules remain loaded for this
 boot. No CP mailbox or WiFi PMU registers were read or written during these
 checks. SSH remained usable, and the tablet still exposes only `lo` and `usb0`.
 
+Iteration 045 built against the frozen r17 archive, reserved MBOX IRQ 55 using
+`IRQF_NO_AUTOEN`, and bound/unbound cleanly on the same boot. Its MIF dispatcher
+remained inactive, so the probe made no mailbox MMIO accesses. Only `lo` and
+`usb0` remained. This reserves the Linux IRQ action for a future opt-in start
+path; it does not validate an interrupt from powered WLBT or implement the
+SCSC host transport. Logs are under
+`wifi-iterations/045-r17-inactive-irq/`.
+
 ## Safe diagnostic and latest reboot (2026-09-26)
 
 An attempted wildcard read of the complete regmap debugfs `registers` file
