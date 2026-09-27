@@ -8,6 +8,10 @@
 #ifndef __LINUX_SOC_EXYNOS_CHIPID_H
 #define __LINUX_SOC_EXYNOS_CHIPID_H
 
+#include <linux/types.h>
+
+int exynos_chipid_get_unique_id(u64 *unique_id);
+
 #define EXYNOS_CHIPID_REG_PRO_ID	0x00
 #define EXYNOS_REV_PART_MASK		0xf
 #define EXYNOS_REV_PART_SHIFT		4

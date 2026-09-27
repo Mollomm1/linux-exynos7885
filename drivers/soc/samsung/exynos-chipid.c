@@ -30,7 +30,21 @@ struct exynos_chipid_variant {
 	unsigned int rev_reg;		/* revision register offset */
 	unsigned int main_rev_shift;	/* main revision offset in rev_reg */
 	unsigned int sub_rev_shift;	/* sub revision offset in rev_reg */
+	bool has_unique_id;
 };
+
+static u64 exynos7885_unique_id;
+static bool exynos7885_unique_id_valid;
+
+int exynos_chipid_get_unique_id(u64 *unique_id)
+{
+	if (!unique_id || !READ_ONCE(exynos7885_unique_id_valid))
+		return -ENODATA;
+
+	*unique_id = READ_ONCE(exynos7885_unique_id);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_chipid_get_unique_id);
 
 struct exynos_chipid_info {
 	u32 product_id;
@@ -124,6 +138,19 @@ static int exynos_chipid_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
+	if (drv_data->has_unique_id) {
+		unsigned int low, high;
+
+		ret = regmap_read(regmap, 0x04, &low);
+		if (ret)
+			return ret;
+		ret = regmap_read(regmap, 0x08, &high);
+		if (ret)
+			return ret;
+		WRITE_ONCE(exynos7885_unique_id, ((u64)high << 32) | low);
+		WRITE_ONCE(exynos7885_unique_id_valid, true);
+	}
+
 	soc_dev_attr = devm_kzalloc(&pdev->dev, sizeof(*soc_dev_attr),
 				    GFP_KERNEL);
 	if (!soc_dev_attr)
@@ -186,8 +213,18 @@ static const struct exynos_chipid_variant exynos850_chipid_drv_data = {
 	.sub_rev_shift	= 16,
 };
 
+static const struct exynos_chipid_variant exynos7885_chipid_drv_data = {
+	.rev_reg	= 0x10,
+	.main_rev_shift	= 20,
+	.sub_rev_shift	= 16,
+	.has_unique_id	= true,
+};
+
 static const struct of_device_id exynos_chipid_of_device_ids[] = {
 	{
+		.compatible	= "samsung,exynos7885-chipid",
+		.data		= &exynos7885_chipid_drv_data,
+	}, {
 		.compatible	= "samsung,exynos4210-chipid",
 		.data		= &exynos4210_chipid_drv_data,
 	}, {
