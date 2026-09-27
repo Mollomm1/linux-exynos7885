@@ -1234,6 +1234,27 @@ static ssize_t prepare_memory_store(struct device *dev,
 		goto out_unlock;
 	}
 
+	encoded_base = (scsc->mem_start & 0xfffffc000ULL) >> 12;
+	ret = regmap_read(scsc->pmu, SCSC_PMU_BAAW_SIZE0, &size);
+	if (ret)
+		goto out_unlock;
+	ret = regmap_read(scsc->pmu, SCSC_PMU_BAAW_BASE0, &base);
+	if (ret)
+		goto out_unlock;
+	/*
+	 * TZASC grants survive an inert module unload. On the same boot, the
+	 * exact reserved-window BAAW values are the persistent marker that its
+	 * secure grant was already completed; repeating that SMC is rejected by
+	 * EL3. Still require the WLAN power/reset state above to be quiescent.
+	 */
+	if (size == scsc->mem_size >> 12 && base == encoded_base) {
+		scsc->memory_ready = true;
+		dev_info(dev, "reusing prepared reserved DRAM aperture at %pa size %zu\n",
+			 &scsc->mem_start, scsc->mem_size);
+		ret = 0;
+		goto out_unlock;
+	}
+
 	/* Match downstream's WLBT TZASC call, but fail closed on its result. */
 	arm_smccc_smc(SCSC_TZASC_SMC, SCSC_TZASC_WLBT, scsc->mem_start,
 		      scsc->mem_size, 0, 0, 0, 0, &res);
@@ -1242,7 +1263,6 @@ static ssize_t prepare_memory_store(struct device *dev,
 		goto out_unlock;
 	}
 
-	encoded_base = (scsc->mem_start & 0xfffffc000ULL) >> 12;
 	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0,
 			   scsc->mem_size >> 12);
 	if (ret)
