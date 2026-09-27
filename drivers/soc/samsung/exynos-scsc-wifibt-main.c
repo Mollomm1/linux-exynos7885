@@ -342,19 +342,11 @@ static int scsc_mif_stop_locked(struct scsc_device *scsc)
 			goto fault;
 	}
 
-	/* Quiescence is acknowledged; only now close WLBT's DRAM windows. */
-	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0, 0);
-	if (ret)
-		goto fault;
-	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_BASE0, 0);
-	if (ret)
-		goto fault;
-	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0 + 8, 0);
-	if (ret)
-		goto fault;
-	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_BASE0 + 8, 0);
-	if (ret)
-		goto fault;
+	/*
+	 * Keep the secure grant and narrow, reserved-DRAM aperture across an
+	 * inert stop. EL3 rejects a duplicate grant, while the block is held in
+	 * reset and WIFI_STAT confirms it is quiescent.
+	 */
 
 	scsc->wlbt_may_be_running = false;
 	scsc->stop_failed = false;
@@ -1224,7 +1216,9 @@ static ssize_t prepare_memory_store(struct device *dev,
 	ret = regmap_read(scsc->pmu, SCSC_PMU_WIFI_STAT, &status);
 	if (ret)
 		goto out_unlock;
-	if ((ctrl_ns & SCSC_WIFI_PWRON) || (ctrl_s & SCSC_WIFI_START) || status) {
+	if ((ctrl_s & SCSC_WIFI_START) || status ||
+	    ((ctrl_ns & SCSC_WIFI_PWRON) &&
+	     !(ctrl_ns & SCSC_PMU_WIFI_RESET_SET))) {
 		ret = -EBUSY;
 		goto out_unlock;
 	}
@@ -1690,6 +1684,62 @@ out_unlock:
 }
 static DEVICE_ATTR_WO(arm_start);
 
+/* Recover only a stale, unmapped WLBT state after a host-side reboot. */
+static ssize_t quiesce_stale_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	unsigned int ctrl_ns, ctrl_s, status;
+	bool put_module = false;
+	int ret = 0;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+
+	mutex_lock(&scsc->lock);
+	if (scsc->mif_mapped || scsc->start_armed) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	if (!scsc->wlbt_may_be_running) {
+		ret = regmap_read(scsc->pmu, SCSC_PMU_WIFI_CTRL_NS, &ctrl_ns);
+		if (ret)
+			goto out_unlock;
+		ret = regmap_read(scsc->pmu, SCSC_PMU_WIFI_CTRL_S, &ctrl_s);
+		if (ret)
+			goto out_unlock;
+		ret = regmap_read(scsc->pmu, SCSC_PMU_WIFI_STAT, &status);
+		if (ret)
+			goto out_unlock;
+		if (!(ctrl_ns & SCSC_WIFI_PWRON) &&
+		    !(ctrl_s & SCSC_WIFI_START) && !status) {
+			ret = -EALREADY;
+			goto out_unlock;
+		}
+		if (!try_module_get(THIS_MODULE)) {
+			ret = -ENODEV;
+			goto out_unlock;
+		}
+		scsc->module_pinned = true;
+		scsc->wlbt_may_be_running = true;
+	}
+
+	ret = scsc_mif_stop_locked(scsc);
+	if (!ret && scsc->module_pinned) {
+		scsc->module_pinned = false;
+		put_module = true;
+	}
+out_unlock:
+	mutex_unlock(&scsc->lock);
+	if (put_module)
+		module_put(THIS_MODULE);
+	if (!ret)
+		dev_info(dev, "stale WLBT state quiesced and held in reset\n");
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(quiesce_stale);
+
 /* Build an ISSR pointer without accessing the powered-down mailbox bank. */
 static void __iomem *scsc_mailbox_slot(void __iomem *base,
 				      resource_size_t reg_size, u32 index)
@@ -1713,6 +1763,7 @@ static struct attribute *scsc_attrs[] = {
 	&dev_attr_prepare_config.attr,
 	&dev_attr_prepare_voltage.attr,
 	&dev_attr_arm_start.attr,
+	&dev_attr_quiesce_stale.attr,
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
 	&dev_attr_shared_rail_state.attr,
