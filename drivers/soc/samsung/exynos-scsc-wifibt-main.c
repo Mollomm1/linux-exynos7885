@@ -278,7 +278,7 @@ static int scsc_pmu_update(struct scsc_device *scsc, u32 offset, u32 mask,
 	return ret;
 }
 
-static int scsc_mif_stop_locked(struct scsc_device *scsc)
+static int scsc_mif_stop_locked(struct scsc_device *scsc, bool power_off)
 {
 	unsigned long timeout = jiffies + msecs_to_jiffies(SCSC_RESET_TIMEOUT_MS);
 	unsigned int value;
@@ -316,9 +316,19 @@ static int scsc_mif_stop_locked(struct scsc_device *scsc)
 			      SCSC_SYS_PWR_CFG_16, 0);
 	if (ret)
 		goto fault;
-	ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_CTRL_NS,
-			      SCSC_PMU_WIFI_RESET_SET,
-			      SCSC_PMU_WIFI_RESET_SET);
+	/*
+	 * A live MIF client must be held in reset. Stale state found during boot
+	 * has no live client to preserve; power WLBT off instead. This follows
+	 * downstream platform_mif_pmu_reset()'s rst_case 1 path and avoids
+	 * treating an already-asserted RESET_SET with PWRON still set as quiesced.
+	 */
+	if (power_off)
+		ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_CTRL_NS,
+				      SCSC_WIFI_PWRON, 0);
+	else
+		ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_CTRL_NS,
+				      SCSC_PMU_WIFI_RESET_SET,
+				      SCSC_PMU_WIFI_RESET_SET);
 	if (ret)
 		goto fault;
 
@@ -345,7 +355,7 @@ static int scsc_mif_stop_locked(struct scsc_device *scsc)
 	/*
 	 * Keep the secure grant and narrow, reserved-DRAM aperture across an
 	 * inert stop. EL3 rejects a duplicate grant, while the block is held in
-	 * reset and WIFI_STAT confirms it is quiescent.
+	 * reset or powered off and WIFI_STAT confirms it is quiescent.
 	 */
 
 	scsc->wlbt_may_be_running = false;
@@ -369,7 +379,7 @@ static int scsc_mif_reset(struct scsc_mif_abs *interface, bool reset)
 
 	mutex_lock(&scsc->lock);
 	if (reset) {
-		ret = scsc_mif_stop_locked(scsc);
+		ret = scsc_mif_stop_locked(scsc, false);
 		goto out_unlock;
 	}
 	if (!scsc->mif_mapped || scsc->wlbt_may_be_running ||
@@ -1725,7 +1735,7 @@ static ssize_t quiesce_stale_store(struct device *dev,
 		scsc->wlbt_may_be_running = true;
 	}
 
-	ret = scsc_mif_stop_locked(scsc);
+	ret = scsc_mif_stop_locked(scsc, true);
 	if (!ret && scsc->module_pinned) {
 		scsc->module_pinned = false;
 		put_module = true;
@@ -1735,7 +1745,7 @@ out_unlock:
 	if (put_module)
 		module_put(THIS_MODULE);
 	if (!ret)
-		dev_info(dev, "stale WLBT state quiesced and held in reset\n");
+		dev_info(dev, "stale WLBT state quiesced and powered off\n");
 	return ret ? ret : count;
 }
 static DEVICE_ATTR_WO(quiesce_stale);
