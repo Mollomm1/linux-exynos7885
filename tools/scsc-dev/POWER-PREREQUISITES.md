@@ -1,5 +1,27 @@
 # Exynos7885 WiFi startup prerequisites
 
+## Working downstream reference
+
+Use postmarketOS branch `kipz/pmaports:kipz/t510-fixes` as the authoritative
+packaging reference for the downstream kernel, rather than assuming the local
+Samsung source dump includes postmarketOS changes. At pmaports commit
+`041ac832896c`, its `linux-samsung-gta3xlwifi` aport pins
+`starfoxdot64/samsung_kernel_gta3xlwifi` commit
+`29d2fb67a8e80703c51764b9c0ddaad81ef44cd2` (Linux 4.4.177) and applies the
+listed aport patches. The config builds SCSC core/platform, `mcu_ipc`, SCSC
+WLAN, SCSC Bluetooth/BlueZ, and ACPM DVFS; firmware lookup is configured for
+`/lib/firmware/postmarketos/mx140`. The aport's wireless-related patches
+include the postmarketOS firmware-path change and two BlueZ fixes.
+
+The working source's `platform_mif.c`, `mcu_ipc.c`, T510 downstream DTS and
+Exynos7885 PMUCAL system table match the corresponding local Samsung source
+files. `mxman.c`, WLAN `mgt.c`/Kconfig and other packaging-adjusted files do
+differ. Thus the current hardware sequence findings are still grounded in the
+working device's platform code, while firmware lookup and Bluetooth build
+details must use the patched pmaports tree. The complete 4.4 SCSC/HIP WLAN and
+Bluetooth stacks are not present in the current mainline tree; the r17 module
+is only a platform/resource prototype and does not register a WLAN interface.
+
 ## Current r17 state (2026-09-26)
 
 After flashing r17, boot `8c3f4049-8e46-4692-83b3-45a086006dd0` runs kernel
