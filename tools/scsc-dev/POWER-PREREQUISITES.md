@@ -27,6 +27,20 @@ did not receive an acknowledgment and was followed by ambiguous APM fault-log
 entries; module load/unload without requests was inert. Do not issue another
 request or write CP/PMU state as part of this diagnostic iteration.
 
+On later r17 boot `264ec56b-18ec-424b-abed-bb2aafea0cb6`, the packaged
+mailbox and ACPM protocol modules were loaded explicitly. The protocol
+registered eight polling queues. The stock Exynos7885 FVP image
+`exynos7885_acpm_fvp.fw` (SHA-256
+`3793478b6df52fe760a89cbcfb258a9c489365ee2d13d9dae8df2f161abadb61`) was
+staged at `/lib/firmware`, and the existing `attach_fvp` control completed
+on channel 4. The previously validated WLBT flag operation `[7, 1, 6, 0]` then
+returned success exactly once. This confirms the APM/plugin and
+voltage-preparation prerequisites on r17; it does not test WiFi reset,
+shared-rail sequencing, or firmware execution. The temporary ACPM diagnostic
+module was unloaded, while the mailbox/protocol modules remain loaded for this
+boot. No CP mailbox or WiFi PMU registers were read or written during these
+checks. SSH remained usable, and the tablet still exposes only `lo` and `usb0`.
+
 ## Safe diagnostic and latest reboot (2026-09-26)
 
 An attempted wildcard read of the complete regmap debugfs `registers` file
