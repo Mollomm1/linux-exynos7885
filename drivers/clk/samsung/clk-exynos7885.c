@@ -21,6 +21,7 @@
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
+#define CLKS_NR_DISPAUD			(CLK_DOUT_UAIF3 + 1)
 
 /* ---- CMU_TOP ------------------------------------------------------------- */
 
@@ -817,6 +818,43 @@ static const struct samsung_cmu_info fsys_cmu_info __initconst = {
 	.clk_name		= "dout_fsys_bus",
 };
 
+/* ---- CMU_DISPAUD -------------------------------------------------------- */
+
+#define PLL_CON0_PLL_AUD		0x0160
+#define PLL_CON3_PLL_AUD		0x016c
+#define CLK_CON_DIV_AUDIF		0x1800
+#define CLK_CON_DIV_UAIF3		0x1824
+
+static const unsigned long dispaud_clk_regs[] __initconst = {
+	PLL_CON0_PLL_AUD,
+	PLL_CON3_PLL_AUD,
+	CLK_CON_DIV_AUDIF,
+	CLK_CON_DIV_UAIF3,
+};
+
+static const struct samsung_pll_clock dispaud_pll_clks[] __initconst = {
+	PLL(pll_1431x, CLK_FOUT_AUD_PLL, "fout_aud_pll", "oscclk",
+	    0, PLL_CON0_PLL_AUD, NULL),
+};
+
+static const struct samsung_div_clock dispaud_div_clks[] __initconst = {
+	DIV(CLK_DOUT_AUDIF, "dout_audif", "fout_aud_pll",
+	    CLK_CON_DIV_AUDIF, 0, 9),
+	DIV(CLK_DOUT_UAIF3, "dout_uaif3", "dout_audif",
+	    CLK_CON_DIV_UAIF3, 0, 5),
+};
+
+static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
+	.pll_clks		= dispaud_pll_clks,
+	.nr_pll_clks		= ARRAY_SIZE(dispaud_pll_clks),
+	.div_clks		= dispaud_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(dispaud_div_clks),
+	.nr_clk_ids		= CLKS_NR_DISPAUD,
+	.clk_regs		= dispaud_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(dispaud_clk_regs),
+	.clk_name		= "oscclk",
+};
+
 /* ---- platform_driver ----------------------------------------------------- */
 
 static int __init exynos7885_cmu_probe(struct platform_device *pdev)
@@ -837,6 +875,9 @@ static const struct of_device_id exynos7885_cmu_of_match[] = {
 	}, {
 		.compatible = "samsung,exynos7885-cmu-fsys",
 		.data = &fsys_cmu_info,
+	}, {
+		.compatible = "samsung,exynos7885-cmu-dispaud",
+		.data = &dispaud_cmu_info,
 	}, {
 	},
 };

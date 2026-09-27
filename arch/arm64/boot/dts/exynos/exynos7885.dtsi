@@ -284,6 +284,15 @@
 				      "dout_fsys_usb30drd";
 		};
 
+		cmu_dispaud: clock-controller@14800000 {
+			compatible = "samsung,exynos7885-cmu-dispaud";
+			reg = <0x14800000 0x8000>;
+			#clock-cells = <1>;
+			clocks = <&oscclk>;
+			clock-names = "oscclk";
+			status = "disabled";
+		};
+
 		pinctrl_alive: pinctrl@11cb0000 {
 			compatible = "samsung,exynos7885-pinctrl";
 			reg = <0x11cb0000 0x1000>;

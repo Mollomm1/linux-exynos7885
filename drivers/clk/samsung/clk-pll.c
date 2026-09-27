@@ -14,6 +14,7 @@
 #include <linux/timekeeping.h>
 #include <linux/clk-provider.h>
 #include <linux/io.h>
+#include <linux/math64.h>
 #include "clk.h"
 #include "clk-pll.h"
 
@@ -418,6 +419,29 @@ static const struct clk_ops samsung_pll36xx_clk_ops = {
 
 static const struct clk_ops samsung_pll36xx_clk_min_ops = {
 	.recalc_rate = samsung_pll36xx_recalc_rate,
+};
+
+/* PLL1431X has the 36xx fractional layout, with K in CON3 at +0xc. */
+static unsigned long samsung_pll1431x_recalc_rate(struct clk_hw *hw,
+					  unsigned long parent_rate)
+{
+	struct samsung_clk_pll *pll = to_clk_pll(hw);
+	u32 con0 = readl_relaxed(pll->con_reg);
+	s16 kdiv = (s16)readl_relaxed(pll->con_reg + 0xc);
+	u32 mdiv = (con0 >> 16) & 0x3ff;
+	u32 pdiv = (con0 >> 8) & 0x3f;
+	u32 sdiv = con0 & 0x7;
+	s64 multiplier = ((s64)mdiv << 16) + kdiv;
+
+	if (!pdiv || multiplier <= 0)
+		return 0;
+
+	return div64_u64((u64)parent_rate * multiplier,
+			 (u64)pdiv << (sdiv + 16));
+}
+
+static const struct clk_ops samsung_pll1431x_clk_ops = {
+	.recalc_rate = samsung_pll1431x_recalc_rate,
 };
 
 /*
@@ -1418,6 +1442,9 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 			init.ops = &samsung_pll36xx_clk_min_ops;
 		else
 			init.ops = &samsung_pll36xx_clk_ops;
+		break;
+	case pll_1431x:
+		init.ops = &samsung_pll1431x_clk_ops;
 		break;
 	case pll_0831x:
 		pll->enable_offs = PLL0831X_ENABLE_SHIFT;
