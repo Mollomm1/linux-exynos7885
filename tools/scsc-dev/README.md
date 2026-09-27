@@ -217,3 +217,18 @@ uses fake callbacks. It passed alongside the MIF self-test on the same r17 boot;
 the module remained inert, unloaded cleanly, and left only `lo`/`usb0`. This
 does not validate the live CP mailbox or resolve the observed option-bit state.
 See `wifi-iterations/049-r17-shared-rail/`.
+
+Iteration 059 adds the matching downstream `scsc_mif_abs` registration ABI to
+the opt-in module. It exports `scsc_mif_abs_register()` and
+`scsc_mif_abs_unregister()` so the unmodified downstream core can bind to the
+mainline resource device. The interface is deliberately fail-closed:
+`map()` returns NULL, `reset()` returns `-EOPNOTSUPP`, mailbox pointers are
+unavailable and no IRQ or reset register access is enabled. This permits a
+core/client attachment test separately from firmware execution. The exact
+downstream core was rebuilt against the iteration's `Module.symvers`; modpost
+resolves both API calls and records the core dependency on
+`exynos-scsc-wifibt`. This source/link validation does not establish safe WLAN
+startup. Before enabling `map()`, complete the bounded WLBT reset and
+quiescence lifecycle and implement active mailbox/interrupt callbacks. See
+`wifi-iterations/056-mif-startup-audit/` for why the downstream reset function
+cannot be copied verbatim.

@@ -22,6 +22,7 @@
 
 #include "exynos-scsc-mif-intr.h"
 #include "exynos-scsc-shared-rail.h"
+#include "scsc_mif_abs.h"
 
 #define SCSC_FW_MIN_HEADER	188
 #define SCSC_FW_DIRECTORY	"postmarketos/mx140/"
@@ -94,6 +95,14 @@ struct scsc_device {
 	spinlock_t mif_reg_lock;
 	struct scsc_mif_intr mif_intr;
 	struct scsc_shared_rail shared_rail;
+	struct scsc_mif_abs mif_abs;
+	void (*mif_irq_handler)(int irq, void *data);
+	void *mif_irq_data;
+	void (*mif_reset_handler)(int irq, void *data);
+	void *mif_reset_data;
+	int (*mif_suspend)(struct scsc_mif_abs *interface, void *data);
+	void (*mif_resume)(struct scsc_mif_abs *interface, void *data);
+	void *mif_suspend_data;
 	phys_addr_t mem_start;
 	size_t mem_size;
 	resource_size_t r4_reg_size;
@@ -110,6 +119,257 @@ struct scsc_device {
 	u32 runtime_length;
 	u32 entry_point;
 };
+
+/* The downstream SCSC core is optional and binds through this singleton API. */
+static DEFINE_MUTEX(scsc_mif_registry_lock);
+static struct scsc_device *scsc_mif_device;
+static struct scsc_mif_abs_driver *scsc_mif_client;
+
+static struct scsc_device *scsc_from_mif(struct scsc_mif_abs *interface)
+{
+	return container_of(interface, struct scsc_device, mif_abs);
+}
+
+static void scsc_mif_destroy(struct scsc_mif_abs *interface)
+{
+	/* The platform device owns this interface; module dependencies pin it. */
+}
+
+static char *scsc_mif_get_uid(struct scsc_mif_abs *interface)
+{
+	return "gta3xlwifi";
+}
+
+static int scsc_mif_reset(struct scsc_mif_abs *interface, bool reset)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	dev_err(scsc->dev, "MIF reset rejected: start/stop lifecycle is not enabled\n");
+	return -EOPNOTSUPP;
+}
+
+/* A NULL map makes mxman_start() stop before firmware or mailbox activity. */
+static void *scsc_mif_map(struct scsc_mif_abs *interface, size_t *allocated)
+{
+	if (allocated)
+		*allocated = 0;
+	return NULL;
+}
+
+static void scsc_mif_unmap(struct scsc_mif_abs *interface, void *mem)
+{
+	/* map() never succeeds until the active lifecycle is implemented. */
+}
+
+static u32 *scsc_mif_get_mbox_ptr(struct scsc_mif_abs *interface, u32 index)
+{
+	return NULL;
+}
+
+static u32 scsc_mif_irq_mask_status_get(struct scsc_mif_abs *interface)
+{
+	return 0;
+}
+
+static u32 scsc_mif_irq_get(struct scsc_mif_abs *interface)
+{
+	return 0;
+}
+
+static void scsc_mif_irq_noop(struct scsc_mif_abs *interface, int bit)
+{
+	/* No interrupt register is touched while WLBT is inactive. */
+}
+
+static void scsc_mif_irq_bit_set(struct scsc_mif_abs *interface, int bit,
+				 enum scsc_mif_abs_target target)
+{
+	/* map() fails closed, so no client may raise a firmware interrupt. */
+}
+
+static void scsc_mif_irq_reg_handler(struct scsc_mif_abs *interface,
+				     void (*handler)(int irq, void *data),
+				     void *data)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	WRITE_ONCE(scsc->mif_irq_data, data);
+	WRITE_ONCE(scsc->mif_irq_handler, handler);
+}
+
+static void scsc_mif_irq_unreg_handler(struct scsc_mif_abs *interface)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	WRITE_ONCE(scsc->mif_irq_handler, NULL);
+	WRITE_ONCE(scsc->mif_irq_data, NULL);
+}
+
+static void scsc_mif_irq_clear(void)
+{
+}
+
+static void scsc_mif_noop_interface(struct scsc_mif_abs *interface)
+{
+}
+
+static void scsc_mif_reg_reset_handler(struct scsc_mif_abs *interface,
+				       void (*handler)(int irq, void *data),
+				       void *data)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	WRITE_ONCE(scsc->mif_reset_data, data);
+	WRITE_ONCE(scsc->mif_reset_handler, handler);
+}
+
+static void scsc_mif_unreg_reset_handler(struct scsc_mif_abs *interface)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	WRITE_ONCE(scsc->mif_reset_handler, NULL);
+	WRITE_ONCE(scsc->mif_reset_data, NULL);
+}
+
+static void scsc_mif_suspend_reg_handler(struct scsc_mif_abs *interface,
+					 int (*suspend)(struct scsc_mif_abs *, void *),
+					 void (*resume)(struct scsc_mif_abs *, void *),
+					 void *data)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	WRITE_ONCE(scsc->mif_suspend_data, data);
+	WRITE_ONCE(scsc->mif_suspend, suspend);
+	WRITE_ONCE(scsc->mif_resume, resume);
+}
+
+static void scsc_mif_suspend_unreg_handler(struct scsc_mif_abs *interface)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	WRITE_ONCE(scsc->mif_suspend, NULL);
+	WRITE_ONCE(scsc->mif_resume, NULL);
+	WRITE_ONCE(scsc->mif_suspend_data, NULL);
+}
+
+static void *scsc_mif_get_ram_ptr(struct scsc_mif_abs *interface,
+				  scsc_mifram_ref ref)
+{
+	return NULL;
+}
+
+static int scsc_mif_get_ram_ref(struct scsc_mif_abs *interface, void *ptr,
+				scsc_mifram_ref *ref)
+{
+	return -EHOSTDOWN;
+}
+
+static uintptr_t scsc_mif_get_ram_pfn(struct scsc_mif_abs *interface)
+{
+	return 0;
+}
+
+static struct device *scsc_mif_get_device(struct scsc_mif_abs *interface)
+{
+	return scsc_from_mif(interface)->dev;
+}
+
+static void scsc_mif_get_abox_shared_mem(struct scsc_mif_abs *interface,
+					void **data)
+{
+	if (data)
+		*data = NULL;
+}
+
+static const struct scsc_mif_abs scsc_mif_template = {
+	.destroy = scsc_mif_destroy,
+	.get_uid = scsc_mif_get_uid,
+	.reset = scsc_mif_reset,
+	.map = scsc_mif_map,
+	.unmap = scsc_mif_unmap,
+	.get_mbox_ptr = scsc_mif_get_mbox_ptr,
+	.irq_bit_mask_status_get = scsc_mif_irq_mask_status_get,
+	.irq_get = scsc_mif_irq_get,
+	.irq_bit_clear = scsc_mif_irq_noop,
+	.irq_bit_mask = scsc_mif_irq_noop,
+	.irq_bit_unmask = scsc_mif_irq_noop,
+	.irq_bit_set = scsc_mif_irq_bit_set,
+	.irq_reg_handler = scsc_mif_irq_reg_handler,
+	.irq_unreg_handler = scsc_mif_irq_unreg_handler,
+	.irq_clear = scsc_mif_irq_clear,
+	.irq_reg_reset_request_handler = scsc_mif_reg_reset_handler,
+	.irq_unreg_reset_request_handler = scsc_mif_unreg_reset_handler,
+	.suspend_reg_handler = scsc_mif_suspend_reg_handler,
+	.suspend_unreg_handler = scsc_mif_suspend_unreg_handler,
+	.get_mifram_ptr = scsc_mif_get_ram_ptr,
+	.get_mifram_ref = scsc_mif_get_ram_ref,
+	.get_mifram_pfn = scsc_mif_get_ram_pfn,
+	.get_mifram_phy_ptr = scsc_mif_get_ram_ptr,
+	.get_mif_device = scsc_mif_get_device,
+	.mif_dump_registers = scsc_mif_noop_interface,
+	.mif_cleanup = scsc_mif_noop_interface,
+	.mif_restart = scsc_mif_noop_interface,
+	.get_abox_shared_mem = scsc_mif_get_abox_shared_mem,
+};
+
+static void scsc_mif_notify_probe(struct scsc_device *scsc)
+{
+	mutex_lock(&scsc_mif_registry_lock);
+	scsc_mif_device = scsc;
+	if (scsc_mif_client) {
+		dev_info(scsc->dev, "probing downstream MIF client %s; firmware start remains disabled\n",
+			 scsc_mif_client->name);
+		scsc_mif_client->probe(scsc_mif_client, &scsc->mif_abs);
+	}
+	mutex_unlock(&scsc_mif_registry_lock);
+}
+
+static void scsc_mif_notify_remove(struct scsc_device *scsc)
+{
+	mutex_lock(&scsc_mif_registry_lock);
+	if (scsc_mif_device == scsc) {
+		if (scsc_mif_client)
+			scsc_mif_client->remove(&scsc->mif_abs);
+		scsc_mif_device = NULL;
+	}
+	mutex_unlock(&scsc_mif_registry_lock);
+}
+
+void scsc_mif_abs_register(struct scsc_mif_abs_driver *driver)
+{
+	mutex_lock(&scsc_mif_registry_lock);
+	if (scsc_mif_client) {
+		pr_err("exynos-scsc-wifibt: MIF client %s already registered\n",
+		       scsc_mif_client->name);
+		mutex_unlock(&scsc_mif_registry_lock);
+		return;
+	}
+	if (!driver || !driver->name || !driver->probe || !driver->remove) {
+		pr_err("exynos-scsc-wifibt: invalid MIF client registration\n");
+		mutex_unlock(&scsc_mif_registry_lock);
+		return;
+	}
+	scsc_mif_client = driver;
+	if (scsc_mif_device) {
+		dev_info(scsc_mif_device->dev,
+			 "registered downstream MIF client %s; firmware start remains disabled\n",
+			 driver->name);
+		driver->probe(driver, &scsc_mif_device->mif_abs);
+	}
+	mutex_unlock(&scsc_mif_registry_lock);
+}
+EXPORT_SYMBOL_GPL(scsc_mif_abs_register);
+
+void scsc_mif_abs_unregister(struct scsc_mif_abs_driver *driver)
+{
+	mutex_lock(&scsc_mif_registry_lock);
+	if (scsc_mif_client == driver) {
+		/* The core destroys its devices before unregistering this callback. */
+		scsc_mif_client = NULL;
+	}
+	mutex_unlock(&scsc_mif_registry_lock);
+}
+EXPORT_SYMBOL_GPL(scsc_mif_abs_unregister);
 
 /* Resolve ACPM lazily so an inert module bind does not require ACPM to load. */
 static int scsc_prepare_voltage(struct scsc_device *scsc)
@@ -913,6 +1173,7 @@ static int scsc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	mutex_init(&scsc->lock);
 	scsc->dev = dev;
+	scsc->mif_abs = scsc_mif_template;
 	spin_lock_init(&scsc->mif_reg_lock);
 	scsc->mbox_irq = platform_get_irq_byname(pdev, "mbox");
 	if (scsc->mbox_irq < 0)
@@ -1001,7 +1262,15 @@ static int scsc_probe(struct platform_device *pdev)
 		 &mem, SCSC_MIF_NUM_MAILBOXES,
 		 scsc->mbox_irq,
 		 ktime_us_delta(ktime_get(), start));
+	scsc_mif_notify_probe(scsc);
 	return 0;
+}
+
+static void scsc_remove(struct platform_device *pdev)
+{
+	struct scsc_device *scsc = platform_get_drvdata(pdev);
+
+	scsc_mif_notify_remove(scsc);
 }
 
 static const struct of_device_id scsc_of_match[] = {
@@ -1012,6 +1281,7 @@ static const struct of_device_id scsc_of_match[] = {
 
 static struct platform_driver scsc_driver = {
 	.probe = scsc_probe,
+	.remove = scsc_remove,
 	.driver = {
 		.name = "exynos-scsc-wifibt",
 		.of_match_table = scsc_of_match,

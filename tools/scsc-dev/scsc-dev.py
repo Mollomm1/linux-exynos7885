@@ -23,6 +23,7 @@ SOURCES = {
     "exynos-scsc-mif-intr.h": "drivers/soc/samsung/exynos-scsc-mif-intr.h",
     "exynos-scsc-shared-rail.c": "drivers/soc/samsung/exynos-scsc-shared-rail.c",
     "exynos-scsc-shared-rail.h": "drivers/soc/samsung/exynos-scsc-shared-rail.h",
+    "scsc_mif_abs.h": "drivers/soc/samsung/scsc_mif_abs.h",
 }
 STATE = "/sys/bus/platform/devices/120c0000.wifibt/state"
 
