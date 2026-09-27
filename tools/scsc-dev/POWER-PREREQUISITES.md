@@ -370,6 +370,46 @@ although normal SSH and bounded state reads continued on the same boot; do not
 repeat the inspection without understanding that failure. The downstream
 kernel calls `plugins_init()` before clients; the mainline transport does not.
 Whether this tablet needs a dynamic plugin attachment remains unknown.
+
+## Downstream WLAN-client smoke attempt (2026-09-27)
+
+The current tablet boot `9f2096a4-7992-49d3-a49b-613fe26f1df4` is still on
+the r17 kernel. Its live `/sys/firmware/devicetree/base/wifibt@120c0000/
+reg-names` reads `r4 m4 cp`, confirming the CP mailbox resource is present in
+the flashed DT. Older `cp_mailbox=missing` reports came from earlier DT/module
+iterations and do not describe this boot. The current module maps that named
+resource at probe but does not read or write it; physical accessibility and
+the CP handshake remain untested. No reflash is needed to add this resource.
+
+The matching `kipz/t510-fixes` downstream `scsc_wlan.ko` was rebuilt for the
+installed r17 kernel after adding `VENDOR_CMD_RAW_DATA` policies to its 58
+vendor commands. It successfully registered `wlan0` and `p2p0`. Existing
+`wpa_supplicant` and NetworkManager immediately tried to open `p2p0`, so this
+was not an inert interface-registration test. The service reached downstream
+`mxman_start()`, where the mainline MIF provider's intentional NULL `map()`
+returned `-ENOMEM` before firmware parsing or any transport, mailbox, IRQ,
+PMU, reset, or radio operation. Repeated failed opens emitted WARNs in the
+legacy client's netdev-open path; they did not indicate a provider or kernel
+hang. Both services and all three test modules were stopped/unloaded cleanly.
+SSH remained available. Firmware status stayed `unchecked`, provider state
+stayed `inert`, and no new device interface remained after unload. Logs are in
+`wifi-iterations/061-wlan-start-attempt/`.
+
+This exposed the exact next implementation boundary: downstream
+`platform_mif_map()` is not just a RAM mapper. After mapping DRAM it zeroes R4
+and M4 ISSRs, writes the mailbox masks and interrupt-clear registers, writes
+`WLBT_BOOT_TEST_RST_CFG`, and registers MIF IRQ handlers. `mxman_start()` then
+parses and copies firmware, initializes management/GDB/log transports,
+allocates and serializes mxconf, writes the entry/config/startup words into
+MBOX0-3, and calls `mif->reset(false)`. The reset callback's error is logged
+but not treated as an immediate failure by this downstream revision; the core
+continues to wait for firmware and may then call its stop path. Therefore the
+mainline MIF map/reset callbacks must not be enabled independently. A future
+active path needs a single reviewed and gated lifecycle covering those
+mailbox writes, IRQ enable/disable and synchronization, exact firmware handoff,
+ACPM voltage setup, CP/shared-rail ownership, reset-ahead/bus/TCXO/isolation/
+sequencer control, and bounded stop recovery. Keep WLAN interface-open tests
+from reaching that path until the complete lifecycle is implemented.
 The corrected diagnostic client was also loaded without reading its rate
 attribute; the queue, doorbell and log front remained unchanged, and the
 modules unloaded cleanly. The prior APM fault is temporally associated with
