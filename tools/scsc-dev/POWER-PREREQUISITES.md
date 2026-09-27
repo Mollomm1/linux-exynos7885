@@ -58,6 +58,16 @@ firmware was not executed and no WiFi power/reset or CP mailbox registers were
 touched. The temporary SCSC module unloaded cleanly; only `lo` and `usb0`
 remain. Artifacts are in `wifi-iterations/047-r17-acpm-voltage/`.
 
+Iteration 049 adds the reference-counted shared-rail transaction helper. Its
+production callbacks encode CP ISSR2 wakeup, PMU option bit 2, CP ISSR3 ready
+sampling, and the reverse release order, with rollback on failures. The only
+exposed operation is a fake-callback self-test; no live callback is reachable
+from sysfs. Both shared-rail and MIF self-tests passed on r17, and the module
+unloaded cleanly. This validates software ordering/refcount/rollback only; the
+current boot's `EXT_REGULATOR_SHARED_OPTION=0x6` and CP mailbox state remain
+unresolved. No CP or WiFi PMU write was made. Artifacts are in
+`wifi-iterations/049-r17-shared-rail/`.
+
 ## Safe diagnostic and latest reboot (2026-09-26)
 
 An attempted wildcard read of the complete regmap debugfs `registers` file

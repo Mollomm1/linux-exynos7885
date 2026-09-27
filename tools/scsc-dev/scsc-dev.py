@@ -21,6 +21,8 @@ SOURCES = {
     MODULE + "-main.c": DRIVER,
     "exynos-scsc-mif-intr.c": "drivers/soc/samsung/exynos-scsc-mif-intr.c",
     "exynos-scsc-mif-intr.h": "drivers/soc/samsung/exynos-scsc-mif-intr.h",
+    "exynos-scsc-shared-rail.c": "drivers/soc/samsung/exynos-scsc-shared-rail.c",
+    "exynos-scsc-shared-rail.h": "drivers/soc/samsung/exynos-scsc-shared-rail.h",
 }
 STATE = "/sys/bus/platform/devices/120c0000.wifibt/state"
 
@@ -101,7 +103,8 @@ def build(args):
         shutil.copy2(args.source.resolve() / source_name, out / output_name)
     (out / "Makefile").write_text(
         f"obj-m := {MODULE}.o\n"
-        f"{MODULE}-y := {MODULE}-main.o exynos-scsc-mif-intr.o\n")
+        f"{MODULE}-y := {MODULE}-main.o exynos-scsc-mif-intr.o "
+        "exynos-scsc-shared-rail.o\n")
     run(["make", "-C", str(tree), "ARCH=arm64", "CC=" + data["cc"],
          "CROSS_COMPILE=" + data["cross_compile"], "M=" + str(out), "modules"])
     require(fingerprints(tree) == data["files"], "Build modified baseline artifacts")

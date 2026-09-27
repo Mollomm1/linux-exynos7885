@@ -209,3 +209,11 @@ attempt. On boot `264ec56b-18ec-424b-abed-bb2aafea0cb6`, the control returned
 request. The module unloaded cleanly, with only `lo` and `usb0` present. This
 does not start firmware or alter WiFi power/reset. See
 `wifi-iterations/047-r17-acpm-voltage/`.
+
+Iteration 049 adds a CP-coordinated shared-rail reference helper with rollback
+and fault latching. Its device callbacks match the downstream ISSR2/PMU/ISSR3
+ordering, but no attribute invokes them. The admin-only `shared_rail_selftest`
+uses fake callbacks. It passed alongside the MIF self-test on the same r17 boot;
+the module remained inert, unloaded cleanly, and left only `lo`/`usb0`. This
+does not validate the live CP mailbox or resolve the observed option-bit state.
+See `wifi-iterations/049-r17-shared-rail/`.

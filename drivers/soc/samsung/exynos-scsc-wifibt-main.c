@@ -21,6 +21,7 @@
 #include <linux/vmalloc.h>
 
 #include "exynos-scsc-mif-intr.h"
+#include "exynos-scsc-shared-rail.h"
 
 #define SCSC_FW_MIN_HEADER	188
 #define SCSC_FW_DIRECTORY	"postmarketos/mx140/"
@@ -36,7 +37,10 @@
 #define SCSC_PMU_SHARED_REG_OPTION	0x3648
 #define SCSC_PMU_CP_REFERENCE		0x10
 #define SCSC_PMU_SHARED_REG_REFERENCE	0x20001
+#define SCSC_PMU_SHARED_REG_OPTION_BIT	BIT(2)
+#define SCSC_CP_ISSR2_OFFSET		0x88
 #define SCSC_CP_ISSR3_OFFSET		0x8c
+#define SCSC_CP_WAKEUP_BIT		BIT(0)
 #define SCSC_WIFI_PWRON		BIT(1)
 #define SCSC_WIFI_START		BIT(3)
 #define SCSC_MXCONF_MAGIC	0x79828486
@@ -89,6 +93,7 @@ struct scsc_device {
 	void __iomem *m4_mailbox[SCSC_MIF_NUM_MAILBOXES];
 	spinlock_t mif_reg_lock;
 	struct scsc_mif_intr mif_intr;
+	struct scsc_shared_rail shared_rail;
 	phys_addr_t mem_start;
 	size_t mem_size;
 	resource_size_t r4_reg_size;
@@ -230,6 +235,54 @@ static const struct scsc_mif_intr_ops scsc_mif_intr_ops = {
 	.clear_to_host = scsc_mif_clear_to_host,
 	.unmask_to_host = scsc_mif_unmask_to_host,
 	.raise_from_host = scsc_mif_raise_from_host,
+};
+
+static int scsc_shared_set_cp_wakeup(void *context, bool enable)
+{
+	struct scsc_device *scsc = context;
+	u32 value;
+
+	if (!scsc->cp_mailbox)
+		return -ENODEV;
+
+	value = readl(scsc->cp_mailbox + SCSC_CP_ISSR2_OFFSET);
+	if (enable)
+		value |= SCSC_CP_WAKEUP_BIT;
+	else
+		value &= ~SCSC_CP_WAKEUP_BIT;
+	writel(value, scsc->cp_mailbox + SCSC_CP_ISSR2_OFFSET);
+	readl(scsc->cp_mailbox + SCSC_CP_ISSR2_OFFSET);
+
+	return 0;
+}
+
+static int scsc_shared_set_option(void *context, bool enable)
+{
+	struct scsc_device *scsc = context;
+
+	return regmap_update_bits(scsc->pmu, SCSC_PMU_SHARED_REG_OPTION,
+				  SCSC_PMU_SHARED_REG_OPTION_BIT,
+				  enable ? SCSC_PMU_SHARED_REG_OPTION_BIT : 0);
+}
+
+static int scsc_shared_cp_ready(void *context, bool *ready)
+{
+	struct scsc_device *scsc = context;
+	u32 value;
+
+	if (!scsc->cp_mailbox)
+		return -ENODEV;
+
+	value = readl(scsc->cp_mailbox + SCSC_CP_ISSR3_OFFSET);
+	*ready = !!(value & GENMASK(4, 1));
+
+	return 0;
+}
+
+static const struct scsc_shared_rail_ops scsc_shared_rail_ops = {
+	.set_cp_wakeup = scsc_shared_set_cp_wakeup,
+	.set_option = scsc_shared_set_option,
+	.cp_ready = scsc_shared_cp_ready,
 };
 
 static bool enable;
@@ -767,6 +820,19 @@ static ssize_t shared_rail_state_show(struct device *dev,
 }
 static DEVICE_ATTR_ADMIN_RO(shared_rail_state);
 
+static ssize_t shared_rail_selftest_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	int ret = scsc_shared_rail_selftest();
+
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "pass\n");
+}
+static DEVICE_ATTR_ADMIN_RO(shared_rail_selftest);
+
 static ssize_t mif_intr_selftest_show(struct device *dev,
 				     struct device_attribute *attr, char *buf)
 {
@@ -811,6 +877,7 @@ static struct attribute *scsc_attrs[] = {
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
 	&dev_attr_shared_rail_state.attr,
+	&dev_attr_shared_rail_selftest.attr,
 	&dev_attr_mif_intr_selftest.attr,
 	NULL,
 };
@@ -891,6 +958,10 @@ static int scsc_probe(struct platform_device *pdev)
 		if (IS_ERR(scsc->cp_mailbox))
 			return PTR_ERR(scsc->cp_mailbox);
 	}
+	ret = scsc_shared_rail_init(&scsc->shared_rail,
+				   &scsc_shared_rail_ops, scsc);
+	if (ret)
+		return ret;
 
 	np = of_parse_phandle(dev->of_node, "memory-region", 0);
 	if (!np)
