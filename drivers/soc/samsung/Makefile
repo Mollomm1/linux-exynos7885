@@ -14,5 +14,6 @@ obj-$(CONFIG_EXYNOS_REGULATOR_COUPLER) += exynos-regulator-coupler.o
 
 obj-$(CONFIG_SAMSUNG_PM_CHECK)	+= s3c-pm-check.o
 obj-$(CONFIG_EXYNOS_SCSC_WIFIBT)	+= exynos-scsc-wifibt.o
+obj-$(CONFIG_EXYNOS7885_ABOX_PREFLIGHT) += exynos7885-abox-preflight.o
 exynos-scsc-wifibt-y		+= exynos-scsc-wifibt-main.o exynos-scsc-mif-intr.o \
 				   exynos-scsc-shared-rail.o

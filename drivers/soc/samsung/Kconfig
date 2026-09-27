@@ -84,6 +84,17 @@ config EXYNOS_SCSC_WIFIBT
 	  boot firmware or provide networking. Load with enable=1 to bind.
 	  It intentionally has no module aliases and cannot be built in.
 
+config EXYNOS7885_ABOX_PREFLIGHT
+	tristate "Exynos7885 ABOX inert resource and firmware preflight"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	depends on OF && FW_LOADER && m
+	help
+	  Manual, inert ABOX bring-up helper. The probe only validates the
+	  described resources. Firmware checks require an explicit root-only
+	  sysfs write. This driver never powers or starts the audio processor.
+	  It does not register a sound card. Loading the module requires the
+	  enable=1 parameter and it has no automatic module alias.
+
 config EXYNOS_REGULATOR_COUPLER
 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
 	depends on ARCH_EXYNOS || COMPILE_TEST
