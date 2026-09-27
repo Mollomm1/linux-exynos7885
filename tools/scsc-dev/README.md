@@ -200,3 +200,12 @@ r17 boot in 211 us, logged `reserved inactive mailbox IRQ 55`, stayed inert,
 and unloaded cleanly. It performed no mailbox MMIO; interfaces remained only
 `lo` and `usb0`. See `wifi-iterations/045-r17-inactive-irq/` for the build and
 device logs.
+
+Iteration 047 adds a root-only `prepare_voltage` control backed by the
+mainline ACPM protocol API. It resolves ACPM lazily, sends the verified WLBT
+flag request at most once per module bind, and fails closed after a transfer
+attempt. On boot `264ec56b-18ec-424b-abed-bb2aafea0cb6`, the control returned
+`attempted=1 prepared=1`; a repeated store was rejected without another
+request. The module unloaded cleanly, with only `lo` and `usb0` present. This
+does not start firmware or alter WiFi power/reset. See
+`wifi-iterations/047-r17-acpm-voltage/`.

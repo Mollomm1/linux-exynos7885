@@ -3,6 +3,7 @@
 
 #include <linux/crc32.h>
 #include <linux/firmware.h>
+#include <linux/firmware/samsung/exynos-acpm-protocol.h>
 #include <linux/io.h>
 #include <linux/arm-smccc.h>
 #include <linux/ktime.h>
@@ -77,6 +78,8 @@ struct scsc_fw_allocator {
 
 struct scsc_device {
 	struct regmap *pmu;
+	const struct acpm_handle *acpm;
+	struct device *dev;
 	struct mutex lock;
 	void __iomem *memory;
 	void __iomem *cp_mailbox;
@@ -95,11 +98,82 @@ struct scsc_device {
 	bool staged;
 	bool memory_ready;
 	bool config_ready;
+	bool voltage_request_attempted;
+	bool voltage_prepared;
 	u32 config_offset;
 	int firmware_result;
 	u32 runtime_length;
 	u32 entry_point;
 };
+
+/* Resolve ACPM lazily so an inert module bind does not require ACPM to load. */
+static int scsc_prepare_voltage(struct scsc_device *scsc)
+{
+	struct device_node *np;
+	int ret;
+
+	if (scsc->voltage_request_attempted)
+		return -EALREADY;
+
+	if (!scsc->acpm) {
+		np = of_find_compatible_node(NULL, NULL,
+					     "samsung,exynos7885-acpm-ipc");
+		if (!np)
+			return -ENODEV;
+		scsc->acpm = devm_acpm_get_by_node(scsc->dev, np);
+		of_node_put(np);
+		if (IS_ERR(scsc->acpm)) {
+			ret = PTR_ERR(scsc->acpm);
+			scsc->acpm = NULL;
+			return ret;
+		}
+	}
+
+	if (!scsc->acpm->ops.dvfs_ops.set_wlbt_flag)
+		return -EOPNOTSUPP;
+
+	/* A failed transfer may have left a request queued; never retry it here. */
+	scsc->voltage_request_attempted = true;
+	ret = scsc->acpm->ops.dvfs_ops.set_wlbt_flag(scsc->acpm);
+	scsc->voltage_prepared = !ret;
+	return ret;
+}
+
+static ssize_t prepare_voltage_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	ssize_t len;
+
+	mutex_lock(&scsc->lock);
+	len = sysfs_emit(buf, "attempted=%u prepared=%u\n",
+			 scsc->voltage_request_attempted,
+			 scsc->voltage_prepared);
+	mutex_unlock(&scsc->lock);
+
+	return len;
+}
+
+static ssize_t prepare_voltage_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	int ret;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+
+	mutex_lock(&scsc->lock);
+	ret = scsc_prepare_voltage(scsc);
+	mutex_unlock(&scsc->lock);
+	if (ret)
+		return ret;
+
+	dev_info(dev, "ACPM WLBT voltage preparation completed\n");
+	return count;
+}
+static DEVICE_ATTR_ADMIN_RW(prepare_voltage);
 
 static u32 scsc_mif_get_pending(void *context)
 {
@@ -634,10 +708,12 @@ static ssize_t firmware_status_show(struct device *dev,
 		len = sysfs_emit(buf, "unchecked\n");
 	else
 		len = sysfs_emit(buf,
-				 "result=%d runtime=%u entry=0x%x staged=%u memory_ready=%u config_ready=%u config_offset=0x%x executed=0\n",
+				 "result=%d runtime=%u entry=0x%x staged=%u memory_ready=%u config_ready=%u config_offset=0x%x voltage_attempted=%u voltage_prepared=%u executed=0\n",
 				 scsc->firmware_result, scsc->runtime_length,
 				 scsc->entry_point, scsc->staged, scsc->memory_ready,
-				 scsc->config_ready, scsc->config_offset);
+				 scsc->config_ready, scsc->config_offset,
+				 scsc->voltage_request_attempted,
+				 scsc->voltage_prepared);
 	mutex_unlock(&scsc->lock);
 	return len;
 }
@@ -731,6 +807,7 @@ static struct attribute *scsc_attrs[] = {
 	&dev_attr_stage_firmware.attr,
 	&dev_attr_prepare_memory.attr,
 	&dev_attr_prepare_config.attr,
+	&dev_attr_prepare_voltage.attr,
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
 	&dev_attr_shared_rail_state.attr,
@@ -754,6 +831,7 @@ static int scsc_probe(struct platform_device *pdev)
 	if (!scsc)
 		return -ENOMEM;
 	mutex_init(&scsc->lock);
+	scsc->dev = dev;
 	spin_lock_init(&scsc->mif_reg_lock);
 	scsc->mbox_irq = platform_get_irq_byname(pdev, "mbox");
 	if (scsc->mbox_irq < 0)

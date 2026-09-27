@@ -49,6 +49,15 @@ path; it does not validate an interrupt from powered WLBT or implement the
 SCSC host transport. Logs are under
 `wifi-iterations/045-r17-inactive-irq/`.
 
+Iteration 047 routes the previously verified ACPM WLBT flag operation through
+the SCSC module's root-only `prepare_voltage` control. ACPM is resolved only
+when explicitly requested; inert probe remains independent of ACPM. The
+current boot returned `attempted=1 prepared=1`, and a second write was rejected
+before transmission. This remains a standalone prerequisite check: WiFi
+firmware was not executed and no WiFi power/reset or CP mailbox registers were
+touched. The temporary SCSC module unloaded cleanly; only `lo` and `usb0`
+remain. Artifacts are in `wifi-iterations/047-r17-acpm-voltage/`.
+
 ## Safe diagnostic and latest reboot (2026-09-26)
 
 An attempted wildcard read of the complete regmap debugfs `registers` file
