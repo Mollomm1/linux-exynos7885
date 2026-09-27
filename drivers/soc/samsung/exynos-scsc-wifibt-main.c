@@ -265,6 +265,19 @@ static int scsc_shared_set_option(void *context, bool enable)
 				  enable ? SCSC_PMU_SHARED_REG_OPTION_BIT : 0);
 }
 
+static int scsc_shared_get_option(void *context, bool *enabled)
+{
+	struct scsc_device *scsc = context;
+	unsigned int value;
+	int ret;
+
+	ret = regmap_read(scsc->pmu, SCSC_PMU_SHARED_REG_OPTION, &value);
+	if (!ret)
+		*enabled = !!(value & SCSC_PMU_SHARED_REG_OPTION_BIT);
+
+	return ret;
+}
+
 static int scsc_shared_cp_ready(void *context, bool *ready)
 {
 	struct scsc_device *scsc = context;
@@ -281,6 +294,7 @@ static int scsc_shared_cp_ready(void *context, bool *ready)
 
 static const struct scsc_shared_rail_ops scsc_shared_rail_ops = {
 	.set_cp_wakeup = scsc_shared_set_cp_wakeup,
+	.get_option = scsc_shared_get_option,
 	.set_option = scsc_shared_set_option,
 	.cp_ready = scsc_shared_cp_ready,
 };

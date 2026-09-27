@@ -7,6 +7,7 @@
 
 struct scsc_shared_rail_ops {
 	int (*set_cp_wakeup)(void *context, bool enable);
+	int (*get_option)(void *context, bool *enabled);
 	int (*set_option)(void *context, bool enable);
 	int (*cp_ready)(void *context, bool *ready);
 };
@@ -16,6 +17,7 @@ struct scsc_shared_rail {
 	void *context;
 	struct mutex lock;
 	unsigned int users;
+	bool saved_option;
 	bool faulted;
 };
 

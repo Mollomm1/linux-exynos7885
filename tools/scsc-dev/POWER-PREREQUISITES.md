@@ -68,6 +68,18 @@ current boot's `EXT_REGULATOR_SHARED_OPTION=0x6` and CP mailbox state remain
 unresolved. No CP or WiFi PMU write was made. Artifacts are in
 `wifi-iterations/049-r17-shared-rail/`.
 
+Iteration 050 extended the helper to read and restore the preexisting shared
+option bit. This matters because Samsung's `pmucal_lpm_init` writes bit 0 and
+clears bit 2 in `EXT_REGULATOR_SHARED_OPTION`, while the mainline image does
+not run that Samsung PMUCAL init sequence and currently reads `0x6`. The
+helper now leaves an initially-set bit set when its last reference is released;
+it only clears a bit that it observed clear before acquiring the rail. The
+module compiled against the frozen r17 baseline, passed `shared_rail_selftest`
+and `mif_intr_selftest` on the current boot, and unloaded cleanly. This is
+software-only validation: the production CP mailbox and PMU callbacks were
+not invoked, and the source of the early-boot bit state remains unverified.
+Artifacts and logs are in `wifi-iterations/050-r17-rail-preserve/`.
+
 ## Safe diagnostic and latest reboot (2026-09-26)
 
 An attempted wildcard read of the complete regmap debugfs `registers` file
@@ -249,12 +261,12 @@ helper logs when `EXT_REGULATOR_SHARED_STATUS != 0x20001` or `CP_STAT != 0x10`,
 but these comparisons do not abort the operation. Our targeted reading saw the
 rail status match but `CP_STAT == 1`. This is a reference-state discrepancy to
 record, not by itself proof that shared-rail enable cannot work. The CP mailbox
-node is at `0x12080000` in the downstream T510 DT, but it is absent from the
-currently installed mainline T510 DT. Any mainline implementation must add and
-validate that resource before using the CP mailbox, then reproduce and verify
-the sequenced ISSR/PMU operation. Do not touch the mailbox through a hard-coded
-physical address, and do not add an implicit rail operation to probe or module
-removal.
+node is at `0x12080000` in the downstream T510 DT. The installed mainline r17 DT
+now maps it as the named `cp` resource; the SCSC module only maps it and
+reserves its IRQ inactive. No CP mailbox register has been read or written.
+Before using the mailbox, verify the separately gated block is accessible and
+establish the CP state. Do not touch the mailbox through a hard-coded physical
+address, and do not add an implicit rail operation to probe or module removal.
 
 DRAM access requires secure-monitor setup (`0x82000710`, subsystem 0, carveout
 base and size) and PMU memory-window setup. Both have now been performed and
