@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/samsung,exynos7885-abox.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung Exynos7885 ABOX audio processor
+
+maintainers:
+  - Mollomm1 <Mollomm1@users.noreply.github.com>
+
+description: |
+  The Exynos7885 audio processor has control registers, a system register
+  aperture, and local SRAM. The initial driver only validates these resources;
+  it does not access the registers or start firmware.
+
+properties:
+  compatible:
+    const: samsung,exynos7885-abox
+
+  reg:
+    items:
+      - description: ABOX control registers
+      - description: Audio system registers
+      - description: ABOX local SRAM
+
+  reg-names:
+    items:
+      - const: sfr
+      - const: sysreg
+      - const: sram
+
+required:
+  - compatible
+  - reg
+  - reg-names
+
+additionalProperties: false
+
+examples:
+  - |
+    audio-controller@14a50000 {
+        compatible = "samsung,exynos7885-abox";
+        reg = <0x14a50000 0x10000>,
+              <0x14820000 0x10000>,
+              <0x14b00000 0x28000>;
+        reg-names = "sfr", "sysreg", "sram";
+    };
+...
