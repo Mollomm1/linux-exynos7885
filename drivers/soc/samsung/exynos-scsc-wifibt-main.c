@@ -8,6 +8,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/ktime.h>
 #include <linux/mfd/syscon.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -59,6 +60,27 @@
 #define SCSC_MXCONF_STREAM_SIZE	22
 #define SCSC_MIF_NUM_MAILBOXES	8
 #define SCSC_MIF_ISSR_BASE	0x80
+#define SCSC_MIF_INTGR1		0x01c
+#define SCSC_MIF_INTCR0		0x00c
+#define SCSC_MIF_INTMR0		0x010
+#define SCSC_MIF_INTMSR0	0x018
+#define SCSC_MIF_INTCR1		0x020
+#define SCSC_MIF_INTMR1		0x024
+#define SCSC_MIF_INTMSR1	0x02c
+#define SCSC_PMU_WIFI_RESET_SET	BIT(2)
+#define SCSC_PMU_WIFI_RESET_REQ_CLR	BIT(8)
+#define SCSC_PMU_RESET_AHEAD	0x1360
+#define SCSC_PMU_CLEANY_BUS	0x1364
+#define SCSC_PMU_LOGIC_RESET	0x1368
+#define SCSC_PMU_TCXO_GATE	0x136c
+#define SCSC_PMU_WIFI_DISABLE_ISO	0x1370
+#define SCSC_PMU_WIFI_RESET_ISO	0x1374
+#define SCSC_PMU_CENTRAL_SEQ_CONFIG	0x0380
+#define SCSC_PMU_CENTRAL_SEQ_STATUS	0x0384
+#define SCSC_SYS_PWR_CFG	BIT(0)
+#define SCSC_SYS_PWR_CFG_2	(BIT(0) | BIT(1))
+#define SCSC_SYS_PWR_CFG_16	BIT(16)
+#define SCSC_RESET_TIMEOUT_MS	500
 
 struct scsc_stream_config {
 	u32 buffer;
@@ -108,12 +130,21 @@ struct scsc_device {
 	resource_size_t r4_reg_size;
 	resource_size_t m4_reg_size;
 	int mbox_irq;
+	int wdog_irq;
 	bool checked;
 	bool staged;
 	bool memory_ready;
 	bool config_ready;
 	bool voltage_request_attempted;
 	bool voltage_prepared;
+	bool start_armed;
+	bool start_in_progress;
+	bool mif_mapped;
+	bool wlbt_may_be_running;
+	bool stop_failed;
+	bool mbox_irq_enabled;
+	bool wdog_irq_enabled;
+	bool module_pinned;
 	u32 config_offset;
 	int firmware_result;
 	u32 runtime_length;
@@ -125,9 +156,103 @@ static DEFINE_MUTEX(scsc_mif_registry_lock);
 static struct scsc_device *scsc_mif_device;
 static struct scsc_mif_abs_driver *scsc_mif_client;
 
+static int scsc_prepare_voltage(struct scsc_device *scsc);
+
+static void scsc_unmap_reserved_memory(void *data)
+{
+	struct scsc_device *scsc = data;
+
+	if (scsc->memory) {
+		vunmap((void __force *)scsc->memory);
+		scsc->memory = NULL;
+	}
+}
+
+static int scsc_map_reserved_memory(struct scsc_device *scsc)
+{
+	struct page **pages;
+	unsigned long first_pfn;
+	size_t page_count, i;
+	void *memory;
+
+	if (!PAGE_ALIGNED(scsc->mem_start) ||
+	    !PAGE_ALIGNED(scsc->mem_size) || !scsc->mem_size)
+		return -EINVAL;
+
+	page_count = scsc->mem_size >> PAGE_SHIFT;
+	first_pfn = PHYS_PFN(scsc->mem_start);
+	pages = kcalloc(page_count, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
+
+	for (i = 0; i < page_count; i++) {
+		if (!pfn_valid(first_pfn + i)) {
+			kfree(pages);
+			return -EINVAL;
+		}
+		pages[i] = pfn_to_page(first_pfn + i);
+	}
+
+	/* Match downstream's write-combine vmap of the reserved DRAM pages. */
+	memory = vmap(pages, page_count, VM_MAP,
+		      pgprot_writecombine(PAGE_KERNEL));
+	kfree(pages);
+	if (!memory)
+		return -ENOMEM;
+
+	scsc->memory = (void __iomem __force *)memory;
+	return devm_add_action_or_reset(scsc->dev,
+				       scsc_unmap_reserved_memory, scsc);
+}
+
 static struct scsc_device *scsc_from_mif(struct scsc_mif_abs *interface)
 {
 	return container_of(interface, struct scsc_device, mif_abs);
+}
+
+static irqreturn_t scsc_mbox_irq(int irq, void *data)
+{
+	struct scsc_device *scsc = data;
+	void (*handler)(int irq, void *data);
+	void *handler_data;
+
+	if (!READ_ONCE(scsc->mif_mapped))
+		return IRQ_NONE;
+	handler = READ_ONCE(scsc->mif_irq_handler);
+	handler_data = READ_ONCE(scsc->mif_irq_data);
+	if (handler)
+		handler(irq, handler_data);
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t scsc_wdog_irq_thread(int irq, void *data)
+{
+	struct scsc_device *scsc = data;
+	void (*handler)(int irq, void *data);
+	void *handler_data;
+	int ret;
+
+	if (!READ_ONCE(scsc->mif_mapped))
+		return IRQ_NONE;
+	handler = READ_ONCE(scsc->mif_reset_handler);
+	handler_data = READ_ONCE(scsc->mif_reset_data);
+	if (handler)
+		handler(irq, handler_data);
+	else {
+		dev_warn(scsc->dev, "unhandled WLBT watchdog/reset-request IRQ\n");
+		disable_irq_nosync(scsc->wdog_irq);
+		WRITE_ONCE(scsc->wdog_irq_enabled, false);
+	}
+
+	ret = regmap_update_bits(scsc->pmu, SCSC_PMU_WIFI_CTRL_NS,
+				 SCSC_PMU_WIFI_RESET_REQ_CLR,
+				 SCSC_PMU_WIFI_RESET_REQ_CLR);
+	if (ret)
+		dev_err(scsc->dev, "failed to acknowledge WLBT reset request: %d\n",
+			ret);
+
+	return IRQ_HANDLED;
 }
 
 static void scsc_mif_destroy(struct scsc_mif_abs *interface)
@@ -140,51 +265,364 @@ static char *scsc_mif_get_uid(struct scsc_mif_abs *interface)
 	return "gta3xlwifi";
 }
 
+static int scsc_pmu_update(struct scsc_device *scsc, u32 offset, u32 mask,
+			   u32 value)
+{
+	int ret;
+
+	ret = regmap_update_bits(scsc->pmu, offset, mask, value);
+	if (ret)
+		dev_err(scsc->dev, "PMU update 0x%x mask 0x%x failed: %d\n",
+			offset, mask, ret);
+
+	return ret;
+}
+
+static int scsc_mif_stop_locked(struct scsc_device *scsc)
+{
+	unsigned long timeout = jiffies + msecs_to_jiffies(SCSC_RESET_TIMEOUT_MS);
+	unsigned int value;
+	int ret;
+
+	if (!scsc->wlbt_may_be_running)
+		return 0;
+
+	/* Match the downstream Exynos7885 bounded reset/quiesce sequence. */
+	ret = scsc_pmu_update(scsc, SCSC_PMU_RESET_AHEAD,
+			      SCSC_SYS_PWR_CFG_2, 0);
+	if (ret)
+		goto fault;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_CLEANY_BUS,
+			      SCSC_SYS_PWR_CFG, 0);
+	if (ret)
+		goto fault;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_LOGIC_RESET,
+			      SCSC_SYS_PWR_CFG_2, 0);
+	if (ret)
+		goto fault;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_TCXO_GATE,
+			      SCSC_SYS_PWR_CFG, 0);
+	if (ret)
+		goto fault;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_DISABLE_ISO,
+			      SCSC_SYS_PWR_CFG, SCSC_SYS_PWR_CFG);
+	if (ret)
+		goto fault;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_RESET_ISO,
+			      SCSC_SYS_PWR_CFG, 0);
+	if (ret)
+		goto fault;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_CENTRAL_SEQ_CONFIG,
+			      SCSC_SYS_PWR_CFG_16, 0);
+	if (ret)
+		goto fault;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_CTRL_NS,
+			      SCSC_PMU_WIFI_RESET_SET,
+			      SCSC_PMU_WIFI_RESET_SET);
+	if (ret)
+		goto fault;
+
+	do {
+		ret = regmap_read(scsc->pmu, SCSC_PMU_CENTRAL_SEQ_STATUS,
+				  &value);
+		if (ret)
+			goto fault;
+		if (((value >> 16) & 0xff) == 0x80)
+			break;
+		usleep_range(1000, 2000);
+	} while (time_before(jiffies, timeout));
+
+	if (((value >> 16) & 0xff) != 0x80) {
+		ret = -ETIMEDOUT;
+		goto fault;
+	}
+	if (scsc->shared_rail.users) {
+		ret = scsc_shared_rail_put(&scsc->shared_rail);
+		if (ret)
+			goto fault;
+	}
+
+	/* Quiescence is acknowledged; only now close WLBT's DRAM windows. */
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0, 0);
+	if (ret)
+		goto fault;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_BASE0, 0);
+	if (ret)
+		goto fault;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0 + 8, 0);
+	if (ret)
+		goto fault;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_BASE0 + 8, 0);
+	if (ret)
+		goto fault;
+
+	scsc->wlbt_may_be_running = false;
+	scsc->stop_failed = false;
+	return 0;
+
+fault:
+	scsc->stop_failed = true;
+	dev_err(scsc->dev,
+		"WLBT quiesce failed (%d); retaining MIF, IRQ and module ownership\n",
+		ret);
+	return ret;
+}
+
 static int scsc_mif_reset(struct scsc_mif_abs *interface, bool reset)
 {
 	struct scsc_device *scsc = scsc_from_mif(interface);
+	bool need_delay = false;
+	unsigned int base, size;
+	int ret;
 
-	dev_err(scsc->dev, "MIF reset rejected: start/stop lifecycle is not enabled\n");
-	return -EOPNOTSUPP;
+	mutex_lock(&scsc->lock);
+	if (reset) {
+		ret = scsc_mif_stop_locked(scsc);
+		goto out_unlock;
+	}
+	if (!scsc->mif_mapped || scsc->wlbt_may_be_running ||
+	    !scsc->memory_ready || !scsc->config_ready ||
+	    !scsc->start_in_progress) {
+		ret = -EHOSTDOWN;
+		goto out_unlock;
+	}
+	base = (scsc->mem_start & 0xfffffc000ULL) >> 12;
+	size = scsc->mem_size >> 12;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0, size);
+	if (ret)
+		goto out_unlock;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_BASE0, base);
+	if (ret)
+		goto out_unlock;
+	/* No BT ABOX aperture is reserved by this board DT. */
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_SIZE0 + 8, 0);
+	if (ret)
+		goto out_unlock;
+	ret = regmap_write(scsc->pmu, SCSC_PMU_BAAW_BASE0 + 8, 0);
+	if (ret)
+		goto out_unlock;
+
+	/* Match downstream order: map DRAM, prepare voltage, then release WLBT. */
+	ret = scsc_prepare_voltage(scsc);
+	if (ret)
+		goto out_unlock;
+	ret = scsc_shared_rail_get(&scsc->shared_rail, &need_delay);
+	if (ret) {
+		if (scsc->shared_rail.faulted)
+			scsc->stop_failed = true;
+		goto out_unlock;
+	}
+
+	/* A failed write may have partially changed power state: require stop. */
+	scsc->wlbt_may_be_running = true;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_CTRL_NS,
+			      SCSC_WIFI_PWRON, SCSC_WIFI_PWRON);
+	if (ret)
+		goto out_put_rail;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_CTRL_NS,
+			      SCSC_PMU_WIFI_RESET_SET, 0);
+	if (ret)
+		goto out_put_rail;
+	ret = scsc_pmu_update(scsc, SCSC_PMU_WIFI_CTRL_S,
+			      SCSC_WIFI_START, SCSC_WIFI_START);
+
+out_put_rail:
+	{
+		int rail_ret = scsc_shared_rail_put(&scsc->shared_rail);
+
+		if (rail_ret) {
+			scsc->stop_failed = true;
+			if (!ret)
+				ret = rail_ret;
+		}
+	}
+out_unlock:
+	mutex_unlock(&scsc->lock);
+	return ret;
 }
 
-/* A NULL map makes mxman_start() stop before firmware or mailbox activity. */
 static void *scsc_mif_map(struct scsc_mif_abs *interface, size_t *allocated)
 {
+	struct scsc_device *scsc = scsc_from_mif(interface);
+	unsigned int i;
+	int ret = 0;
+
 	if (allocated)
 		*allocated = 0;
+
+	mutex_lock(&scsc->lock);
+	if (!scsc->start_armed || scsc->mif_mapped || scsc->stop_failed ||
+	    !scsc->staged || !scsc->memory_ready || !scsc->config_ready ||
+	    !scsc->memory) {
+		ret = -EHOSTDOWN;
+		goto fail;
+	}
+	if (!try_module_get(THIS_MODULE)) {
+		ret = -ENODEV;
+		goto fail;
+	}
+	scsc->module_pinned = true;
+	scsc->start_armed = false;
+
+	/* Match platform_mif_map(): clear mailbox state before registering IRQs. */
+	for (i = 0; i < SCSC_MIF_NUM_MAILBOXES; i++) {
+		writel(0, scsc->r4_mailbox[i]);
+		writel(0, scsc->m4_mailbox[i]);
+	}
+	writel(0xffff0000, scsc->r4_regs + SCSC_MIF_INTMR0);
+	writel(0x0000ffff, scsc->r4_regs + SCSC_MIF_INTMR1);
+	writel(0x0000ffff, scsc->m4_regs + SCSC_MIF_INTMR1);
+	writel(0xffff0000, scsc->r4_regs + SCSC_MIF_INTCR0);
+	writel(0x0000ffff, scsc->r4_regs + SCSC_MIF_INTCR1);
+	writel(0x0000ffff, scsc->m4_regs + SCSC_MIF_INTCR1);
+	ret = regmap_write(scsc->pmu, 0x7330, 0);
+	if (ret)
+		goto fail_pinned;
+
+	scsc_mif_intr_set_active(&scsc->mif_intr, true);
+	scsc->mif_mapped = true;
+	scsc->start_in_progress = true;
+	enable_irq(scsc->mbox_irq);
+	scsc->mbox_irq_enabled = true;
+	enable_irq(scsc->wdog_irq);
+	scsc->wdog_irq_enabled = true;
+	if (allocated)
+		*allocated = scsc->mem_size;
+	mutex_unlock(&scsc->lock);
+	return (void __force *)scsc->memory;
+
+fail_pinned:
+	writel(0xffff0000, scsc->r4_regs + SCSC_MIF_INTMR0);
+	writel(0x0000ffff, scsc->r4_regs + SCSC_MIF_INTMR1);
+	writel(0x0000ffff, scsc->m4_regs + SCSC_MIF_INTMR1);
+	scsc->module_pinned = false;
+	module_put(THIS_MODULE);
+fail:
+	dev_err(scsc->dev, "MIF map refused/failed: %d\n", ret);
+	mutex_unlock(&scsc->lock);
 	return NULL;
 }
 
 static void scsc_mif_unmap(struct scsc_mif_abs *interface, void *mem)
 {
-	/* map() never succeeds until the active lifecycle is implemented. */
+	struct scsc_device *scsc = scsc_from_mif(interface);
+	bool put_module = false;
+
+	mutex_lock(&scsc->lock);
+	if (!scsc->mif_mapped || scsc->stop_failed) {
+		mutex_unlock(&scsc->lock);
+		return;
+	}
+	if (scsc->wlbt_may_be_running) {
+		dev_err(scsc->dev, "refusing MIF unmap before WLBT quiescence\n");
+		scsc->stop_failed = true;
+		mutex_unlock(&scsc->lock);
+		return;
+	}
+
+	writel(0xffff0000, scsc->r4_regs + SCSC_MIF_INTMR0);
+	writel(0x0000ffff, scsc->r4_regs + SCSC_MIF_INTMR1);
+	writel(0x0000ffff, scsc->m4_regs + SCSC_MIF_INTMR1);
+	scsc_mif_intr_set_active(&scsc->mif_intr, false);
+	if (scsc->mbox_irq_enabled) {
+		disable_irq(scsc->mbox_irq);
+		synchronize_irq(scsc->mbox_irq);
+		scsc->mbox_irq_enabled = false;
+	}
+	if (scsc->wdog_irq_enabled) {
+		disable_irq(scsc->wdog_irq);
+		synchronize_irq(scsc->wdog_irq);
+		scsc->wdog_irq_enabled = false;
+	}
+	scsc->mif_mapped = false;
+	scsc->start_in_progress = false;
+	if (scsc->module_pinned) {
+		scsc->module_pinned = false;
+		put_module = true;
+	}
+	mutex_unlock(&scsc->lock);
+	if (put_module)
+		module_put(THIS_MODULE);
 }
 
 static u32 *scsc_mif_get_mbox_ptr(struct scsc_mif_abs *interface, u32 index)
 {
-	return NULL;
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	if (!READ_ONCE(scsc->mif_mapped) || index >= SCSC_MIF_NUM_MAILBOXES)
+		return NULL;
+	return (u32 __force *)READ_ONCE(scsc->r4_mailbox[index]);
 }
 
 static u32 scsc_mif_irq_mask_status_get(struct scsc_mif_abs *interface)
 {
-	return 0;
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	if (!READ_ONCE(scsc->mif_mapped))
+		return 0;
+	return readl(scsc->r4_regs + SCSC_MIF_INTMR0) >> 16;
 }
 
 static u32 scsc_mif_irq_get(struct scsc_mif_abs *interface)
 {
-	return 0;
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	if (!READ_ONCE(scsc->mif_mapped))
+		return 0;
+	return readl(scsc->r4_regs + SCSC_MIF_INTMSR0) >> 16;
 }
 
-static void scsc_mif_irq_noop(struct scsc_mif_abs *interface, int bit)
+static void scsc_mif_irq_bit_clear(struct scsc_mif_abs *interface, int bit)
 {
-	/* No interrupt register is touched while WLBT is inactive. */
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	if (READ_ONCE(scsc->mif_mapped) && bit >= 0 && bit < 16)
+		writel(BIT(bit + 16), scsc->r4_regs + SCSC_MIF_INTCR0);
+}
+
+static void scsc_mif_irq_bit_mask(struct scsc_mif_abs *interface, int bit)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+	unsigned long flags;
+	u32 value;
+
+	if (!READ_ONCE(scsc->mif_mapped) || bit < 0 || bit >= 16)
+		return;
+	spin_lock_irqsave(&scsc->mif_reg_lock, flags);
+	value = readl(scsc->r4_regs + SCSC_MIF_INTMR0);
+	writel(value | BIT(bit + 16), scsc->r4_regs + SCSC_MIF_INTMR0);
+	spin_unlock_irqrestore(&scsc->mif_reg_lock, flags);
+}
+
+static void scsc_mif_irq_bit_unmask(struct scsc_mif_abs *interface, int bit)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+	unsigned long flags;
+	u32 value;
+
+	if (!READ_ONCE(scsc->mif_mapped) || bit < 0 || bit >= 16)
+		return;
+	spin_lock_irqsave(&scsc->mif_reg_lock, flags);
+	value = readl(scsc->r4_regs + SCSC_MIF_INTMR0);
+	writel(value & ~BIT(bit + 16), scsc->r4_regs + SCSC_MIF_INTMR0);
+	spin_unlock_irqrestore(&scsc->mif_reg_lock, flags);
 }
 
 static void scsc_mif_irq_bit_set(struct scsc_mif_abs *interface, int bit,
 				 enum scsc_mif_abs_target target)
 {
-	/* map() fails closed, so no client may raise a firmware interrupt. */
+	struct scsc_device *scsc = scsc_from_mif(interface);
+	void __iomem *regs;
+
+	if (!READ_ONCE(scsc->mif_mapped) || bit < 0 || bit >= 16)
+		return;
+	if (target == SCSC_MIF_ABS_TARGET_R4)
+		regs = scsc->r4_regs;
+	else if (target == SCSC_MIF_ABS_TARGET_M4)
+		regs = scsc->m4_regs;
+	else
+		return;
+	writel(BIT(bit), regs + SCSC_MIF_INTGR1);
 }
 
 static void scsc_mif_irq_reg_handler(struct scsc_mif_abs *interface,
@@ -202,6 +640,8 @@ static void scsc_mif_irq_unreg_handler(struct scsc_mif_abs *interface)
 	struct scsc_device *scsc = scsc_from_mif(interface);
 
 	WRITE_ONCE(scsc->mif_irq_handler, NULL);
+	if (scsc->mbox_irq_enabled)
+		synchronize_irq(scsc->mbox_irq);
 	WRITE_ONCE(scsc->mif_irq_data, NULL);
 }
 
@@ -221,6 +661,10 @@ static void scsc_mif_reg_reset_handler(struct scsc_mif_abs *interface,
 
 	WRITE_ONCE(scsc->mif_reset_data, data);
 	WRITE_ONCE(scsc->mif_reset_handler, handler);
+	if (handler && scsc->mif_mapped && !scsc->wdog_irq_enabled) {
+		enable_irq(scsc->wdog_irq);
+		WRITE_ONCE(scsc->wdog_irq_enabled, true);
+	}
 }
 
 static void scsc_mif_unreg_reset_handler(struct scsc_mif_abs *interface)
@@ -228,6 +672,8 @@ static void scsc_mif_unreg_reset_handler(struct scsc_mif_abs *interface)
 	struct scsc_device *scsc = scsc_from_mif(interface);
 
 	WRITE_ONCE(scsc->mif_reset_handler, NULL);
+	if (scsc->wdog_irq_enabled)
+		synchronize_irq(scsc->wdog_irq);
 	WRITE_ONCE(scsc->mif_reset_data, NULL);
 }
 
@@ -255,18 +701,51 @@ static void scsc_mif_suspend_unreg_handler(struct scsc_mif_abs *interface)
 static void *scsc_mif_get_ram_ptr(struct scsc_mif_abs *interface,
 				  scsc_mifram_ref ref)
 {
-	return NULL;
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	if (!READ_ONCE(scsc->mif_mapped) || ref < 0 ||
+	    (size_t)ref >= scsc->mem_size)
+		return NULL;
+	return (void __force *)(scsc->memory + ref);
 }
 
 static int scsc_mif_get_ram_ref(struct scsc_mif_abs *interface, void *ptr,
 				scsc_mifram_ref *ref)
 {
-	return -EHOSTDOWN;
+	struct scsc_device *scsc = scsc_from_mif(interface);
+	uintptr_t start, end, address;
+
+	if (!ref || !ptr || !READ_ONCE(scsc->mif_mapped))
+		return -EHOSTDOWN;
+	start = (uintptr_t)scsc->memory;
+	address = (uintptr_t)ptr;
+	if (check_add_overflow(start, scsc->mem_size, &end) ||
+	    address < start || address >= end || address - start > S32_MAX)
+		return -ERANGE;
+	*ref = (scsc_mifram_ref)(address - start);
+	return 0;
 }
 
 static uintptr_t scsc_mif_get_ram_pfn(struct scsc_mif_abs *interface)
 {
-	return 0;
+	struct scsc_device *scsc = scsc_from_mif(interface);
+
+	if (!READ_ONCE(scsc->mif_mapped) || !scsc->memory)
+		return 0;
+	return vmalloc_to_pfn((void __force *)scsc->memory);
+}
+
+static void *scsc_mif_get_ram_phy_ptr(struct scsc_mif_abs *interface,
+				      scsc_mifram_ref ref)
+{
+	struct scsc_device *scsc = scsc_from_mif(interface);
+	phys_addr_t address;
+
+	if (!READ_ONCE(scsc->mif_mapped) || ref < 0 ||
+	    (size_t)ref >= scsc->mem_size ||
+	    check_add_overflow(scsc->mem_start, (phys_addr_t)ref, &address))
+		return NULL;
+	return (void *)(uintptr_t)address;
 }
 
 static struct device *scsc_mif_get_device(struct scsc_mif_abs *interface)
@@ -290,9 +769,9 @@ static const struct scsc_mif_abs scsc_mif_template = {
 	.get_mbox_ptr = scsc_mif_get_mbox_ptr,
 	.irq_bit_mask_status_get = scsc_mif_irq_mask_status_get,
 	.irq_get = scsc_mif_irq_get,
-	.irq_bit_clear = scsc_mif_irq_noop,
-	.irq_bit_mask = scsc_mif_irq_noop,
-	.irq_bit_unmask = scsc_mif_irq_noop,
+	.irq_bit_clear = scsc_mif_irq_bit_clear,
+	.irq_bit_mask = scsc_mif_irq_bit_mask,
+	.irq_bit_unmask = scsc_mif_irq_bit_unmask,
 	.irq_bit_set = scsc_mif_irq_bit_set,
 	.irq_reg_handler = scsc_mif_irq_reg_handler,
 	.irq_unreg_handler = scsc_mif_irq_unreg_handler,
@@ -304,7 +783,7 @@ static const struct scsc_mif_abs scsc_mif_template = {
 	.get_mifram_ptr = scsc_mif_get_ram_ptr,
 	.get_mifram_ref = scsc_mif_get_ram_ref,
 	.get_mifram_pfn = scsc_mif_get_ram_pfn,
-	.get_mifram_phy_ptr = scsc_mif_get_ram_ptr,
+	.get_mifram_phy_ptr = scsc_mif_get_ram_phy_ptr,
 	.get_mif_device = scsc_mif_get_device,
 	.mif_dump_registers = scsc_mif_noop_interface,
 	.mif_cleanup = scsc_mif_noop_interface,
@@ -377,7 +856,7 @@ static int scsc_prepare_voltage(struct scsc_device *scsc)
 	struct device_node *np;
 	int ret;
 
-	if (scsc->voltage_request_attempted)
+	if (scsc->voltage_request_attempted && !scsc->voltage_prepared)
 		return -EALREADY;
 
 	if (!scsc->acpm) {
@@ -561,7 +1040,7 @@ static const struct scsc_shared_rail_ops scsc_shared_rail_ops = {
 
 static bool enable;
 module_param(enable, bool, 0444);
-MODULE_PARM_DESC(enable, "Explicitly enable binding (never starts firmware)");
+	MODULE_PARM_DESC(enable, "Explicitly enable binding; firmware start remains one-shot gated");
 
 /* Offsets and CRC coverage are documented in downstream fwhdr/fwimage.c. */
 static int scsc_check_firmware(struct scsc_device *scsc,
@@ -1035,12 +1514,13 @@ static ssize_t firmware_status_show(struct device *dev,
 		len = sysfs_emit(buf, "unchecked\n");
 	else
 		len = sysfs_emit(buf,
-				 "result=%d runtime=%u entry=0x%x staged=%u memory_ready=%u config_ready=%u config_offset=0x%x voltage_attempted=%u voltage_prepared=%u executed=0\n",
+				 "result=%d runtime=%u entry=0x%x staged=%u memory_ready=%u config_ready=%u config_offset=0x%x voltage_attempted=%u voltage_prepared=%u executed=%u\n",
 				 scsc->firmware_result, scsc->runtime_length,
 				 scsc->entry_point, scsc->staged, scsc->memory_ready,
 				 scsc->config_ready, scsc->config_offset,
 				 scsc->voltage_request_attempted,
-				 scsc->voltage_prepared);
+				 scsc->voltage_prepared,
+				 scsc->wlbt_may_be_running);
 	mutex_unlock(&scsc->lock);
 	return len;
 }
@@ -1087,12 +1567,31 @@ static ssize_t shared_rail_state_show(struct device *dev,
 		return ret;
 
 	return sysfs_emit(buf,
-			  "cp_mailbox=%s cp_status=0x%x cp_status_matches_reference=%u shared_status=0x%x shared_status_matches_reference=%u firmware_start=disabled\n",
+			  "cp_mailbox=%s cp_status=0x%x cp_status_matches_reference=%u shared_status=0x%x shared_status_matches_reference=%u\n",
 			  scsc->cp_mailbox ? "mapped" : "missing", cp_status,
 			  cp_status == SCSC_PMU_CP_REFERENCE, shared_status,
 			  shared_status == SCSC_PMU_SHARED_REG_REFERENCE);
 }
 static DEVICE_ATTR_ADMIN_RO(shared_rail_state);
+
+static ssize_t cp_mailbox_state_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	u32 issr2, issr3;
+
+	if (!scsc->cp_mailbox)
+		return -ENODEV;
+
+	/* Explicit, bounded read of only the two downstream handshake ISSRs. */
+	issr2 = readl(scsc->cp_mailbox + SCSC_CP_ISSR2_OFFSET);
+	issr3 = readl(scsc->cp_mailbox + SCSC_CP_ISSR3_OFFSET);
+
+	return sysfs_emit(buf, "issr2=0x%08x wakeup=%u issr3=0x%08x ready=%u\n",
+			  issr2, !!(issr2 & SCSC_CP_WAKEUP_BIT), issr3,
+			  !!(issr3 & GENMASK(4, 1)));
+}
+static DEVICE_ATTR_ADMIN_RO(cp_mailbox_state);
 
 static ssize_t shared_rail_selftest_show(struct device *dev,
 					 struct device_attribute *attr,
@@ -1122,9 +1621,54 @@ static DEVICE_ATTR_ADMIN_RO(mif_intr_selftest);
 static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
-	return sysfs_emit(buf, "inert\n");
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	const char *state;
+
+	mutex_lock(&scsc->lock);
+	if (scsc->stop_failed)
+		state = "stop-failed";
+	else if (scsc->wlbt_may_be_running)
+		state = "running-or-starting";
+	else if (scsc->mif_mapped)
+		state = "mapped";
+	else if (scsc->start_armed)
+		state = "armed";
+	else
+		state = "inert";
+	mutex_unlock(&scsc->lock);
+
+	return sysfs_emit(buf, "%s\n", state);
 }
 static DEVICE_ATTR_RO(state);
+
+static ssize_t arm_start_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct scsc_device *scsc = dev_get_drvdata(dev);
+	int ret = 0;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+
+	mutex_lock(&scsc->lock);
+	if (scsc->stop_failed || scsc->start_armed || scsc->mif_mapped ||
+	    scsc->wlbt_may_be_running) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	if (!scsc->staged || !scsc->memory_ready || !scsc->config_ready) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+	scsc->start_armed = true;
+	dev_warn(dev,
+		 "one-shot WLBT start armed; next downstream service open will power firmware\n");
+out_unlock:
+	mutex_unlock(&scsc->lock);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(arm_start);
 
 /* Build an ISSR pointer without accessing the powered-down mailbox bank. */
 static void __iomem *scsc_mailbox_slot(void __iomem *base,
@@ -1148,9 +1692,11 @@ static struct attribute *scsc_attrs[] = {
 	&dev_attr_prepare_memory.attr,
 	&dev_attr_prepare_config.attr,
 	&dev_attr_prepare_voltage.attr,
+	&dev_attr_arm_start.attr,
 	&dev_attr_firmware_status.attr,
 	&dev_attr_pmu_state.attr,
 	&dev_attr_shared_rail_state.attr,
+	&dev_attr_cp_mailbox_state.attr,
 	&dev_attr_shared_rail_selftest.attr,
 	&dev_attr_mif_intr_selftest.attr,
 	NULL,
@@ -1179,6 +1725,10 @@ static int scsc_probe(struct platform_device *pdev)
 	if (scsc->mbox_irq < 0)
 		return dev_err_probe(dev, scsc->mbox_irq,
 				     "failed to get mailbox IRQ\n");
+	scsc->wdog_irq = platform_get_irq_byname(pdev, "watchdog");
+	if (scsc->wdog_irq < 0)
+		return dev_err_probe(dev, scsc->wdog_irq,
+				     "failed to get watchdog IRQ\n");
 	scsc->pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
 						  "samsung,pmu-syscon");
 	if (IS_ERR(scsc->pmu))
@@ -1207,11 +1757,18 @@ static int scsc_probe(struct platform_device *pdev)
 	ret = scsc_mif_intr_init(&scsc->mif_intr, &scsc_mif_intr_ops, scsc);
 	if (ret)
 		return ret;
-	ret = devm_request_irq(dev, scsc->mbox_irq, scsc_mif_intr_irq,
-			       IRQF_NO_AUTOEN, dev_name(dev), &scsc->mif_intr);
+	ret = devm_request_irq(dev, scsc->mbox_irq, scsc_mbox_irq,
+			       IRQF_NO_AUTOEN, dev_name(dev), scsc);
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "failed to reserve inactive mailbox IRQ\n");
+	ret = devm_request_threaded_irq(dev, scsc->wdog_irq, NULL,
+					scsc_wdog_irq_thread,
+					IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					dev_name(dev), scsc);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to reserve inactive watchdog IRQ\n");
 	for (i = 0; i < SCSC_MIF_NUM_MAILBOXES; i++) {
 		scsc->r4_mailbox[i] = scsc_mailbox_slot(scsc->r4_regs,
 						       scsc->r4_reg_size, i);
@@ -1221,7 +1778,7 @@ static int scsc_probe(struct platform_device *pdev)
 			return -EINVAL;
 	}
 
-	/* Optional until the board DT adds the separately gated CP mailbox. */
+	/* Required for an active Exynos7885 shared-regulator handshake. */
 	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "cp")) {
 		cp_regs = *platform_get_resource_byname(pdev, IORESOURCE_MEM,
 							"cp");
@@ -1233,6 +1790,9 @@ static int scsc_probe(struct platform_device *pdev)
 		if (IS_ERR(scsc->cp_mailbox))
 			return PTR_ERR(scsc->cp_mailbox);
 	}
+	if (!scsc->cp_mailbox)
+		return dev_err_probe(dev, -EINVAL,
+				     "missing CP mailbox needed by WLBT rail sequence\n");
 	ret = scsc_shared_rail_init(&scsc->shared_rail,
 				   &scsc_shared_rail_ops, scsc);
 	if (ret)
@@ -1252,15 +1812,16 @@ static int scsc_probe(struct platform_device *pdev)
 		return -EBUSY;
 	scsc->mem_size = resource_size(&mem);
 	scsc->mem_start = mem.start;
-	scsc->memory = devm_ioremap_wc(dev, mem.start, scsc->mem_size);
-	if (!scsc->memory)
-		return -ENOMEM;
+	ret = scsc_map_reserved_memory(scsc);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to map reserved WLBT DRAM\n");
 
 	/* Bind only; firmware staging is a separate explicit sysfs operation. */
 	dev_info(dev,
-		 "inert: reserved %pr, mapped %u R4/M4 slots and reserved inactive mailbox IRQ %d in %lld us; no MMIO access or firmware execution\n",
+		 "inert: reserved %pr, mapped %u R4/M4 slots and reserved inactive MBOX/watchdog IRQs %d/%d in %lld us; no MMIO access or firmware execution\n",
 		 &mem, SCSC_MIF_NUM_MAILBOXES,
-		 scsc->mbox_irq,
+		 scsc->mbox_irq, scsc->wdog_irq,
 		 ktime_us_delta(ktime_get(), start));
 	scsc_mif_notify_probe(scsc);
 	return 0;
