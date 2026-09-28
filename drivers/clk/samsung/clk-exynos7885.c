@@ -19,11 +19,13 @@
 #include "clk-exynos-arm64.h"
 
 /* NOTE: Must be equal to the last clock ID increased by one */
-#define CLKS_NR_TOP			(CLK_MOUT_SHARED1_PLL + 1)
+#define CLKS_NR_TOP			(CLK_DOUT_DISPAUD_CPU + 1)
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
-#define CLKS_NR_DISPAUD			(CLK_GOUT_UAIF3_SYNC + 1)
+#define CLKS_NR_DISPAUD			(CLK_DOUT_AUD_CPU_ACLK + 1)
+
+static bool exynos7885_enable_dispaud;
 
 /* ---- CMU_TOP ------------------------------------------------------------- */
 
@@ -35,6 +37,7 @@
 #define CLK_CON_MUX_MUX_CLKCMU_CORE_BUS		0x1014
 #define CLK_CON_MUX_MUX_CLKCMU_CORE_CCI		0x1018
 #define CLK_CON_MUX_MUX_CLKCMU_CORE_G3D		0x101c
+#define CLK_CON_MUX_MUX_CLKCMU_DISPAUD_CPU	0x1024
 #define CLK_CON_MUX_MUX_CLKCMU_FSYS_BUS		0x1028
 #define CLK_CON_MUX_MUX_CLKCMU_FSYS_MMC_CARD	0x102c
 #define CLK_CON_MUX_MUX_CLKCMU_FSYS_MMC_EMBD	0x1030
@@ -52,6 +55,7 @@
 #define CLK_CON_DIV_CLKCMU_CORE_BUS		0x181c
 #define CLK_CON_DIV_CLKCMU_CORE_CCI		0x1820
 #define CLK_CON_DIV_CLKCMU_CORE_G3D		0x1824
+#define CLK_CON_DIV_CLKCMU_DISPAUD_CPU		0x1840
 #define CLK_CON_DIV_CLKCMU_FSYS_BUS		0x1844
 #define CLK_CON_DIV_CLKCMU_FSYS_MMC_CARD	0x1848
 #define CLK_CON_DIV_CLKCMU_FSYS_MMC_EMBD	0x184c
@@ -77,6 +81,7 @@
 #define CLK_CON_GAT_GATE_CLKCMU_CORE_BUS	0x201c
 #define CLK_CON_GAT_GATE_CLKCMU_CORE_CCI	0x2020
 #define CLK_CON_GAT_GATE_CLKCMU_CORE_G3D	0x2024
+#define CLK_CON_GAT_GATE_CLKCMU_DISPAUD_VCLK	0x2040
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_BUS	0x2044
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_MMC_CARD	0x2048
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_MMC_EMBD	0x204c
@@ -99,6 +104,7 @@ static const unsigned long top_clk_regs[] __initconst = {
 	CLK_CON_MUX_MUX_CLKCMU_CORE_BUS,
 	CLK_CON_MUX_MUX_CLKCMU_CORE_CCI,
 	CLK_CON_MUX_MUX_CLKCMU_CORE_G3D,
+	CLK_CON_MUX_MUX_CLKCMU_DISPAUD_CPU,
 	CLK_CON_MUX_MUX_CLKCMU_FSYS_BUS,
 	CLK_CON_MUX_MUX_CLKCMU_FSYS_MMC_CARD,
 	CLK_CON_MUX_MUX_CLKCMU_FSYS_MMC_EMBD,
@@ -116,6 +122,7 @@ static const unsigned long top_clk_regs[] __initconst = {
 	CLK_CON_DIV_CLKCMU_CORE_BUS,
 	CLK_CON_DIV_CLKCMU_CORE_CCI,
 	CLK_CON_DIV_CLKCMU_CORE_G3D,
+	CLK_CON_DIV_CLKCMU_DISPAUD_CPU,
 	CLK_CON_DIV_CLKCMU_FSYS_BUS,
 	CLK_CON_DIV_CLKCMU_FSYS_MMC_CARD,
 	CLK_CON_DIV_CLKCMU_FSYS_MMC_EMBD,
@@ -194,6 +201,7 @@ PNAME(mout_fsys_mmc_card_p)	= { "dout_shared0_div2", "dout_shared1_div2" };
 PNAME(mout_fsys_mmc_embd_p)	= { "dout_shared0_div2", "dout_shared1_div2" };
 PNAME(mout_fsys_mmc_sdio_p)	= { "dout_shared0_div2", "dout_shared1_div2" };
 PNAME(mout_fsys_usb30drd_p)	= { "dout_shared0_div4", "dout_shared1_div4" };
+PNAME(mout_dispaud_cpu_p)	= { "dout_shared0_div2", "dout_shared1_div2" };
 
 static const struct samsung_mux_clock top_mux_clks[] __initconst = {
 	/* TOP */
@@ -201,6 +209,8 @@ static const struct samsung_mux_clock top_mux_clks[] __initconst = {
 	    PLL_CON0_PLL_SHARED0, 4, 1),
 	MUX(CLK_MOUT_SHARED1_PLL, "mout_shared1_pll", mout_shared1_pll_p,
 	    PLL_CON0_PLL_SHARED1, 4, 1),
+	MUX(CLK_MOUT_DISPAUD_CPU, "mout_dispaud_cpu", mout_dispaud_cpu_p,
+	    CLK_CON_MUX_MUX_CLKCMU_DISPAUD_CPU, 0, 1),
 
 	/* CORE */
 	MUX(CLK_MOUT_CORE_BUS, "mout_core_bus", mout_core_bus_p,
@@ -259,6 +269,8 @@ static const struct samsung_div_clock top_div_clks[] __initconst = {
 	    CLK_CON_DIV_PLL_SHARED1_DIV3, 0, 2),
 	DIV(CLK_DOUT_SHARED1_DIV4, "dout_shared1_div4", "dout_shared1_div2",
 	    CLK_CON_DIV_PLL_SHARED1_DIV4, 0, 1),
+	DIV(CLK_DOUT_DISPAUD_CPU, "dout_dispaud_cpu", "gout_dispaud_cpu",
+	    CLK_CON_DIV_CLKCMU_DISPAUD_CPU, 0, 3),
 
 	/* CORE */
 	DIV(CLK_DOUT_CORE_BUS, "dout_core_bus", "gout_core_bus",
@@ -302,6 +314,9 @@ static const struct samsung_div_clock top_div_clks[] __initconst = {
 };
 
 static const struct samsung_gate_clock top_gate_clks[] __initconst = {
+	/* The audio branch is untouched until exynos7885.dispaud=1 is used. */
+	GATE(CLK_GOUT_DISPAUD_CPU, "gout_dispaud_cpu", "mout_dispaud_cpu",
+	     CLK_CON_GAT_GATE_CLKCMU_DISPAUD_VCLK, 21, CLK_IGNORE_UNUSED, 0),
 	/* CORE */
 	GATE(CLK_GOUT_CORE_BUS, "gout_core_bus", "mout_core_bus",
 	     CLK_CON_GAT_GATE_CLKCMU_CORE_BUS, 21, 0, 0),
@@ -359,7 +374,18 @@ static const struct samsung_cmu_info top_cmu_info __initconst = {
 
 static void __init exynos7885_cmu_top_init(struct device_node *np)
 {
-	exynos_arm64_register_cmu(NULL, np, &top_cmu_info);
+	struct samsung_cmu_info cmu = top_cmu_info;
+	unsigned long regs[ARRAY_SIZE(top_clk_regs) + 1];
+
+	if (exynos7885_enable_dispaud) {
+		memcpy(regs, top_clk_regs, sizeof(top_clk_regs));
+		regs[ARRAY_SIZE(top_clk_regs)] =
+			CLK_CON_GAT_GATE_CLKCMU_DISPAUD_VCLK;
+		cmu.clk_regs = regs;
+		cmu.nr_clk_regs = ARRAY_SIZE(regs);
+	}
+
+	exynos_arm64_register_cmu(NULL, np, &cmu);
 }
 
 /* Register CMU_TOP early, as it's a dependency for other early domains */
@@ -824,22 +850,34 @@ static const struct samsung_cmu_info fsys_cmu_info __initconst = {
 
 #define PLL_CON0_PLL_AUD		0x0160
 #define PLL_CON3_PLL_AUD		0x016c
+#define CLK_CON_MUX_AUD_CPU		0x1000
+#define CLK_CON_MUX_AUD_CPU_HCH		0x1004
+#define PLL_CON0_MUX_AUD_CPU_USER	0x0100
 #define CLK_CON_DIV_AUDIF		0x1800
 #define CLK_CON_DIV_AUD_BUS		0x1804
+#define CLK_CON_DIV_AUD_CPU_ACLK	0x1808
+#define CLK_CON_DIV_AUD_PLL		0x1818
 #define CLK_CON_DIV_UAIF3		0x1824
 #define CLK_CON_GAT_ABOX_ACLK		0x200c
 #define CLK_CON_GAT_UAIF3_BCLK		0x201c
+#define CLK_CON_GAT_ABOX_CA7		0x2024
 #define CLK_CON_GAT_UAIF3_SYNC		0x20c4
 #define CLK_CON_GAT_SMMU_ABOX_CLK	0x20d0
 
 static const unsigned long dispaud_clk_regs[] __initconst = {
 	PLL_CON0_PLL_AUD,
 	PLL_CON3_PLL_AUD,
+	CLK_CON_MUX_AUD_CPU,
+	CLK_CON_MUX_AUD_CPU_HCH,
+	PLL_CON0_MUX_AUD_CPU_USER,
 	CLK_CON_DIV_AUDIF,
 	CLK_CON_DIV_AUD_BUS,
+	CLK_CON_DIV_AUD_CPU_ACLK,
+	CLK_CON_DIV_AUD_PLL,
 	CLK_CON_DIV_UAIF3,
 	CLK_CON_GAT_ABOX_ACLK,
 	CLK_CON_GAT_UAIF3_BCLK,
+	CLK_CON_GAT_ABOX_CA7,
 	CLK_CON_GAT_UAIF3_SYNC,
 	CLK_CON_GAT_SMMU_ABOX_CLK,
 };
@@ -849,6 +887,19 @@ static const struct samsung_pll_clock dispaud_pll_clks[] __initconst = {
 	    0, PLL_CON0_PLL_AUD, NULL),
 };
 
+PNAME(mout_aud_cpu_user_p) = { "oscclk", "dout_dispaud_cpu" };
+PNAME(mout_aud_cpu_p) = { "dout_aud_pll", "mout_aud_cpu_user" };
+PNAME(mout_aud_cpu_hch_p) = { "mout_aud_cpu", "oscclk" };
+
+static const struct samsung_mux_clock dispaud_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_AUD_CPU_USER, "mout_aud_cpu_user",
+	    mout_aud_cpu_user_p, PLL_CON0_MUX_AUD_CPU_USER, 4, 1),
+	MUX(CLK_MOUT_AUD_CPU, "mout_aud_cpu", mout_aud_cpu_p,
+	    CLK_CON_MUX_AUD_CPU, 0, 1),
+	MUX(CLK_MOUT_AUD_CPU_HCH, "mout_aud_cpu_hch",
+	    mout_aud_cpu_hch_p, CLK_CON_MUX_AUD_CPU_HCH, 0, 1),
+};
+
 static const struct samsung_div_clock dispaud_div_clks[] __initconst = {
 	DIV(CLK_DOUT_AUDIF, "dout_audif", "fout_aud_pll",
 	    CLK_CON_DIV_AUDIF, 0, 9),
@@ -856,6 +907,10 @@ static const struct samsung_div_clock dispaud_div_clks[] __initconst = {
 	    CLK_CON_DIV_AUD_BUS, 0, 3),
 	DIV(CLK_DOUT_UAIF3, "dout_uaif3", "dout_audif",
 	    CLK_CON_DIV_UAIF3, 0, 5),
+	DIV(CLK_DOUT_AUD_PLL, "dout_aud_pll", "fout_aud_pll",
+	    CLK_CON_DIV_AUD_PLL, 0, 4),
+	DIV(CLK_DOUT_AUD_CPU_ACLK, "dout_aud_cpu_aclk",
+	    "mout_aud_cpu_hch", CLK_CON_DIV_AUD_CPU_ACLK, 0, 3),
 };
 
 static const struct samsung_gate_clock dispaud_gate_clks[] __initconst = {
@@ -867,11 +922,15 @@ static const struct samsung_gate_clock dispaud_gate_clks[] __initconst = {
 	     CLK_CON_GAT_UAIF3_BCLK, 21, 0, 0),
 	GATE(CLK_GOUT_UAIF3_SYNC, "gout_uaif3_sync", "dout_uaif3",
 	     CLK_CON_GAT_UAIF3_SYNC, 21, 0, 0),
+	GATE(CLK_GOUT_ABOX_CA7, "gout_abox_ca7", "mout_aud_cpu_hch",
+	     CLK_CON_GAT_ABOX_CA7, 21, 0, 0),
 };
 
 static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
 	.pll_clks		= dispaud_pll_clks,
 	.nr_pll_clks		= ARRAY_SIZE(dispaud_pll_clks),
+	.mux_clks		= dispaud_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(dispaud_mux_clks),
 	.div_clks		= dispaud_div_clks,
 	.nr_div_clks		= ARRAY_SIZE(dispaud_div_clks),
 	.gate_clks		= dispaud_gate_clks,
@@ -881,8 +940,6 @@ static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
 	.nr_clk_regs		= ARRAY_SIZE(dispaud_clk_regs),
 	.clk_name		= "oscclk",
 };
-
-static bool exynos7885_enable_dispaud;
 
 static int __init exynos7885_dispaud_setup(char *str)
 {
