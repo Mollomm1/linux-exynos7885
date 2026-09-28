@@ -20,6 +20,15 @@ config SND_SOC_EXYNOS7885_ABOX
 	  through ALSA SoC. Firmware startup remains controlled by the
 	  ABOX remoteproc driver's allow_firmware_start parameter.
 
+config SND_SOC_EXYNOS7885_TFA9896
+	tristate "Exynos7885 GTA3XL Wi-Fi TFA9896 speaker card"
+	depends on SND_SOC_EXYNOS7885_ABOX
+	depends on OF
+	help
+	  Say Y or M to expose the GTA3XL Wi-Fi UAIF3 playback link to its two
+	  TFA9896 speaker amplifiers. The board audio node must be enabled, and a
+	  TFA9896 codec driver must provide both codec DAIs.
+
 config SND_SAMSUNG_PCM
 	tristate "Samsung PCM interface support"
 

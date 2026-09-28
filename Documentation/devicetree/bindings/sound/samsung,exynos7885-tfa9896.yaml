@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/samsung,exynos7885-tfa9896.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung Exynos7885 GTA3XL Wi-Fi TFA9896 speaker sound card
+
+maintainers:
+  - Mollomm1 <Mollomm1@users.noreply.github.com>
+
+description:
+  Sound card for the Exynos7885-based Samsung GTA3XL Wi-Fi tablet. A single
+  ABOX UAIF3 playback DAI feeds the two TFA9896 amplifiers over a shared TDM
+  bus. The amplifier slot assignments are supplied by their firmware data.
+
+allOf:
+  - $ref: sound-card-common.yaml#
+
+properties:
+  compatible:
+    const: samsung,exynos7885-gta3xlwifi-audio
+
+  cpu:
+    type: object
+    additionalProperties: false
+    properties:
+      sound-dai:
+        $ref: /schemas/types.yaml#/definitions/phandle-array
+        maxItems: 1
+        description: Phandle to the ABOX UAIF3 playback DAI.
+    required:
+      - sound-dai
+
+  codecs:
+    type: object
+    additionalProperties: false
+    properties:
+      sound-dai:
+        $ref: /schemas/types.yaml#/definitions/phandle-array
+        minItems: 2
+        maxItems: 2
+        description: Phandles to the right and left TFA9896 codec DAIs.
+    required:
+      - sound-dai
+
+required:
+  - compatible
+  - audio-routing
+  - cpu
+  - codecs
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    sound {
+        compatible = "samsung,exynos7885-gta3xlwifi-audio";
+        model = "Samsung Galaxy Tab A 10.1 Speaker";
+        status = "disabled";
+        audio-routing = "Speaker", "Right Speaker OUT",
+                        "Speaker", "Left Speaker OUT";
+
+        cpu {
+            sound-dai = <&abox_audio>;
+        };
+
+        codecs {
+            sound-dai = <&amp_right>, <&amp_left>;
+        };
+    };
