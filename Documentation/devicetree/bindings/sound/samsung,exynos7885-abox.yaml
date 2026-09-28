@@ -42,14 +42,16 @@ properties:
       - const: abox
 
   clocks:
-    minItems: 6
-    maxItems: 6
+    minItems: 8
+    maxItems: 8
 
   clock-names:
     items:
       - const: pll
       - const: ca7
       - const: audif
+      - const: uaif3-div
+      - const: uaif3-mux
       - const: aclk
       - const: uaif3-bclk
       - const: uaif3-sync
@@ -137,9 +139,11 @@ examples:
         interrupts = <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>;
         interrupt-names = "abox";
         clocks = <&cmu_dispaud 1>, <&cmu_dispaud 13>,
-                 <&cmu_dispaud 2>, <&cmu_dispaud 5>,
+                 <&cmu_dispaud 2>, <&cmu_dispaud 3>,
+                 <&cmu_dispaud 16>, <&cmu_dispaud 5>,
                  <&cmu_dispaud 7>, <&cmu_dispaud 8>;
-        clock-names = "pll", "ca7", "audif", "aclk",
+        clock-names = "pll", "ca7", "audif", "uaif3-div",
+                      "uaif3-mux", "aclk",
                       "uaif3-bclk", "uaif3-sync";
     };
 ...
