@@ -221,11 +221,11 @@ static int slsi_net_open(struct net_device *dev)
 	if (!memcmp(dev->dev_addr, dev_addr_zero_check, ETH_ALEN)) {
 #if defined(CONFIG_SCSC_WLAN_WIFI_SHARING) || defined(CONFIG_SCSC_WLAN_DUAL_STATION)
 		if (SLSI_IS_VIF_INDEX_MHS(sdev, ndev_vif))
-			SLSI_ETHER_COPY(dev->dev_addr, sdev->netdev_addresses[SLSI_NET_INDEX_P2P]);
+			eth_hw_addr_set(dev, sdev->netdev_addresses[SLSI_NET_INDEX_P2P]);
 		else
-			SLSI_ETHER_COPY(dev->dev_addr, sdev->netdev_addresses[ndev_vif->ifnum]);
+			eth_hw_addr_set(dev, sdev->netdev_addresses[ndev_vif->ifnum]);
 #else
-		SLSI_ETHER_COPY(dev->dev_addr, sdev->netdev_addresses[ndev_vif->ifnum]);
+			eth_hw_addr_set(dev, sdev->netdev_addresses[ndev_vif->ifnum]);
 #endif
 	}
 	SLSI_ETHER_COPY(dev->perm_addr, sdev->netdev_addresses[ndev_vif->ifnum]);
@@ -957,7 +957,7 @@ static int  slsi_set_mac_address(struct net_device *dev, void *addr)
 	struct sockaddr *sa = (struct sockaddr *)addr;
 
 	SLSI_NET_DBG1(dev, SLSI_NETDEV, "slsi_set_mac_address %pM\n", sa->sa_data);
-	SLSI_ETHER_COPY(dev->dev_addr, sa->sa_data);
+	eth_hw_addr_set(dev, sa->sa_data);
 	sdev->mac_changed = true;
 
 	/* Interface is pulled down before mac address is changed.
@@ -1162,11 +1162,11 @@ int slsi_netif_add_locked(struct slsi_dev *sdev, const char *name, int ifnum)
 
 #if defined(CONFIG_SCSC_WLAN_WIFI_SHARING) || defined(CONFIG_SCSC_WLAN_DUAL_STATION)
 	if (strcmp(name, CONFIG_SCSC_AP_INTERFACE_NAME) == 0)
-		SLSI_ETHER_COPY(dev->dev_addr, sdev->netdev_addresses[SLSI_NET_INDEX_P2P]);
+		eth_hw_addr_set(dev, sdev->netdev_addresses[SLSI_NET_INDEX_P2P]);
 	else
-		SLSI_ETHER_COPY(dev->dev_addr, sdev->netdev_addresses[ifnum]);
+		eth_hw_addr_set(dev, sdev->netdev_addresses[ifnum]);
 #else
-	SLSI_ETHER_COPY(dev->dev_addr, sdev->netdev_addresses[ifnum]);
+	eth_hw_addr_set(dev, sdev->netdev_addresses[ifnum]);
 #endif
 	SLSI_DBG1(sdev, SLSI_NETDEV, "Add:%pM\n", dev->dev_addr);
 	rcu_assign_pointer(sdev->netdev[ifnum], dev);

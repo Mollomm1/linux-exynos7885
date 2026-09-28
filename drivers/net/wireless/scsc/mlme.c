@@ -788,7 +788,8 @@ int slsi_mlme_get(struct slsi_dev *sdev, struct net_device *dev, u8 *mib, int mi
 	return r;
 }
 
-int slsi_mlme_add_vif(struct slsi_dev *sdev, struct net_device *dev, u8 *interface_address, u8 *device_address)
+int slsi_mlme_add_vif(struct slsi_dev *sdev, struct net_device *dev,
+		      const u8 *interface_address, const u8 *device_address)
 {
 	struct netdev_vif *ndev_vif = netdev_priv(dev);
 	struct sk_buff    *req;
@@ -1852,7 +1853,10 @@ static int slsi_prepare_vht_ies(struct net_device *dev, u8 **vht_ie_capab, u8 **
 }
 #endif
 
-int slsi_mlme_start(struct slsi_dev *sdev, struct net_device *dev, u8 *bssid, struct cfg80211_ap_settings *settings, const u8 *wpa_ie_pos, const u8 *wmm_ie_pos, bool append_vht_ies)
+int slsi_mlme_start(struct slsi_dev *sdev, struct net_device *dev,
+		    const u8 *bssid, struct cfg80211_ap_settings *settings,
+		    const u8 *wpa_ie_pos, const u8 *wmm_ie_pos,
+		    bool append_vht_ies)
 {
 	struct netdev_vif      *ndev_vif = netdev_priv(dev);
 	struct sk_buff         *req;
