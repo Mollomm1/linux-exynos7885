@@ -7,6 +7,7 @@ snd-soc-pcm-y := pcm.o
 snd-soc-i2s-y := i2s.o
 
 obj-$(CONFIG_SND_SOC_SAMSUNG) += snd-soc-s3c-dma.o
+obj-$(CONFIG_SND_SOC_EXYNOS7885_ABOX) += exynos7885-abox-pcm.o
 obj-$(CONFIG_SND_SAMSUNG_SPDIF) += snd-soc-samsung-spdif.o
 obj-$(CONFIG_SND_SAMSUNG_PCM) += snd-soc-pcm.o
 obj-$(CONFIG_SND_SAMSUNG_I2S) += snd-soc-i2s.o

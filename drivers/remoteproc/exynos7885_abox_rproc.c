@@ -32,6 +32,12 @@
 #define ABOX_SRAM_SIZE		0x28000
 #define ABOX_DRAM_SIZE		(SZ_8M + SZ_4M)
 #define ABOX_DRAM_IOVA		0x80000000
+#define ABOX_PCM_IOVA		0x81000000
+#define ABOX_PCM_SIZE		SZ_128K
+#define ABOX_RDMA_BASE		0x1000
+#define ABOX_RDMA_INTERVAL	0x100
+#define ABOX_RDMA_STATUS	0x30
+#define ABOX_RDMA_PROGRESS	BIT(31)
 #define ABOX_PMU_IOVA		0x11c80000
 #define ABOX_PMU_SIZE		SZ_64K
 #define ABOX_AUDSYS_IOVA	0x12090000
@@ -95,6 +101,8 @@ struct exynos7885_abox_rproc {
 	void __iomem *sfr;
 	void __iomem *sysreg;
 	struct reserved_mem *dram_rmem;
+	struct reserved_mem *pcm_rmem;
+	void *pcm_area;
 	struct rproc_mem_entry *dram;
 	void __iomem *sram;
 	void __iomem *gicd;
@@ -102,6 +110,8 @@ struct exynos7885_abox_rproc {
 	struct completion boot_done;
 	struct mutex ipc_lock;
 	struct mutex handler_lock;
+	/* Serializes PCM mapping with RDMA teardown and remoteproc stop. */
+	struct mutex pcm_lock;
 	exynos7885_abox_ipc_handler_t ipc_handler;
 	void *ipc_handler_data;
 	int irq;
@@ -114,6 +124,8 @@ struct exynos7885_abox_rproc {
 	unsigned long enabled_clocks;
 	bool pins_active_selected;
 	bool dram_requested;
+	bool pcm_mapped;
+	bool pcm_shutting_down;
 	bool firmware_running;
 	bool firmware_ready;
 	bool stopping;
@@ -509,6 +521,8 @@ int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
 		return -EINVAL;
 
 	switch (type) {
+	case EXYNOS7885_ABOX_PCM_OPEN:
+	case EXYNOS7885_ABOX_PCM_CLOSE:
 	case EXYNOS7885_ABOX_PCM_HW_PARAMS:
 	case EXYNOS7885_ABOX_PCM_HW_FREE:
 	case EXYNOS7885_ABOX_PCM_PREPARE:
@@ -530,6 +544,169 @@ int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
 	return exynos7885_abox_send_ipc(dev, message, sizeof(message));
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_send_pcm);
+
+static struct rproc *exynos7885_abox_get_rproc(struct device *dev)
+{
+	return dev ? dev_get_drvdata(dev) : NULL;
+}
+
+int exynos7885_abox_boot(struct device *dev)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+
+	return rproc ? rproc_boot(rproc) : -ENODEV;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_boot);
+
+int exynos7885_abox_shutdown(struct device *dev)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+
+	if (!rproc)
+		return -ENODEV;
+
+	return rproc_shutdown(rproc);
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_shutdown);
+
+int exynos7885_abox_get_pcm_buffer(struct device *dev, void **area,
+				   phys_addr_t *phys, size_t *size)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+
+	if (!rproc || !area || !phys || !size)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	if (!abox->pcm_rmem || !abox->pcm_area)
+		return -ENODEV;
+
+	*area = abox->pcm_area;
+	*phys = abox->pcm_rmem->base;
+	*size = min_t(size_t, abox->pcm_rmem->size, ABOX_PCM_SIZE);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_get_pcm_buffer);
+
+int exynos7885_abox_map_pcm_buffer(struct device *dev)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+
+	abox = rproc->priv;
+	if (!abox->pcm_rmem)
+		return -ENODEV;
+	mutex_lock(&abox->pcm_lock);
+	if (abox->pcm_shutting_down ||
+	    !READ_ONCE(abox->firmware_ready) || !rproc->domain) {
+		ret = -EHOSTDOWN;
+	} else if (abox->pcm_mapped) {
+		ret = -EBUSY;
+	} else {
+		ret = iommu_map(rproc->domain, ABOX_PCM_IOVA,
+				abox->pcm_rmem->base, ABOX_PCM_SIZE,
+				IOMMU_READ, GFP_KERNEL);
+		if (ret)
+			iommu_unmap(rproc->domain, ABOX_PCM_IOVA,
+				    ABOX_PCM_SIZE);
+		else
+			abox->pcm_mapped = true;
+	}
+	mutex_unlock(&abox->pcm_lock);
+	if (ret)
+		return ret;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_map_pcm_buffer);
+
+int exynos7885_abox_wait_rdma_idle(struct device *dev, unsigned int channel,
+				   unsigned int timeout_us)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	void __iomem *status_reg;
+	unsigned int status;
+
+	if (!rproc || channel >= 8 || !timeout_us || timeout_us > 1000000)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+	status_reg = abox->sfr + ABOX_RDMA_BASE +
+		     channel * ABOX_RDMA_INTERVAL + ABOX_RDMA_STATUS;
+
+	return readl_poll_timeout(status_reg, status,
+				  !(status & ABOX_RDMA_PROGRESS), 100,
+				  timeout_us);
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_wait_rdma_idle);
+
+int exynos7885_abox_unmap_pcm_buffer(struct device *dev)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	size_t unmapped;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+
+	abox = rproc->priv;
+	mutex_lock(&abox->pcm_lock);
+	if (!abox->pcm_mapped) {
+		mutex_unlock(&abox->pcm_lock);
+		return 0;
+	}
+	ret = exynos7885_abox_wait_rdma_idle(dev, 0, ABOX_STOP_TIMEOUT_US);
+	if (ret) {
+		mutex_unlock(&abox->pcm_lock);
+		return ret;
+	}
+	unmapped = iommu_unmap(rproc->domain, ABOX_PCM_IOVA, ABOX_PCM_SIZE);
+	if (unmapped != ABOX_PCM_SIZE) {
+		mutex_unlock(&abox->pcm_lock);
+		dev_err(abox->dev, "PCM IOMMU unmap covered %zu of %u bytes\n",
+			unmapped, ABOX_PCM_SIZE);
+		return -EIO;
+	}
+
+	abox->pcm_mapped = false;
+	mutex_unlock(&abox->pcm_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_unmap_pcm_buffer);
+
+int exynos7885_abox_sync_pcm_buffer(struct device *dev, size_t offset,
+				    size_t size)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+
+	if (!rproc || !size || offset > ABOX_PCM_SIZE ||
+	    size > ABOX_PCM_SIZE - offset)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	mutex_lock(&abox->pcm_lock);
+	if (!READ_ONCE(abox->firmware_ready) || !abox->pcm_mapped) {
+		mutex_unlock(&abox->pcm_lock);
+		return -EHOSTDOWN;
+	}
+
+	dma_sync_single_range_for_device(abox->sysmmu_dev,
+					 abox->pcm_rmem->base, offset,
+					 size, DMA_TO_DEVICE);
+	mutex_unlock(&abox->pcm_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_sync_pcm_buffer);
 
 int exynos7885_abox_register_ipc_handler(struct device *dev,
 					 exynos7885_abox_ipc_handler_t handler,
@@ -910,6 +1087,14 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 	unsigned int status;
 	int ret;
 
+	mutex_lock(&abox->pcm_lock);
+	if (abox->pcm_mapped || abox->pcm_shutting_down) {
+		mutex_unlock(&abox->pcm_lock);
+		return -EBUSY;
+	}
+	abox->pcm_shutting_down = true;
+	mutex_unlock(&abox->pcm_lock);
+
 	mutex_lock(&abox->ipc_lock);
 	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &status);
 	if (ret)
@@ -946,6 +1131,9 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 	ret = 0;
 out_unlock:
 	mutex_unlock(&abox->ipc_lock);
+	mutex_lock(&abox->pcm_lock);
+	abox->pcm_shutting_down = false;
+	mutex_unlock(&abox->pcm_lock);
 	return ret;
 }
 
@@ -971,7 +1159,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	struct platform_device *sysmmu_pdev;
 	struct resource *sfr, *sysreg, *sram;
 	struct resource *gicd, *gicc;
-	struct device_node *mem_np, *iommu_np;
+	struct device_node *mem_np, *pcm_np, *iommu_np;
 	struct rproc *rproc;
 	unsigned int i;
 	int ret;
@@ -1035,6 +1223,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	init_completion(&abox->boot_done);
 	mutex_init(&abox->ipc_lock);
 	mutex_init(&abox->handler_lock);
+	mutex_init(&abox->pcm_lock);
 	/* Keep the parent IRQ off until a future start path initializes the GIC. */
 	ret = devm_request_irq(dev, abox->irq, exynos7885_abox_irq,
 			       IRQF_NO_AUTOEN, dev_name(dev), abox);
@@ -1057,6 +1246,22 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	    !IS_ALIGNED(abox->dram_rmem->base, SZ_1M))
 		return dev_err_probe(dev, -EINVAL,
 				     "DRAM firmware region must be at least 12 MiB and 1 MiB aligned\n");
+
+	pcm_np = of_parse_phandle(dev->of_node, "memory-region", 1);
+	if (pcm_np) {
+		abox->pcm_rmem = of_reserved_mem_lookup(pcm_np);
+		of_node_put(pcm_np);
+		if (!abox->pcm_rmem ||
+		    abox->pcm_rmem->size < ABOX_PCM_SIZE ||
+		    !IS_ALIGNED(abox->pcm_rmem->base, PAGE_SIZE))
+			return dev_err_probe(dev, -EINVAL,
+					     "PCM ring region must be at least 128 KiB and page aligned\n");
+		abox->pcm_area = devm_memremap(dev, abox->pcm_rmem->base,
+					       ABOX_PCM_SIZE, MEMREMAP_WB);
+		if (!abox->pcm_area)
+			return dev_err_probe(dev, -ENOMEM,
+					     "failed to map reserved PCM ring buffer\n");
+	}
 
 	iommu_np = of_parse_phandle(dev->of_node, "iommus", 0);
 	if (!iommu_np)
@@ -1105,6 +1310,11 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	ret = devm_rproc_add(dev, rproc);
 	if (ret)
 		return ret;
+
+	ret = devm_of_platform_populate(dev);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to populate ABOX child devices\n");
 
 	dev_info(dev, "ABOX remoteproc registered; firmware start is opt-in\n");
 	return 0;
