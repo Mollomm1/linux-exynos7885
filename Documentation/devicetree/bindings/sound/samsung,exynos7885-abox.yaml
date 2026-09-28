@@ -64,12 +64,31 @@ properties:
   pinctrl-1: true
 
   memory-region:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
+    description: Firmware DRAM carveout and optional PCM ring buffer.
 
   iommus:
     maxItems: 1
 
 patternProperties:
+  "^abox-audio$":
+    type: object
+    properties:
+      compatible:
+        const: samsung,exynos7885-abox-audio
+
+      "#sound-dai-cells":
+        const: 0
+
+      status: true
+
+    required:
+      - compatible
+      - "#sound-dai-cells"
+
+    additionalProperties: false
+
   "^firmware-[a-z0-9-]+$":
     type: object
     properties:
