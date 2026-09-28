@@ -339,6 +339,13 @@
 			interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
+		pd_dispaud: power-domain@11c84020 {
+			compatible = "samsung,exynos7885-dispaud-pd";
+			reg = <0x11c84020 0x20>;
+			#power-domain-cells = <0>;
+			status = "disabled";
+		};
+
 		sysmmu_abox: iommu@14a30000 {
 			compatible = "samsung,exynos-sysmmu";
 			reg = <0x14a30000 0x9000>;

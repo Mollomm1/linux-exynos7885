@@ -22,6 +22,7 @@
 struct exynos_pm_domain_config {
 	/* Value for LOCAL_PWR_CFG and STATUS fields for each domain */
 	u32 local_pwr_cfg;
+	bool keep_on;
 };
 
 /*
@@ -73,12 +74,34 @@ static int exynos_pd_power_off(struct generic_pm_domain *domain)
 	return exynos_pd_power(domain, false);
 }
 
+static int exynos_pd_keep_on(struct generic_pm_domain *domain)
+{
+	struct exynos_pm_domain *pd;
+
+	pd = container_of(domain, struct exynos_pm_domain, pd);
+	return (readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg) ==
+		pd->local_pwr_cfg ? 0 : -EIO;
+}
+
+static int exynos_pd_refuse_power_off(struct generic_pm_domain *domain)
+{
+	return -EBUSY;
+}
+
 static const struct exynos_pm_domain_config exynos4210_cfg = {
 	.local_pwr_cfg		= 0x7,
 };
 
 static const struct exynos_pm_domain_config exynos5433_cfg = {
 	.local_pwr_cfg		= 0xf,
+};
+
+/* DISPAUD needs secure save/restore and an ABOX shutdown before power-off.
+ * Until those are implemented, expose an already-on domain but never cycle it.
+ */
+static const struct exynos_pm_domain_config exynos7885_dispaud_cfg = {
+	.local_pwr_cfg		= 0xf,
+	.keep_on		= true,
 };
 
 static const struct of_device_id exynos_pm_domain_of_match[] = {
@@ -88,6 +111,9 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 	}, {
 		.compatible = "samsung,exynos5433-pd",
 		.data = &exynos5433_cfg,
+	}, {
+		.compatible = "samsung,exynos7885-dispaud-pd",
+		.data = &exynos7885_dispaud_cfg,
 	},
 	{ },
 };
@@ -130,8 +156,24 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
 
 	on = readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg;
+	if (pm_domain_cfg->keep_on) {
+		if (on != pd->local_pwr_cfg) {
+			dev_err(dev, "DISPAUD is not fully powered; refusing to manage it\n");
+			kfree_const(pd->pd.name);
+			iounmap(pd->base);
+			return -ENODEV;
+		}
+		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
+		pd->pd.power_on = exynos_pd_keep_on;
+		pd->pd.power_off = exynos_pd_refuse_power_off;
+	}
 
-	pm_genpd_init(&pd->pd, NULL, !on);
+	ret = pm_genpd_init(&pd->pd, NULL, !on);
+	if (ret) {
+		kfree_const(pd->pd.name);
+		iounmap(pd->base);
+		return ret;
+	}
 	ret = of_genpd_add_provider_simple(np, &pd->pd);
 
 	if (ret == 0 && of_parse_phandle_with_args(np, "power-domains",
