@@ -440,8 +440,56 @@ static unsigned long samsung_pll1431x_recalc_rate(struct clk_hw *hw,
 			 (u64)pdiv << (sdiv + 16));
 }
 
+#define PLL1431X_MUX_SEL	BIT(4)
+
+static int samsung_pll1431x_set_rate(struct clk_hw *hw, unsigned long drate,
+				     unsigned long parent_rate)
+{
+	struct samsung_clk_pll *pll = to_clk_pll(hw);
+	const struct samsung_pll_rate_table *rate;
+	u32 pll_con0, pll_con3;
+
+	rate = samsung_get_pll_settings(pll, drate);
+	if (!rate)
+		return -EINVAL;
+
+	pll_con0 = readl_relaxed(pll->con_reg);
+	pll_con3 = readl_relaxed(pll->con_reg + 0xc);
+
+	if (rate->mdiv == ((pll_con0 >> PLL36XX_MDIV_SHIFT) &
+			   PLL36XX_MDIV_MASK) &&
+	    rate->pdiv == ((pll_con0 >> PLL36XX_PDIV_SHIFT) &
+			   PLL36XX_PDIV_MASK) &&
+	    (s16)rate->kdiv == (s16)pll_con3 &&
+	    rate->sdiv == ((pll_con0 >> PLL36XX_SDIV_SHIFT) &
+			   PLL36XX_SDIV_MASK) && (pll_con0 & PLL1431X_MUX_SEL))
+		return 0;
+
+	/* PLL1431X stores its signed fractional divider in CON3, unlike 36XX. */
+	writel_relaxed(rate->pdiv * PLL36XX_LOCK_FACTOR, pll->lock_reg);
+	pll_con3 &= ~PLL36XX_KDIV_MASK;
+	pll_con3 |= rate->kdiv & PLL36XX_KDIV_MASK;
+	writel_relaxed(pll_con3, pll->con_reg + 0xc);
+	pll_con0 &= ~((PLL36XX_MDIV_MASK << PLL36XX_MDIV_SHIFT) |
+		      (PLL36XX_PDIV_MASK << PLL36XX_PDIV_SHIFT) |
+		      (PLL36XX_SDIV_MASK << PLL36XX_SDIV_SHIFT));
+	pll_con0 |= (rate->mdiv << PLL36XX_MDIV_SHIFT) |
+		    (rate->pdiv << PLL36XX_PDIV_SHIFT) |
+		    (rate->sdiv << PLL36XX_SDIV_SHIFT) | PLL1431X_MUX_SEL;
+	writel_relaxed(pll_con0, pll->con_reg);
+
+	if (pll_con0 & BIT(pll->enable_offs))
+		return samsung_pll_lock_wait(pll, BIT(pll->lock_offs));
+
+	return 0;
+}
+
 static const struct clk_ops samsung_pll1431x_clk_ops = {
 	.recalc_rate = samsung_pll1431x_recalc_rate,
+	.set_rate = samsung_pll1431x_set_rate,
+	.round_rate = samsung_pll_round_rate,
+	.enable = samsung_pll3xxx_enable,
+	.disable = samsung_pll3xxx_disable,
 };
 
 /*
@@ -1444,6 +1492,8 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 			init.ops = &samsung_pll36xx_clk_ops;
 		break;
 	case pll_1431x:
+		pll->enable_offs = PLL36XX_ENABLE_SHIFT;
+		pll->lock_offs = PLL36XX_LOCK_STAT_SHIFT;
 		init.ops = &samsung_pll1431x_clk_ops;
 		break;
 	case pll_0831x:

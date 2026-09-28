@@ -64,6 +64,7 @@
 #define ABOX_WFI_TIMEOUT_US	100000
 #define ABOX_STOP_TIMEOUT_US	20000
 #define ABOX_BOOT_TIMEOUT_MS	10000
+#define ABOX_AUD_PLL_RATE_48K	1179648040
 #define ABOX_AUDIF_RATE		24576000
 #define ABOX_CA7_RATE		393216000
 #define ABOX_GIC_IRQ_LIMIT	32
@@ -112,6 +113,7 @@ struct exynos7885_abox_rproc {
 	bool irq_enabled;
 	unsigned long enabled_clocks;
 	bool pins_active_selected;
+	bool dram_requested;
 	bool firmware_running;
 	bool firmware_ready;
 	bool stopping;
@@ -647,15 +649,18 @@ static int exynos7885_abox_release_resources(struct exynos7885_abox_rproc *abox)
 	if (ret)
 		return ret;
 
-	/* Release the ABOX DRAM power request only after confirming CPU-off. */
-	writel(0, abox->sfr + ABOX_SYSPOWER_CTRL);
-	ret = readl_poll_timeout(abox->sfr + ABOX_SYSPOWER_STATUS, status,
-				 !(status & ABOX_SYSPOWER_ON), 100,
-				 ABOX_STOP_TIMEOUT_US);
-	if (ret) {
-		dev_err(abox->dev,
-			"ABOX DRAM power request did not clear; preserving mappings\n");
-		return ret;
+	if (abox->dram_requested) {
+		/* Release DRAM only after confirming CA7-off. */
+		writel(0, abox->sfr + ABOX_SYSPOWER_CTRL);
+		ret = readl_poll_timeout(abox->sfr + ABOX_SYSPOWER_STATUS, status,
+					 !(status & ABOX_SYSPOWER_ON), 100,
+					 ABOX_STOP_TIMEOUT_US);
+		if (ret) {
+			dev_err(abox->dev,
+				"ABOX DRAM power request did not clear; preserving mappings\n");
+			return ret;
+		}
+		abox->dram_requested = false;
 	}
 
 	if (abox->irq_enabled) {
@@ -710,10 +715,22 @@ static int exynos7885_abox_start(struct rproc *rproc)
 	if (ret)
 		return ret;
 
-	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_ACLK].clk);
+	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_PLL].clk);
 	if (ret)
 		return ret;
+	abox->enabled_clocks |= BIT(ABOX_CLK_PLL);
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_PLL].clk,
+			   ABOX_AUD_PLL_RATE_48K);
+	if (ret)
+		goto fail_before_release;
+	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_ACLK].clk);
+	if (ret)
+		goto fail_before_release;
 	abox->enabled_clocks |= BIT(ABOX_CLK_ACLK);
+	if (readl(abox->sfr + ABOX_SYSPOWER_STATUS) & ABOX_SYSPOWER_ON) {
+		ret = -EBUSY;
+		goto fail_before_release;
+	}
 
 	/* An early-wake firmware instance needs a separate attach/resume path. */
 	if (readl(abox->sfr + ABOX_TIMER0_CTRL1)) {
@@ -773,6 +790,7 @@ static int exynos7885_abox_start(struct rproc *rproc)
 		abox->irq_enabled = true;
 	}
 
+	abox->dram_requested = true;
 	writel(ABOX_SYSPOWER_ON, abox->sfr + ABOX_SYSPOWER_CTRL);
 	/* Publish the DRAM power request before polling its status. */
 	wmb();
@@ -873,10 +891,16 @@ fail_before_release:
 		return 0;
 	}
 	ret = exynos7885_abox_release_resources(abox);
-	if (ret)
-		dev_warn(abox->dev,
-			 "pre-start cleanup incomplete with CA7 confirmed off: %d\n",
+	if (ret) {
+		dev_crit(abox->dev,
+			 "pre-start cleanup failed (%d); retaining remoteproc resources\n",
 			 ret);
+		mutex_lock(&abox->ipc_lock);
+		abox->firmware_running = true;
+		abox->firmware_ready = false;
+		mutex_unlock(&abox->ipc_lock);
+		return 0;
+	}
 	return start_ret;
 }
 

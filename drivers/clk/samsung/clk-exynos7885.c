@@ -884,9 +884,14 @@ static const unsigned long dispaud_clk_regs[] __initconst = {
 	CLK_CON_GAT_SMMU_ABOX_CLK,
 };
 
+static const struct samsung_pll_rate_table dispaud_pll_rates[] __initconst = {
+	PLL_36XX_RATE(26 * MHZ, 1179648040U, 45, 1, 0, 24319),
+	PLL_36XX_RATE(26 * MHZ, 1083801605U, 42, 1, 0, -20665),
+};
+
 static const struct samsung_pll_clock dispaud_pll_clks[] __initconst = {
 	PLL(pll_1431x, CLK_FOUT_AUD_PLL, "fout_aud_pll", "oscclk",
-	    0, PLL_CON0_PLL_AUD, NULL),
+	    0, PLL_CON0_PLL_AUD, dispaud_pll_rates),
 };
 
 static const struct samsung_fixed_rate_clock dispaud_fixed_clks[] __initconst = {
