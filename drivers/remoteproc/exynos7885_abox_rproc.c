@@ -55,6 +55,7 @@
 #define ABOX_IPC_MSG_SIZE	(ABOX_IPC_TX_ACK_OFFSET - ABOX_IPC_TX_OFFSET)
 #define ABOX_IPC_RX_OFFSET	0x22300
 #define ABOX_IPC_RX_ACK_OFFSET	0x225fc
+#define ABOX_IPC_WORDS		EXYNOS7885_ABOX_IPC_WORDS
 #define ABOX_GIC_SGIR		0x0f00
 #define ABOX_IPC_SYSTEM		1
 #define ABOX_SYSTEM_SUSPEND	1
@@ -496,6 +497,37 @@ int exynos7885_abox_send_ipc(struct device *dev, const void *message,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_send_ipc);
+
+int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
+			     u32 param0, u32 param1, u32 param2)
+{
+	u32 message[ABOX_IPC_WORDS] = {};
+
+	if (channel >= 8)
+		return -EINVAL;
+
+	switch (type) {
+	case EXYNOS7885_ABOX_PCM_HW_PARAMS:
+	case EXYNOS7885_ABOX_PCM_HW_FREE:
+	case EXYNOS7885_ABOX_PCM_PREPARE:
+	case EXYNOS7885_ABOX_PCM_TRIGGER:
+	case EXYNOS7885_ABOX_PCM_SET_BUFFER:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	message[0] = EXYNOS7885_ABOX_IPC_PCM_PLAYBACK;
+	message[1] = channel;
+	message[2] = type;
+	message[3] = channel;
+	message[4] = param0;
+	message[5] = param1;
+	message[6] = param2;
+
+	return exynos7885_abox_send_ipc(dev, message, sizeof(message));
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_send_pcm);
 
 int exynos7885_abox_register_ipc_handler(struct device *dev,
 					 exynos7885_abox_ipc_handler_t handler,
