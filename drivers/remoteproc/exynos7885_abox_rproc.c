@@ -31,8 +31,11 @@ struct exynos7885_abox_rproc {
 	struct regmap *pmu;
 	struct reserved_mem *dram_rmem;
 	struct rproc_mem_entry *dram;
+	void __iomem *sram;
+	size_t sram_size;
 	bool pmu_mapped;
 	bool audsys_mapped;
+	bool sram_loaded;
 };
 
 static bool enable;
@@ -98,9 +101,24 @@ static int exynos7885_abox_unprepare(struct rproc *rproc)
 {
 	struct exynos7885_abox_rproc *abox = rproc->priv;
 	struct iommu_domain *domain = rproc->domain;
+	unsigned int cpu;
+	int ret;
 
 	/* The core frees carveout entries before calling unprepare. */
 	abox->dram = NULL;
+
+	if (abox->sram_loaded) {
+		ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
+		if (ret || (cpu & 1)) {
+			dev_warn(rproc->dev.parent,
+				 "leaving ABOX SRAM intact; CPU-off state is unconfirmed\n");
+		} else {
+			memset_io(abox->sram, 0, abox->sram_size);
+			/* Complete SRAM writes before dropping its IOMMU context. */
+			wmb();
+			abox->sram_loaded = false;
+		}
+	}
 
 	if (abox->audsys_mapped) {
 		iommu_unmap(domain, ABOX_AUDSYS_IOVA, ABOX_AUDSYS_SIZE);
@@ -191,10 +209,19 @@ static int exynos7885_abox_load(struct rproc *rproc,
 		ret = -EINVAL;
 		goto out;
 	}
+	if (!sram->size || sram->size > abox->sram_size) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	memset(abox->dram->va, 0, abox->dram->len);
 	memcpy(abox->dram->va, dram->data, dram->size);
-	dev_info(&rproc->dev, "validated SRAM %zu bytes and staged DRAM %zu bytes; CPU remains off\n",
+	memset_io(abox->sram, 0, abox->sram_size);
+	memcpy_toio(abox->sram, sram->data, sram->size);
+	/* Firmware must be visible in SRAM before a later start operation. */
+	wmb();
+	abox->sram_loaded = true;
+	dev_info(&rproc->dev, "staged SRAM %zu bytes and DRAM %zu bytes; CPU remains off\n",
 		 sram->size, dram->size);
 out:
 	release_firmware(dram);
@@ -246,6 +273,10 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	abox = rproc->priv;
+	abox->sram_size = resource_size(sram);
+	abox->sram = devm_ioremap_resource(dev, sram);
+	if (IS_ERR(abox->sram))
+		return PTR_ERR(abox->sram);
 	abox->pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7885-pmu");
 	if (IS_ERR(abox->pmu))
 		return PTR_ERR(abox->pmu);
