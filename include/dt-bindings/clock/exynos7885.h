@@ -158,9 +158,12 @@
 #define CLK_FSYS_USB30DRD_BUS_CLK_EARLY		18
 #define CLK_FSYS_USB30DRD_REF_CLK		19
 
-/* CMU_DISPAUD: read-only audio PLL and programmable audio dividers */
+/* CMU_DISPAUD */
 #define CLK_FOUT_AUD_PLL			1
 #define CLK_DOUT_AUDIF				2
 #define CLK_DOUT_UAIF3				3
+#define CLK_DOUT_AUD_BUS			4
+#define CLK_GOUT_ABOX_ACLK			5
+#define CLK_GOUT_SMMU_ABOX_CLK			6
 
 #endif /* _DT_BINDINGS_CLOCK_EXYNOS_7885_H */
