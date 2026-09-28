@@ -277,7 +277,7 @@ struct s2mpu08_dev {
 	struct i2c_client *codeca;
 	struct i2c_client *close;
 	struct mutex i2c_lock;
-	struct acpm_handle *acpm;
+	const struct acpm_handle *acpm;
 	struct acpm_ops *ops;
 	unsigned int acpm_channel_id;
 	u8 speedy_channel;
