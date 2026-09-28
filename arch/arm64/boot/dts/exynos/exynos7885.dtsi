@@ -288,8 +288,9 @@
 			compatible = "samsung,exynos7885-cmu-dispaud";
 			reg = <0x14800000 0x8000>;
 			#clock-cells = <1>;
-			clocks = <&oscclk>;
-			clock-names = "oscclk";
+			clocks = <&oscclk>,
+				 <&cmu_top CLK_DOUT_DISPAUD_CPU>;
+			clock-names = "oscclk", "dout_dispaud_cpu";
 			status = "disabled";
 		};
 
