@@ -87,6 +87,8 @@ struct exynos7885_abox_rproc {
 	bool audsys_mapped;
 	bool sram_loaded;
 	bool irq_enabled;
+	bool clocks_enabled;
+	bool pins_active_selected;
 	bool firmware_running;
 	bool stopping;
 };
@@ -506,6 +508,16 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 	if (abox->irq_enabled) {
 		disable_irq(abox->irq);
 		abox->irq_enabled = false;
+	}
+	if (abox->pins_active_selected) {
+		ret = pinctrl_select_state(abox->pinctrl, abox->pins_idle);
+		if (ret)
+			goto out_unlock;
+		abox->pins_active_selected = false;
+	}
+	if (abox->clocks_enabled) {
+		clk_bulk_disable_unprepare(ARRAY_SIZE(abox->clocks), abox->clocks);
+		abox->clocks_enabled = false;
 	}
 	abox->firmware_running = false;
 	abox->stopping = false;
