@@ -35,6 +35,9 @@
 #define ABOX_PMU_SIZE		SZ_64K
 #define ABOX_AUDSYS_IOVA	0x12090000
 #define ABOX_AUDSYS_SIZE	PAGE_SIZE
+#define ABOX_SYSPOWER_CTRL	0x0010
+#define ABOX_SYSPOWER_STATUS	0x0014
+#define ABOX_SYSPOWER_ON	BIT(0)
 #define ABOX_DISPAUD_STATUS	0x4024
 #define ABOX_CA7_CONFIGURATION	0x2520
 #define ABOX_CA7_STATUS		0x2524
@@ -473,14 +476,14 @@ static int exynos7885_abox_stop_cpu(struct exynos7885_abox_rproc *abox)
 static int exynos7885_abox_stop(struct rproc *rproc)
 {
 	struct exynos7885_abox_rproc *abox = rproc->priv;
-	unsigned int cpu;
+	unsigned int status;
 	int ret;
 
 	mutex_lock(&abox->ipc_lock);
-	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
+	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &status);
 	if (ret)
 		goto out_unlock;
-	if (cpu & ABOX_CA7_STATUS_ON) {
+	if (status & ABOX_CA7_STATUS_ON) {
 		if (!abox->firmware_running && !abox->stopping) {
 			dev_err(rproc->dev.parent,
 				"ABOX CPU is on without a tracked firmware start\n");
@@ -502,6 +505,17 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 	if (ret) {
 		dev_err(rproc->dev.parent,
 			"ABOX idle state is unconfirmed; preserving mappings\n");
+		goto out_unlock;
+	}
+
+	/* Release the ABOX DRAM power request after confirming the CA7 is off. */
+	writel(0, abox->sfr + ABOX_SYSPOWER_CTRL);
+	ret = readl_poll_timeout(abox->sfr + ABOX_SYSPOWER_STATUS, status,
+				 !(status & ABOX_SYSPOWER_ON), 100,
+				 ABOX_STOP_TIMEOUT_US);
+	if (ret) {
+		dev_err(rproc->dev.parent,
+			"ABOX DRAM power request did not clear; preserving mappings\n");
 		goto out_unlock;
 	}
 
