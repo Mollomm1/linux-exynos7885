@@ -15,6 +15,7 @@
 #include <linux/mfd/syscon.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
@@ -22,6 +23,7 @@
 #include <linux/regmap.h>
 #include <linux/remoteproc.h>
 #include <linux/sizes.h>
+#include <linux/soc/samsung/exynos7885-abox.h>
 #include <linux/vmalloc.h>
 
 #define ABOX_SRAM_SIZE		0x28000
@@ -41,13 +43,14 @@
 #define ABOX_CA7_ENABLE		BIT(15)
 #define ABOX_IPC_TX_OFFSET	0x22000
 #define ABOX_IPC_TX_ACK_OFFSET	0x222fc
+#define ABOX_IPC_MSG_SIZE	(ABOX_IPC_TX_ACK_OFFSET - ABOX_IPC_TX_OFFSET)
 #define ABOX_IPC_RX_OFFSET	0x22300
 #define ABOX_IPC_RX_ACK_OFFSET	0x225fc
 #define ABOX_GIC_SGIR		0x0f00
 #define ABOX_IPC_SYSTEM		1
 #define ABOX_SYSTEM_SUSPEND	1
 #define ABOX_BOOT_DONE		3
-#define ABOX_SUSPEND_TIMEOUT_US	20000
+#define ABOX_IPC_TIMEOUT_US	20000
 #define ABOX_WFI_TIMEOUT_US	100000
 #define ABOX_STOP_TIMEOUT_US	20000
 #define ABOX_GIC_IRQ_LIMIT	32
@@ -63,6 +66,7 @@ struct exynos7885_abox_rproc {
 	void __iomem *gicd;
 	void __iomem *gicc;
 	struct completion boot_done;
+	struct mutex ipc_lock;
 	int irq;
 	u32 firmware_version;
 	size_t sram_size;
@@ -71,6 +75,7 @@ struct exynos7885_abox_rproc {
 	bool sram_loaded;
 	bool irq_enabled;
 	bool firmware_running;
+	bool stopping;
 };
 
 static bool exynos7885_abox_is_dma_irq(unsigned int irq)
@@ -327,36 +332,81 @@ static int exynos7885_abox_start(struct rproc *rproc)
 	return -EOPNOTSUPP;
 }
 
-static int exynos7885_abox_request_suspend(struct exynos7885_abox_rproc *abox)
+static int exynos7885_abox_send_ipc_locked(struct exynos7885_abox_rproc *abox,
+					   const void *message, size_t size,
+					   bool stopping)
 {
-	void __iomem *tx = abox->sram + ABOX_IPC_TX_OFFSET;
-	void __iomem *ack = abox->sram + ABOX_IPC_TX_ACK_OFFSET;
-	u32 pending;
+	void __iomem *tx, *ack;
+	u32 pending, ipc_id;
 	int ret;
 
+	memcpy(&ipc_id, message, sizeof(ipc_id));
+	if (!ipc_id || ipc_id >= 16)
+		return -EINVAL;
+	tx = abox->sram + ABOX_IPC_TX_OFFSET;
+	ack = abox->sram + ABOX_IPC_TX_ACK_OFFSET;
+
+	if (abox->stopping && !stopping)
+		return -ESHUTDOWN;
+	if (!abox->firmware_running && !(abox->stopping && stopping))
+		return -EHOSTDOWN;
+
 	ret = readl_poll_timeout(ack, pending, !pending, 10,
-				 ABOX_SUSPEND_TIMEOUT_US);
+				 ABOX_IPC_TIMEOUT_US);
 	if (ret) {
-		dev_err(abox->dev, "AP-to-ABOX IPC is still pending\n");
+		dev_err(abox->dev,
+			"AP-to-ABOX IPC is still pending; refusing another request\n");
 		return ret;
 	}
 
-	/* IPC_SYSTEM, task 0, ABOX_SUSPEND; clear the unused message payload. */
-	memset_io(tx, 0, ABOX_IPC_TX_ACK_OFFSET - ABOX_IPC_TX_OFFSET);
-	writel(ABOX_IPC_SYSTEM, tx);
-	writel(0, tx + sizeof(u32));
-	writel(ABOX_SYSTEM_SUSPEND, tx + sizeof(u32) * 2);
+	memset_io(tx, 0, ABOX_IPC_MSG_SIZE);
+	memcpy_toio(tx, message, size);
 	writel(1, ack);
 	/* Publish the message and acknowledgement before ringing the SGI. */
 	wmb();
-	writel(BIT(16) | ABOX_IPC_SYSTEM, abox->gicd + ABOX_GIC_SGIR);
+	writel(BIT(16) | ipc_id, abox->gicd + ABOX_GIC_SGIR);
 
 	ret = readl_poll_timeout(ack, pending, !pending, 10,
-				 ABOX_SUSPEND_TIMEOUT_US);
+				 ABOX_IPC_TIMEOUT_US);
 	if (ret)
-		dev_err(abox->dev, "ABOX suspend IPC timed out\n");
+		dev_err(abox->dev, "ABOX IPC %u timed out\n", ipc_id);
 
 	return ret;
+}
+
+int exynos7885_abox_send_ipc(struct device *dev, const void *message,
+			     size_t size)
+{
+	struct rproc *rproc;
+	struct exynos7885_abox_rproc *abox;
+	int ret;
+
+	if (!dev || !message || size < sizeof(u32) ||
+	    size > ABOX_IPC_MSG_SIZE || !IS_ALIGNED(size, sizeof(u32)))
+		return -EINVAL;
+
+	rproc = dev_get_drvdata(dev);
+	if (!rproc)
+		return -ENODEV;
+
+	abox = rproc->priv;
+	mutex_lock(&abox->ipc_lock);
+	ret = exynos7885_abox_send_ipc_locked(abox, message, size, false);
+	mutex_unlock(&abox->ipc_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_send_ipc);
+
+static int exynos7885_abox_request_suspend(struct exynos7885_abox_rproc *abox)
+{
+	u32 message[ABOX_IPC_MSG_SIZE / sizeof(u32)] = {};
+
+	/* IPC_SYSTEM, task 0, ABOX_SUSPEND. */
+	message[0] = ABOX_IPC_SYSTEM;
+	message[2] = ABOX_SYSTEM_SUSPEND;
+
+	return exynos7885_abox_send_ipc_locked(abox, message, sizeof(message),
+					       true);
 }
 
 static int exynos7885_abox_stop_cpu(struct exynos7885_abox_rproc *abox)
@@ -405,25 +455,33 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 	unsigned int cpu;
 	int ret;
 
+	mutex_lock(&abox->ipc_lock);
 	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
 	if (ret)
-		return ret;
+		goto out_unlock;
 	if (cpu & ABOX_CA7_STATUS_ON) {
-		if (!abox->firmware_running) {
+		if (!abox->firmware_running && !abox->stopping) {
 			dev_err(rproc->dev.parent,
 				"ABOX CPU is on without a tracked firmware start\n");
-			return -EBUSY;
+			ret = -EBUSY;
+			goto out_unlock;
 		}
 
+		abox->stopping = true;
 		ret = exynos7885_abox_stop_cpu(abox);
 		if (ret)
-			return ret;
+			goto out_unlock;
+	} else if (abox->stopping || abox->firmware_running) {
+		ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
+					 ABOX_CA7_LOCAL_PWR, 0);
+		if (ret)
+			goto out_unlock;
 	}
 	ret = exynos7885_abox_check_idle(abox);
 	if (ret) {
 		dev_err(rproc->dev.parent,
 			"ABOX idle state is unconfirmed; preserving mappings\n");
-		return ret;
+		goto out_unlock;
 	}
 
 	if (abox->irq_enabled) {
@@ -431,8 +489,12 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 		abox->irq_enabled = false;
 	}
 	abox->firmware_running = false;
+	abox->stopping = false;
 
-	return 0;
+	ret = 0;
+out_unlock:
+	mutex_unlock(&abox->ipc_lock);
+	return ret;
 }
 
 static const struct rproc_ops exynos7885_abox_ops = {
@@ -502,6 +564,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 				     "failed to get ABOX parent IRQ\n");
 
 	init_completion(&abox->boot_done);
+	mutex_init(&abox->ipc_lock);
 	/* Keep the parent IRQ off until a future start path initializes the GIC. */
 	ret = devm_request_irq(dev, abox->irq, exynos7885_abox_irq,
 			       IRQF_NO_AUTOEN, dev_name(dev), abox);
