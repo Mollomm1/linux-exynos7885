@@ -242,6 +242,19 @@ static int exynos7885_abox_start(struct rproc *rproc)
 
 static int exynos7885_abox_stop(struct rproc *rproc)
 {
+	struct exynos7885_abox_rproc *abox = rproc->priv;
+	unsigned int cpu;
+	int ret;
+
+	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
+	if (ret)
+		return ret;
+	if (cpu & 1) {
+		dev_err(rproc->dev.parent,
+			"refusing to report ABOX stopped while its CPU is on\n");
+		return -EBUSY;
+	}
+
 	return 0;
 }
 
