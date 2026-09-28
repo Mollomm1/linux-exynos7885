@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Explicit-load, non-booting Exynos7885 ABOX remoteproc staging driver. */
 
+#include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
@@ -216,6 +217,9 @@ static int exynos7885_abox_load(struct rproc *rproc,
 
 	memset(abox->dram->va, 0, abox->dram->len);
 	memcpy(abox->dram->va, dram->data, dram->size);
+	/* Make the cached DRAM image visible to the non-coherent ABOX master. */
+	dma_sync_single_for_device(rproc->dev.parent, ABOX_DRAM_IOVA,
+				   abox->dram->len, DMA_TO_DEVICE);
 	memset_io(abox->sram, 0, abox->sram_size);
 	memcpy_toio(abox->sram, sram->data, sram->size);
 	/* Firmware must be visible in SRAM before a later start operation. */
