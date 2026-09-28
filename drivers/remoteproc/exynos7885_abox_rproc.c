@@ -429,19 +429,21 @@ static int exynos7885_abox_request_suspend(struct exynos7885_abox_rproc *abox)
 static int exynos7885_abox_stop_cpu(struct exynos7885_abox_rproc *abox)
 {
 	unsigned int status;
-	int ret;
+	int ipc_ret, ret;
 
-	ret = exynos7885_abox_request_suspend(abox);
-	if (ret)
-		return ret;
+	ipc_ret = exynos7885_abox_request_suspend(abox);
 
 	ret = regmap_read_poll_timeout(abox->pmu, ABOX_CA7_STATUS, status,
 				       status & ABOX_CA7_STATUS_WFI, 100,
 				       ABOX_WFI_TIMEOUT_US);
 	if (ret) {
-		dev_err(abox->dev, "ABOX did not enter WFI after suspend\n");
-		return ret;
+		dev_err(abox->dev,
+			"ABOX did not acknowledge suspend or enter WFI\n");
+		return ipc_ret ?: ret;
 	}
+	if (ipc_ret)
+		dev_warn(abox->dev,
+			 "suspend IPC was not acknowledged; CA7 WFI confirms idle\n");
 
 	/* Hold the quiescent CA7 before removing its local power. */
 	ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
