@@ -11,8 +11,8 @@ maintainers:
 
 description: |
   The Exynos7885 audio processor has control registers, a system register
-  aperture, and local SRAM. The initial driver only validates these resources;
-  it does not access the registers or start firmware.
+  aperture, and local SRAM. A reserved DRAM firmware region may be assigned
+  through memory-region for the ABOX remote processor.
 
 properties:
   compatible:
@@ -29,6 +29,9 @@ properties:
       - const: sfr
       - const: sysreg
       - const: sram
+
+  memory-region:
+    maxItems: 1
 
 required:
   - compatible
