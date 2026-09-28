@@ -12,6 +12,9 @@ maintainers:
 description: |+
   Exynos processors include support for multiple power domains which are used
   to gate power to one or more peripherals on the processor.
+  The Exynos7885 DISPAUD domain is exposed only when already powered. Its
+  driver keeps it on because power cycling requires secure state handoff
+  and an orderly ABOX firmware shutdown.
 
 allOf:
   - $ref: power-domain.yaml#
@@ -21,6 +24,7 @@ properties:
     enum:
       - samsung,exynos4210-pd
       - samsung,exynos5433-pd
+      - samsung,exynos7885-dispaud-pd
 
   reg:
     maxItems: 1
