@@ -56,7 +56,7 @@ properties:
 
   pinctrl-names:
     items:
-      - const: default
+      - const: active
       - const: idle
 
   pinctrl-0: true
