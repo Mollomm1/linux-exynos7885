@@ -7,9 +7,11 @@
  */
 
 #include <linux/clk-provider.h>
+#include <linux/init.h>
 #include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/string.h>
 
 #include <dt-bindings/clock/exynos7885.h>
 
@@ -880,6 +882,18 @@ static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
 	.clk_name		= "oscclk",
 };
 
+static bool exynos7885_enable_dispaud;
+
+static int __init exynos7885_dispaud_setup(char *str)
+{
+	if (!str || strcmp(str, "1"))
+		return -EINVAL;
+
+	exynos7885_enable_dispaud = true;
+	return 0;
+}
+early_param("exynos7885.dispaud", exynos7885_dispaud_setup);
+
 /* ---- platform_driver ----------------------------------------------------- */
 
 static int __init exynos7885_cmu_probe(struct platform_device *pdev)
@@ -888,6 +902,10 @@ static int __init exynos7885_cmu_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 
 	info = of_device_get_match_data(dev);
+	/* Registering this CMU writes gate manual/automatic bits at probe. */
+	if (info == &dispaud_cmu_info && !exynos7885_enable_dispaud)
+		return -ENODEV;
+
 	exynos_arm64_register_cmu(dev, dev->of_node, info);
 
 	return 0;
