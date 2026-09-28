@@ -1087,7 +1087,7 @@ static void exynos7885_abox_init_local_gic(struct exynos7885_abox_rproc *abox)
 static int exynos7885_abox_start(struct rproc *rproc)
 {
 	struct exynos7885_abox_rproc *abox = rproc->priv;
-	unsigned int option, status;
+	unsigned int option, status, configuration;
 	long waited;
 	int ret, start_ret, stop_ret;
 
@@ -1258,36 +1258,54 @@ fail_after_release:
 
 fail_before_release:
 	start_ret = ret;
-	regmap_update_bits(abox->pmu, ABOX_CA7_OPTION, ABOX_CA7_ENABLE, 0);
-	regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
-			   ABOX_CA7_LOCAL_PWR, 0);
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
+				 ABOX_CA7_ENABLE, 0);
+	if (ret)
+		goto fail_before_release_uncertain;
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
+				 ABOX_CA7_LOCAL_PWR, 0);
+	if (ret)
+		goto fail_before_release_uncertain;
 	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &status);
-	if (!ret && !(status & ABOX_CA7_STATUS_ON)) {
-		ret = regmap_read(abox->pmu, ABOX_CA7_OPTION, &option);
-		if (!ret && (option & ABOX_CA7_ENABLE))
-			ret = -EBUSY;
+	if (ret)
+		goto fail_before_release_uncertain;
+	if (status & ABOX_CA7_STATUS_ON) {
+		ret = -EBUSY;
+		goto fail_before_release_uncertain;
 	}
-	if (ret || (status & ABOX_CA7_STATUS_ON)) {
-		dev_crit(abox->dev,
-			 "ABOX CPU state became uncertain before release; retaining resources\n");
-		mutex_lock(&abox->ipc_lock);
-		abox->firmware_running = true;
-		abox->firmware_ready = false;
-		mutex_unlock(&abox->ipc_lock);
-		return 0;
+	ret = regmap_read(abox->pmu, ABOX_CA7_OPTION, &option);
+	if (ret)
+		goto fail_before_release_uncertain;
+	if (option & ABOX_CA7_ENABLE) {
+		ret = -EBUSY;
+		goto fail_before_release_uncertain;
+	}
+	ret = regmap_read(abox->pmu, ABOX_CA7_CONFIGURATION, &configuration);
+	if (ret)
+		goto fail_before_release_uncertain;
+	if (configuration & ABOX_CA7_LOCAL_PWR) {
+		ret = -EBUSY;
+		goto fail_before_release_uncertain;
 	}
 	ret = exynos7885_abox_release_resources(abox);
 	if (ret) {
 		dev_crit(abox->dev,
 			 "pre-start cleanup failed (%d); retaining remoteproc resources\n",
 			 ret);
-		mutex_lock(&abox->ipc_lock);
-		abox->firmware_running = true;
-		abox->firmware_ready = false;
-		mutex_unlock(&abox->ipc_lock);
-		return 0;
+		goto fail_before_release_retain;
 	}
 	return start_ret;
+
+fail_before_release_uncertain:
+	dev_crit(abox->dev,
+		 "ABOX pre-start cleanup is unconfirmed (%d); retaining resources\n",
+		 ret);
+fail_before_release_retain:
+	mutex_lock(&abox->ipc_lock);
+	abox->firmware_running = true;
+	abox->firmware_ready = false;
+	mutex_unlock(&abox->ipc_lock);
+	return 0;
 }
 
 static int exynos7885_abox_stop(struct rproc *rproc)
