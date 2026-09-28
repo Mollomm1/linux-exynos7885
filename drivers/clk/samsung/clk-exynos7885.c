@@ -23,7 +23,7 @@
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
-#define CLKS_NR_DISPAUD			(CLK_DOUT_AUD_CPU_ACLK + 1)
+#define CLKS_NR_DISPAUD			(CLK_MOUT_AUD_UAIF3 + 1)
 
 static bool exynos7885_enable_dispaud;
 
@@ -852,6 +852,7 @@ static const struct samsung_cmu_info fsys_cmu_info __initconst = {
 #define PLL_CON3_PLL_AUD		0x016c
 #define CLK_CON_MUX_AUD_CPU		0x1000
 #define CLK_CON_MUX_AUD_CPU_HCH		0x1004
+#define CLK_CON_MUX_AUD_UAIF3		0x1014
 #define PLL_CON0_MUX_AUD_CPU_USER	0x0100
 #define CLK_CON_DIV_AUDIF		0x1800
 #define CLK_CON_DIV_AUD_BUS		0x1804
@@ -869,6 +870,7 @@ static const unsigned long dispaud_clk_regs[] __initconst = {
 	PLL_CON3_PLL_AUD,
 	CLK_CON_MUX_AUD_CPU,
 	CLK_CON_MUX_AUD_CPU_HCH,
+	CLK_CON_MUX_AUD_UAIF3,
 	PLL_CON0_MUX_AUD_CPU_USER,
 	CLK_CON_DIV_AUDIF,
 	CLK_CON_DIV_AUD_BUS,
@@ -887,9 +889,15 @@ static const struct samsung_pll_clock dispaud_pll_clks[] __initconst = {
 	    0, PLL_CON0_PLL_AUD, NULL),
 };
 
+static const struct samsung_fixed_rate_clock dispaud_fixed_clks[] __initconst = {
+	/* External AUDCDCLK3 input rate from the downstream clock model. */
+	FRATE(IOCLK_AUDIOCDCLK3, "ioclk_audiocdclk3", NULL, 0, 100000000),
+};
+
 PNAME(mout_aud_cpu_user_p) = { "oscclk", "dout_dispaud_cpu" };
 PNAME(mout_aud_cpu_p) = { "dout_aud_pll", "mout_aud_cpu_user" };
 PNAME(mout_aud_cpu_hch_p) = { "mout_aud_cpu", "oscclk" };
+PNAME(mout_aud_uaif3_p) = { "dout_uaif3", "ioclk_audiocdclk3" };
 
 static const struct samsung_mux_clock dispaud_mux_clks[] __initconst = {
 	MUX(CLK_MOUT_AUD_CPU_USER, "mout_aud_cpu_user",
@@ -898,6 +906,8 @@ static const struct samsung_mux_clock dispaud_mux_clks[] __initconst = {
 	    CLK_CON_MUX_AUD_CPU, 0, 1),
 	MUX(CLK_MOUT_AUD_CPU_HCH, "mout_aud_cpu_hch",
 	    mout_aud_cpu_hch_p, CLK_CON_MUX_AUD_CPU_HCH, 0, 1),
+	MUX(CLK_MOUT_AUD_UAIF3, "mout_aud_uaif3", mout_aud_uaif3_p,
+	    CLK_CON_MUX_AUD_UAIF3, 0, 1),
 };
 
 static const struct samsung_div_clock dispaud_div_clks[] __initconst = {
@@ -918,9 +928,9 @@ static const struct samsung_gate_clock dispaud_gate_clks[] __initconst = {
 	     CLK_CON_GAT_ABOX_ACLK, 21, 0, 0),
 	GATE(CLK_GOUT_SMMU_ABOX_CLK, "gout_smmu_abox_clk",
 	     "dout_aud_bus", CLK_CON_GAT_SMMU_ABOX_CLK, 21, 0, 0),
-	GATE(CLK_GOUT_UAIF3_BCLK, "gout_uaif3_bclk", "dout_uaif3",
+	GATE(CLK_GOUT_UAIF3_BCLK, "gout_uaif3_bclk", "mout_aud_uaif3",
 	     CLK_CON_GAT_UAIF3_BCLK, 21, 0, 0),
-	GATE(CLK_GOUT_UAIF3_SYNC, "gout_uaif3_sync", "dout_uaif3",
+	GATE(CLK_GOUT_UAIF3_SYNC, "gout_uaif3_sync", "mout_aud_uaif3",
 	     CLK_CON_GAT_UAIF3_SYNC, 21, 0, 0),
 	GATE(CLK_GOUT_ABOX_CA7, "gout_abox_ca7", "mout_aud_cpu_hch",
 	     CLK_CON_GAT_ABOX_CA7, 21, 0, 0),
@@ -929,6 +939,8 @@ static const struct samsung_gate_clock dispaud_gate_clks[] __initconst = {
 static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
 	.pll_clks		= dispaud_pll_clks,
 	.nr_pll_clks		= ARRAY_SIZE(dispaud_pll_clks),
+	.fixed_clks		= dispaud_fixed_clks,
+	.nr_fixed_clks		= ARRAY_SIZE(dispaud_fixed_clks),
 	.mux_clks		= dispaud_mux_clks,
 	.nr_mux_clks		= ARRAY_SIZE(dispaud_mux_clks),
 	.div_clks		= dispaud_div_clks,
