@@ -361,8 +361,12 @@
 			compatible = "samsung,exynos7885-abox";
 			reg = <0x14a50000 0x10000>,
 			      <0x14820000 0x10000>,
-			      <0x14b00000 0x28000>;
-			reg-names = "sfr", "sysreg", "sram";
+			      <0x14b00000 0x28000>,
+			      <0x14af1000 0x1000>,
+			      <0x14af2000 0x1004>;
+			reg-names = "sfr", "sysreg", "sram", "gicd", "gicc";
+			interrupts = <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "abox";
 			iommus = <&sysmmu_abox>;
 			status = "disabled";
 		};
