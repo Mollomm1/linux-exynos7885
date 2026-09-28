@@ -291,6 +291,7 @@
 			clocks = <&oscclk>,
 				 <&cmu_top CLK_DOUT_DISPAUD_CPU>;
 			clock-names = "oscclk", "dout_dispaud_cpu";
+			power-domains = <&pd_dispaud>;
 			status = "disabled";
 		};
 
@@ -353,6 +354,7 @@
 			interrupts = <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&cmu_dispaud CLK_GOUT_SMMU_ABOX_CLK>;
 			clock-names = "sysmmu";
+			power-domains = <&pd_dispaud>;
 			#iommu-cells = <0>;
 			status = "disabled";
 		};
@@ -378,6 +380,7 @@
 			clock-names = "pll", "ca7", "audif", "uaif3-div",
 				      "uaif3-mux", "aclk",
 				      "uaif3-bclk", "uaif3-sync";
+			power-domains = <&pd_dispaud>;
 			iommus = <&sysmmu_abox>;
 			status = "disabled";
 		};

@@ -51,6 +51,12 @@ properties:
   reg:
     maxItems: 1
 
+  power-domains:
+    maxItems: 1
+    description:
+      Power domain containing the clock controller. Required for the
+      DISPAUD controller.
+
 allOf:
   - if:
       properties:
@@ -59,6 +65,8 @@ allOf:
             const: samsung,exynos7885-cmu-dispaud
 
     then:
+      required:
+        - power-domains
       properties:
         clocks:
           items:

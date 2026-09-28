@@ -73,6 +73,10 @@ properties:
   iommus:
     maxItems: 1
 
+  power-domains:
+    maxItems: 1
+    description: DISPAUD power domain containing the ABOX processor.
+
 patternProperties:
   "^abox-audio$":
     type: object
@@ -101,6 +105,7 @@ patternProperties:
         description: Firmware path passed to request_firmware().
 
       samsung,area:
+        $ref: /schemas/types.yaml#/definitions/uint32
         const: 1
         description: Firmware is copied into the DRAM carveout.
 
@@ -123,11 +128,18 @@ required:
   - interrupt-names
   - clocks
   - clock-names
+  - power-domains
 
 additionalProperties: false
 
 examples:
   - |
+    pd_dispaud: power-domain@11c84020 {
+        compatible = "samsung,exynos7885-dispaud-pd";
+        reg = <0x11c84020 0x20>;
+        #power-domain-cells = <0>;
+    };
+
     audio-controller@14a50000 {
         compatible = "samsung,exynos7885-abox";
         reg = <0x14a50000 0x10000>,
@@ -145,5 +157,6 @@ examples:
         clock-names = "pll", "ca7", "audif", "uaif3-div",
                       "uaif3-mux", "aclk",
                       "uaif3-bclk", "uaif3-sync";
+        power-domains = <&pd_dispaud>;
     };
 ...
