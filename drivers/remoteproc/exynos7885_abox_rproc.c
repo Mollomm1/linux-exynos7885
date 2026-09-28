@@ -805,9 +805,14 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 	slot_width = width == 24 ? 32 : width;
 	sample_code = slot_width / 8 - 1;
 	bclk_rate = (unsigned long)rate * channels * slot_width;
-	pll_rate = rate % 44100 ? ABOX_AUD_PLL_RATE_48K :
-				 ABOX_AUD_PLL_RATE_44K;
-	audif_rate = rate % 44100 ? ABOX_AUDIF_RATE : ABOX_AUDIF_RATE_44K;
+	/* All standard 44.1 kHz-family rates are integer multiples of 11.025 kHz. */
+	if (!(rate % 11025)) {
+		pll_rate = ABOX_AUD_PLL_RATE_44K;
+		audif_rate = ABOX_AUDIF_RATE_44K;
+	} else {
+		pll_rate = ABOX_AUD_PLL_RATE_48K;
+		audif_rate = ABOX_AUDIF_RATE;
+	}
 
 	mutex_lock(&abox->uaif_lock);
 	if (abox->uaif3_enabled) {
