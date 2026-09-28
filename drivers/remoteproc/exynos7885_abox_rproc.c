@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Explicit-load, non-booting Exynos7885 ABOX remoteproc staging driver. */
 
-#include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
 #include <linux/iommu.h>
+#include <linux/memremap.h>
 #include <linux/mfd/syscon.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/remoteproc.h>
@@ -28,6 +29,7 @@
 
 struct exynos7885_abox_rproc {
 	struct regmap *pmu;
+	struct reserved_mem *dram_rmem;
 	struct rproc_mem_entry *dram;
 	bool pmu_mapped;
 	bool audsys_mapped;
@@ -115,18 +117,13 @@ static int exynos7885_abox_unprepare(struct rproc *rproc)
 static int exynos7885_abox_alloc_dram(struct rproc *rproc,
 				      struct rproc_mem_entry *mem)
 {
-	struct device *dev = rproc->dev.parent;
+	struct exynos7885_abox_rproc *abox = rproc->priv;
 	int ret;
 
-	mem->va = dma_alloc_coherent(dev, mem->len, &mem->dma, GFP_KERNEL);
+	mem->va = memremap(abox->dram_rmem->base, mem->len, MEMREMAP_WB);
 	if (!mem->va)
 		return -ENOMEM;
-
-	/* This System MMU needs the physical address, not a DMA IOVA. */
-	if (is_vmalloc_addr(mem->va) || mem->dma != virt_to_phys(mem->va)) {
-		ret = -ERANGE;
-		goto free_dram;
-	}
+	mem->dma = abox->dram_rmem->base;
 
 	ret = iommu_map(rproc->domain, mem->da, mem->dma, mem->len,
 			IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
@@ -138,7 +135,7 @@ static int exynos7885_abox_alloc_dram(struct rproc *rproc,
 	return 0;
 
 free_dram:
-	dma_free_coherent(dev, mem->len, mem->va, mem->dma);
+	memunmap(mem->va);
 	mem->va = NULL;
 	return ret;
 }
@@ -153,9 +150,10 @@ static int exynos7885_abox_release_dram(struct rproc *rproc,
 
 	unmapped = iommu_unmap(rproc->domain, mem->da, mem->len);
 	if (unmapped != mem->len)
-		dev_warn(rproc->dev.parent, "DRAM IOMMU unmap covered %zu of %zu bytes\n",
+		dev_warn(rproc->dev.parent,
+			 "DRAM IOMMU unmap covered %zu of %zu bytes\n",
 			 unmapped, mem->len);
-	dma_free_coherent(rproc->dev.parent, mem->len, mem->va, mem->dma);
+	memunmap(mem->va);
 	mem->va = NULL;
 	return 0;
 }
@@ -229,6 +227,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct exynos7885_abox_rproc *abox;
 	struct resource *sram;
+	struct device_node *mem_np;
 	struct rproc *rproc;
 	int ret;
 
@@ -250,6 +249,17 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	abox->pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7885-pmu");
 	if (IS_ERR(abox->pmu))
 		return PTR_ERR(abox->pmu);
+
+	mem_np = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (!mem_np)
+		return dev_err_probe(dev, -EINVAL,
+				     "missing DRAM firmware memory-region\n");
+	abox->dram_rmem = of_reserved_mem_lookup(mem_np);
+	of_node_put(mem_np);
+	if (!abox->dram_rmem || abox->dram_rmem->size < ABOX_DRAM_SIZE ||
+	    !IS_ALIGNED(abox->dram_rmem->base, SZ_1M))
+		return dev_err_probe(dev, -EINVAL,
+				     "DRAM firmware region must be at least 12 MiB and 1 MiB aligned\n");
 
 	rproc->has_iommu = true;
 	rproc->auto_boot = false;
