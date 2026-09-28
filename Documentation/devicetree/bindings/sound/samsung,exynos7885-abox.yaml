@@ -41,6 +41,19 @@ properties:
     items:
       - const: abox
 
+  clocks:
+    minItems: 6
+    maxItems: 6
+
+  clock-names:
+    items:
+      - const: pll
+      - const: ca7
+      - const: audif
+      - const: aclk
+      - const: uaif3-bclk
+      - const: uaif3-sync
+
   memory-region:
     maxItems: 1
 
@@ -53,6 +66,8 @@ required:
   - reg-names
   - interrupts
   - interrupt-names
+  - clocks
+  - clock-names
 
 additionalProperties: false
 
@@ -68,5 +83,10 @@ examples:
         reg-names = "sfr", "sysreg", "sram", "gicd", "gicc";
         interrupts = <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>;
         interrupt-names = "abox";
+        clocks = <&cmu_dispaud 1>, <&cmu_dispaud 13>,
+                 <&cmu_dispaud 2>, <&cmu_dispaud 5>,
+                 <&cmu_dispaud 7>, <&cmu_dispaud 8>;
+        clock-names = "pll", "ca7", "audif", "aclk",
+                      "uaif3-bclk", "uaif3-sync";
     };
 ...

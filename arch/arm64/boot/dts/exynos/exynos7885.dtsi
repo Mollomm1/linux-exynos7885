@@ -367,6 +367,14 @@
 			reg-names = "sfr", "sysreg", "sram", "gicd", "gicc";
 			interrupts = <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "abox";
+			clocks = <&cmu_dispaud CLK_FOUT_AUD_PLL>,
+				 <&cmu_dispaud CLK_GOUT_ABOX_CA7>,
+				 <&cmu_dispaud CLK_DOUT_AUDIF>,
+				 <&cmu_dispaud CLK_GOUT_ABOX_ACLK>,
+				 <&cmu_dispaud CLK_GOUT_UAIF3_BCLK>,
+				 <&cmu_dispaud CLK_GOUT_UAIF3_SYNC>;
+			clock-names = "pll", "ca7", "audif", "aclk",
+				      "uaif3-bclk", "uaif3-sync";
 			iommus = <&sysmmu_abox>;
 			status = "disabled";
 		};
