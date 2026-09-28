@@ -3,10 +3,12 @@
 
 #include <linux/firmware.h>
 #include <linux/ktime.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 
 #define ABOX_SRAM_SIZE		0x28000
 #define ABOX_DRAM_LIMIT		(12 * 1024 * 1024)
@@ -41,6 +43,39 @@ static ssize_t firmware_status_show(struct device *dev,
 	return len;
 }
 static DEVICE_ATTR_RO(firmware_status);
+
+static ssize_t pmu_state_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct regmap *pmu;
+	unsigned int domain_cfg, domain_status, cpu_cfg, cpu_status, cpu_option;
+	int ret;
+
+	pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7885-pmu");
+	if (IS_ERR(pmu))
+		return PTR_ERR(pmu);
+
+	ret = regmap_read(pmu, 0x4020, &domain_cfg);
+	if (ret)
+		return ret;
+	ret = regmap_read(pmu, 0x4024, &domain_status);
+	if (ret)
+		return ret;
+	ret = regmap_read(pmu, 0x2520, &cpu_cfg);
+	if (ret)
+		return ret;
+	ret = regmap_read(pmu, 0x2524, &cpu_status);
+	if (ret)
+		return ret;
+	ret = regmap_read(pmu, 0x2528, &cpu_option);
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf,
+		"domain_cfg=%08x domain_status=%08x cpu_cfg=%08x cpu_status=%08x cpu_option=%08x\n",
+		domain_cfg, domain_status, cpu_cfg, cpu_status, cpu_option);
+}
+static DEVICE_ATTR_RO(pmu_state);
 
 static ssize_t verify_firmware_store(struct device *dev,
 				     struct device_attribute *attr,
@@ -84,6 +119,7 @@ static DEVICE_ATTR_WO(verify_firmware);
 
 static struct attribute *abox_preflight_attrs[] = {
 	&dev_attr_firmware_status.attr,
+	&dev_attr_pmu_state.attr,
 	&dev_attr_verify_firmware.attr,
 	NULL,
 };

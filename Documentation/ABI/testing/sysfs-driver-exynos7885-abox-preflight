@@ -1,0 +1,23 @@
+What:		/sys/bus/platform/devices/14a50000.audio-controller/pmu_state
+Date:		September 2026
+Contact:	Mollomm1 <Mollomm1@users.noreply.github.com>
+Description:
+		Explicit, read-only snapshot of the Exynos7885 DISPAUD PMU
+		configuration/status and ABOX CA7 configuration/status/option.
+		The five values are printed as eight-digit hexadecimal words.
+		Reading this attribute does not start ABOX or write registers.
+
+What:		/sys/bus/platform/devices/14a50000.audio-controller/firmware_status
+Date:		September 2026
+Contact:	Mollomm1 <Mollomm1@users.noreply.github.com>
+Description:
+		Result and image sizes from the most recent firmware preflight.
+		The initial value is "unchecked".
+
+What:		/sys/bus/platform/devices/14a50000.audio-controller/verify_firmware
+Date:		September 2026
+Contact:	Mollomm1 <Mollomm1@users.noreply.github.com>
+Description:
+		Writing "1" explicitly loads the packaged Calliope SRAM and DRAM
+		firmware into host memory and checks their sizes. It does not copy
+		firmware to ABOX memory or start the processor.
