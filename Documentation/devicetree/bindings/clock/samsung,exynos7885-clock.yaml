@@ -63,10 +63,12 @@ allOf:
         clocks:
           items:
             - description: External reference clock (26 MHz)
+            - description: ABOX CPU clock from CMU_TOP
 
         clock-names:
           items:
             - const: oscclk
+            - const: dout_dispaud_cpu
 
   - if:
       properties:
