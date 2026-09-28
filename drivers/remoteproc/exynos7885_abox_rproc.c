@@ -341,7 +341,11 @@ out:
 
 static int exynos7885_abox_start(struct rproc *rproc)
 {
-	/* Firmware execution requires a verified boot-ack and stop path. */
+	/*
+	 * The remoteproc core does not call .stop() when .start() fails; it
+	 * unprepares the device and releases its IOMMU mappings. Keep execution
+	 * disabled until every failure after CA7 release has a verified rollback.
+	 */
 	return -EOPNOTSUPP;
 }
 
