@@ -2,6 +2,7 @@
 /* Explicit-load Exynos7885 ABOX remoteproc driver. */
 
 #include <linux/bitops.h>
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/dma-mapping.h>
@@ -38,6 +39,18 @@
 #define ABOX_RDMA_INTERVAL	0x100
 #define ABOX_RDMA_STATUS	0x30
 #define ABOX_RDMA_PROGRESS	BIT(31)
+#define ABOX_UAIF3_CTRL0	0x0530
+#define ABOX_UAIF3_CTRL1	0x0534
+#define ABOX_UAIF3_SPK_ENABLE	BIT(0)
+#define ABOX_UAIF3_MODE		BIT(2)
+#define ABOX_UAIF3_FORMAT	GENMASK(28, 24)
+#define ABOX_UAIF3_BCLK_POLARITY	BIT(23)
+#define ABOX_UAIF3_WS_MODE	BIT(22)
+#define ABOX_UAIF3_WS_POLARITY	BIT(21)
+#define ABOX_UAIF3_SLOT_MAX	GENMASK(20, 18)
+#define ABOX_UAIF3_SBIT_MAX	GENMASK(17, 12)
+#define ABOX_UAIF3_VALID_START	GENMASK(11, 6)
+#define ABOX_UAIF3_VALID_END	GENMASK(5, 0)
 #define ABOX_PMU_IOVA		0x11c80000
 #define ABOX_PMU_SIZE		SZ_64K
 #define ABOX_AUDSYS_IOVA	0x12090000
@@ -71,23 +84,28 @@
 #define ABOX_STOP_TIMEOUT_US	20000
 #define ABOX_BOOT_TIMEOUT_MS	10000
 #define ABOX_AUD_PLL_RATE_48K	1179648040
+#define ABOX_AUD_PLL_RATE_44K	1083801605
 #define ABOX_AUDIF_RATE		24576000
+#define ABOX_AUDIF_RATE_44K	22579200
 #define ABOX_CA7_RATE		393216000
 #define ABOX_GIC_IRQ_LIMIT	32
 #define ABOX_GIC_SPURIOUS	1021
-#define ABOX_NUM_CLOCKS		6
+#define ABOX_NUM_CLOCKS		8
 
 enum exynos7885_abox_clock_id {
 	ABOX_CLK_PLL,
 	ABOX_CLK_CA7,
 	ABOX_CLK_AUDIF,
+	ABOX_CLK_UAIF3_DIV,
+	ABOX_CLK_UAIF3_MUX,
 	ABOX_CLK_ACLK,
 	ABOX_CLK_UAIF3_BCLK,
 	ABOX_CLK_UAIF3_SYNC,
 };
 
 static const char * const exynos7885_abox_clock_names[ABOX_NUM_CLOCKS] = {
-	"pll", "ca7", "audif", "aclk", "uaif3-bclk", "uaif3-sync",
+	"pll", "ca7", "audif", "uaif3-div", "uaif3-mux", "aclk",
+	"uaif3-bclk", "uaif3-sync",
 };
 
 struct exynos7885_abox_rproc {
@@ -112,6 +130,8 @@ struct exynos7885_abox_rproc {
 	struct mutex handler_lock;
 	/* Serializes PCM mapping with RDMA teardown and remoteproc stop. */
 	struct mutex pcm_lock;
+	/* Serializes UAIF3 register and clock operations. */
+	struct mutex uaif_lock;
 	exynos7885_abox_ipc_handler_t ipc_handler;
 	void *ipc_handler_data;
 	int irq;
@@ -126,6 +146,7 @@ struct exynos7885_abox_rproc {
 	bool dram_requested;
 	bool pcm_mapped;
 	bool pcm_shutting_down;
+	bool uaif3_enabled;
 	bool firmware_running;
 	bool firmware_ready;
 	bool stopping;
@@ -707,6 +728,181 @@ int exynos7885_abox_sync_pcm_buffer(struct device *dev, size_t offset,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_sync_pcm_buffer);
+
+int exynos7885_abox_uaif3_set_fmt(struct device *dev, unsigned int format,
+				  bool invert_bclk, bool invert_frame,
+				  bool abox_master)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	u32 ctrl0, ctrl1;
+
+	if (!rproc)
+		return -ENODEV;
+	if (format > EXYNOS7885_ABOX_UAIF3_DSP_A)
+		return -EINVAL;
+	if (!abox_master)
+		return -EOPNOTSUPP;
+
+	abox = rproc->priv;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+
+	mutex_lock(&abox->uaif_lock);
+	if (abox->uaif3_enabled) {
+		mutex_unlock(&abox->uaif_lock);
+		return -EBUSY;
+	}
+	ctrl0 = readl(abox->sfr + ABOX_UAIF3_CTRL0);
+	ctrl1 = readl(abox->sfr + ABOX_UAIF3_CTRL1);
+	ctrl0 &= ~(ABOX_UAIF3_MODE | ABOX_UAIF3_SPK_ENABLE);
+	if (abox_master)
+		ctrl0 |= ABOX_UAIF3_MODE;
+	ctrl1 &= ~(ABOX_UAIF3_BCLK_POLARITY | ABOX_UAIF3_WS_MODE |
+		   ABOX_UAIF3_WS_POLARITY);
+	if (!invert_bclk)
+		ctrl1 |= ABOX_UAIF3_BCLK_POLARITY;
+	if (format == EXYNOS7885_ABOX_UAIF3_DSP_A)
+		ctrl1 |= ABOX_UAIF3_WS_MODE;
+	if (invert_frame)
+		ctrl1 |= ABOX_UAIF3_WS_POLARITY;
+	writel(ctrl0, abox->sfr + ABOX_UAIF3_CTRL0);
+	writel(ctrl1, abox->sfr + ABOX_UAIF3_CTRL1);
+	/* Publish frame format before a later clock enable starts the pins. */
+	wmb();
+	mutex_unlock(&abox->uaif_lock);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_set_fmt);
+
+int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
+				    unsigned int width,
+				    unsigned int channels)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	unsigned int slot_width, sample_code;
+	unsigned long pll_rate, audif_rate, bclk_rate;
+	u32 ctrl1;
+	int ret;
+
+	if (!rproc || channels != 2 || (width != 16 && width != 24 && width != 32) ||
+	    rate < 8000 || rate > 192000)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+	slot_width = width == 24 ? 32 : width;
+	sample_code = slot_width / 8 - 1;
+	bclk_rate = (unsigned long)rate * channels * slot_width;
+	pll_rate = rate % 44100 ? ABOX_AUD_PLL_RATE_48K :
+				 ABOX_AUD_PLL_RATE_44K;
+	audif_rate = rate % 44100 ? ABOX_AUDIF_RATE : ABOX_AUDIF_RATE_44K;
+
+	mutex_lock(&abox->uaif_lock);
+	if (abox->uaif3_enabled) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_PLL].clk, pll_rate);
+	if (ret)
+		goto out_unlock;
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk, audif_rate);
+	if (ret)
+		goto out_unlock;
+	ret = clk_set_parent(abox->clocks[ABOX_CLK_UAIF3_MUX].clk,
+			     abox->clocks[ABOX_CLK_UAIF3_DIV].clk);
+	if (ret)
+		goto out_unlock;
+	if (clk_get_parent(abox->clocks[ABOX_CLK_UAIF3_MUX].clk) !=
+	    abox->clocks[ABOX_CLK_UAIF3_DIV].clk) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_UAIF3_DIV].clk, bclk_rate);
+	if (ret)
+		goto out_unlock;
+	if (clk_get_rate(abox->clocks[ABOX_CLK_UAIF3_DIV].clk) != bclk_rate ||
+	    clk_get_rate(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk) != bclk_rate) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	ctrl1 = readl(abox->sfr + ABOX_UAIF3_CTRL1);
+	ctrl1 &= ~(ABOX_UAIF3_FORMAT | ABOX_UAIF3_SLOT_MAX |
+		   ABOX_UAIF3_SBIT_MAX | ABOX_UAIF3_VALID_START |
+		   ABOX_UAIF3_VALID_END);
+	ctrl1 |= FIELD_PREP(ABOX_UAIF3_FORMAT,
+			    1 | (sample_code << 3));
+	ctrl1 |= FIELD_PREP(ABOX_UAIF3_SLOT_MAX, channels - 1);
+	ctrl1 |= FIELD_PREP(ABOX_UAIF3_SBIT_MAX, slot_width - 1);
+	writel(ctrl1, abox->sfr + ABOX_UAIF3_CTRL1);
+	/* Make the slot configuration visible before the PCM trigger. */
+	wmb();
+
+out_unlock:
+	mutex_unlock(&abox->uaif_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_hw_params);
+
+int exynos7885_abox_uaif3_set_enabled(struct device *dev, bool enable)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	u32 ctrl0;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+	abox = rproc->priv;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+
+	mutex_lock(&abox->uaif_lock);
+	if (enable == abox->uaif3_enabled) {
+		ret = 0;
+		goto out_unlock;
+	}
+	if (enable) {
+		ret = clk_prepare_enable(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk);
+		if (ret)
+			goto out_unlock;
+		ret = clk_prepare_enable(abox->clocks[ABOX_CLK_UAIF3_SYNC].clk);
+		if (ret) {
+			clk_disable_unprepare(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk);
+			goto out_unlock;
+		}
+		ctrl0 = readl(abox->sfr + ABOX_UAIF3_CTRL0);
+		writel(ctrl0 | ABOX_UAIF3_SPK_ENABLE,
+		       abox->sfr + ABOX_UAIF3_CTRL0);
+		/* Enable the output before asking firmware to start RDMA. */
+		wmb();
+		abox->uaif3_enabled = true;
+		ret = 0;
+		goto out_unlock;
+	}
+
+	ret = exynos7885_abox_wait_rdma_idle(dev, 0, ABOX_STOP_TIMEOUT_US);
+	if (ret)
+		goto out_unlock;
+	ctrl0 = readl(abox->sfr + ABOX_UAIF3_CTRL0);
+	writel(ctrl0 & ~ABOX_UAIF3_SPK_ENABLE,
+	       abox->sfr + ABOX_UAIF3_CTRL0);
+	/* Disable the output before removing its clocks. */
+	wmb();
+	clk_disable_unprepare(abox->clocks[ABOX_CLK_UAIF3_SYNC].clk);
+	clk_disable_unprepare(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk);
+	abox->uaif3_enabled = false;
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&abox->uaif_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_set_enabled);
 
 int exynos7885_abox_register_ipc_handler(struct device *dev,
 					 exynos7885_abox_ipc_handler_t handler,

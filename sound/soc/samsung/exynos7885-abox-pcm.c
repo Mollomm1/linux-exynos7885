@@ -32,6 +32,11 @@ struct exynos7885_abox_pcm {
 	bool mapped;
 	bool configured;
 	bool running;
+	bool dai_fmt_valid;
+	bool invert_bclk;
+	bool invert_frame;
+	bool abox_master;
+	unsigned int dai_format;
 };
 
 static int exynos7885_abox_pcm_hw_free(struct snd_soc_component *component,
@@ -348,12 +353,17 @@ static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 		return -EINVAL;
 	}
 
-	if (start)
+	if (start) {
+		ret = exynos7885_abox_uaif3_set_enabled(pcm->abox_dev, true);
+		if (ret)
+			return ret;
 		WRITE_ONCE(pcm->running, true);
+	}
 	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
 				       EXYNOS7885_ABOX_PCM_TRIGGER, start, 0, 0);
 	if (ret) {
-		if (start)
+		if (start &&
+		    !exynos7885_abox_uaif3_set_enabled(pcm->abox_dev, false))
 			WRITE_ONCE(pcm->running, false);
 		return ret;
 	}
@@ -361,6 +371,9 @@ static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 		return 0;
 	ret = exynos7885_abox_wait_rdma_idle(pcm->abox_dev, ABOX_PCM_CHANNEL,
 					     20000);
+	if (ret)
+		return ret;
+	ret = exynos7885_abox_uaif3_set_enabled(pcm->abox_dev, false);
 	if (!ret)
 		WRITE_ONCE(pcm->running, false);
 	return ret;
@@ -388,8 +401,83 @@ static const struct snd_soc_component_driver exynos7885_abox_component = {
 	.pointer = exynos7885_abox_pcm_pointer,
 };
 
+static int exynos7885_abox_dai_set_fmt(struct snd_soc_dai *dai,
+				       unsigned int fmt)
+{
+	struct exynos7885_abox_pcm *pcm =
+		snd_soc_component_get_drvdata(dai->component);
+
+	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
+	case SND_SOC_DAIFMT_I2S:
+		pcm->dai_format = EXYNOS7885_ABOX_UAIF3_I2S;
+		break;
+	case SND_SOC_DAIFMT_DSP_A:
+		pcm->dai_format = EXYNOS7885_ABOX_UAIF3_DSP_A;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
+	case SND_SOC_DAIFMT_NB_NF:
+		pcm->invert_bclk = false;
+		pcm->invert_frame = false;
+		break;
+	case SND_SOC_DAIFMT_NB_IF:
+		pcm->invert_bclk = false;
+		pcm->invert_frame = true;
+		break;
+	case SND_SOC_DAIFMT_IB_NF:
+		pcm->invert_bclk = true;
+		pcm->invert_frame = false;
+		break;
+	case SND_SOC_DAIFMT_IB_IF:
+		pcm->invert_bclk = true;
+		pcm->invert_frame = true;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBC_CFC:
+		pcm->abox_master = true;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	pcm->dai_fmt_valid = true;
+	return 0;
+}
+
+static int exynos7885_abox_dai_hw_params(struct snd_pcm_substream *substream,
+					 struct snd_pcm_hw_params *params,
+					 struct snd_soc_dai *dai)
+{
+	struct exynos7885_abox_pcm *pcm =
+		snd_soc_component_get_drvdata(dai->component);
+	int ret;
+
+	if (!pcm->dai_fmt_valid)
+		return -EINVAL;
+
+	ret = exynos7885_abox_uaif3_set_fmt(pcm->abox_dev, pcm->dai_format,
+					    pcm->invert_bclk,
+					    pcm->invert_frame,
+					    pcm->abox_master);
+	if (ret)
+		return ret;
+
+	return exynos7885_abox_uaif3_hw_params(pcm->abox_dev,
+					       params_rate(params),
+					       params_width(params),
+					       params_channels(params));
+}
+
 static const struct snd_soc_dai_ops exynos7885_abox_dai_ops = {
-	/* Firmware configures UAIF3; CPU DAI programming is added separately. */
+	.set_fmt = exynos7885_abox_dai_set_fmt,
+	.hw_params = exynos7885_abox_dai_hw_params,
 };
 
 static struct snd_soc_dai_driver exynos7885_abox_dai = {
