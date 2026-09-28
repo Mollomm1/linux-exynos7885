@@ -11,6 +11,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -30,6 +31,7 @@
 
 struct exynos7885_abox_rproc {
 	struct regmap *pmu;
+	struct device *sysmmu_dev;
 	struct reserved_mem *dram_rmem;
 	struct rproc_mem_entry *dram;
 	void __iomem *sram;
@@ -217,8 +219,8 @@ static int exynos7885_abox_load(struct rproc *rproc,
 
 	memset(abox->dram->va, 0, abox->dram->len);
 	memcpy(abox->dram->va, dram->data, dram->size);
-	/* Make the cached DRAM image visible to the non-coherent ABOX master. */
-	dma_sync_single_for_device(rproc->dev.parent, ABOX_DRAM_IOVA,
+	/* Match Exynos SysMMU page-table cache maintenance: sync physical RAM. */
+	dma_sync_single_for_device(abox->sysmmu_dev, abox->dram_rmem->base,
 				   abox->dram->len, DMA_TO_DEVICE);
 	memset_io(abox->sram, 0, abox->sram_size);
 	memcpy_toio(abox->sram, sram->data, sram->size);
@@ -253,12 +255,18 @@ static const struct rproc_ops exynos7885_abox_ops = {
 	.load = exynos7885_abox_load,
 };
 
+static void exynos7885_abox_put_sysmmu_dev(void *data)
+{
+	put_device(data);
+}
+
 static int exynos7885_abox_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct exynos7885_abox_rproc *abox;
+	struct platform_device *sysmmu_pdev;
 	struct resource *sram;
-	struct device_node *mem_np;
+	struct device_node *mem_np, *iommu_np;
 	struct rproc *rproc;
 	int ret;
 
@@ -295,6 +303,24 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	    !IS_ALIGNED(abox->dram_rmem->base, SZ_1M))
 		return dev_err_probe(dev, -EINVAL,
 				     "DRAM firmware region must be at least 12 MiB and 1 MiB aligned\n");
+
+	iommu_np = of_parse_phandle(dev->of_node, "iommus", 0);
+	if (!iommu_np)
+		return dev_err_probe(dev, -EINVAL,
+				     "missing ABOX System MMU phandle\n");
+	sysmmu_pdev = of_find_device_by_node(iommu_np);
+	of_node_put(iommu_np);
+	if (!sysmmu_pdev)
+		return -EPROBE_DEFER;
+	if (!platform_get_drvdata(sysmmu_pdev)) {
+		put_device(&sysmmu_pdev->dev);
+		return -EPROBE_DEFER;
+	}
+	abox->sysmmu_dev = &sysmmu_pdev->dev;
+	ret = devm_add_action_or_reset(dev, exynos7885_abox_put_sysmmu_dev,
+				      abox->sysmmu_dev);
+	if (ret)
+		return ret;
 
 	rproc->has_iommu = true;
 	rproc->auto_boot = false;
