@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Explicit-load, non-booting Exynos7885 ABOX remoteproc staging driver. */
 
+#include <linux/completion.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/firmware.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/irqchip/arm-gic.h>
 #include <linux/iommu.h>
 #include <linux/memremap.h>
 #include <linux/mfd/syscon.h>
@@ -28,18 +31,82 @@
 #define ABOX_AUDSYS_SIZE	PAGE_SIZE
 #define ABOX_DISPAUD_STATUS	0x4024
 #define ABOX_CA7_STATUS		0x2524
+#define ABOX_IPC_RX_OFFSET	0x22300
+#define ABOX_IPC_RX_ACK_OFFSET	0x225fc
+#define ABOX_IPC_SYSTEM		1
+#define ABOX_BOOT_DONE		3
+#define ABOX_GIC_IRQ_LIMIT	32
+#define ABOX_GIC_SPURIOUS	1021
 
 struct exynos7885_abox_rproc {
+	struct device *dev;
 	struct regmap *pmu;
 	struct device *sysmmu_dev;
 	struct reserved_mem *dram_rmem;
 	struct rproc_mem_entry *dram;
 	void __iomem *sram;
+	void __iomem *gicd;
+	void __iomem *gicc;
+	struct completion boot_done;
+	int irq;
+	u32 firmware_version;
 	size_t sram_size;
 	bool pmu_mapped;
 	bool audsys_mapped;
 	bool sram_loaded;
 };
+
+static bool exynos7885_abox_is_dma_irq(unsigned int irq)
+{
+	return irq == 8 || irq == 9 || (irq >= 11 && irq <= 14);
+}
+
+static void exynos7885_abox_handle_ipc(struct exynos7885_abox_rproc *abox, unsigned int irq)
+{
+	u32 ipc_id, msg_type;
+
+	if (exynos7885_abox_is_dma_irq(irq))
+		return;
+
+	ipc_id = readl(abox->sram + ABOX_IPC_RX_OFFSET);
+	msg_type = readl(abox->sram + ABOX_IPC_RX_OFFSET + sizeof(u32) * 2);
+	if (ipc_id == ABOX_IPC_SYSTEM && msg_type == ABOX_BOOT_DONE) {
+		abox->firmware_version =
+			readl(abox->sram + ABOX_IPC_RX_OFFSET + sizeof(u32) * 5);
+		complete(&abox->boot_done);
+	}
+
+	/* Acknowledge non-DMA messages after reading the shared payload. */
+	writel(0, abox->sram + ABOX_IPC_RX_ACK_OFFSET);
+}
+
+static irqreturn_t exynos7885_abox_irq(int irq, void *data)
+{
+	struct exynos7885_abox_rproc *abox = data;
+	unsigned int handled = 0;
+	unsigned int i;
+	u32 irqstat, irqnr;
+
+	for (i = 0; i < ABOX_GIC_IRQ_LIMIT; i++) {
+		irqstat = readl(abox->gicc + GIC_CPU_INTACK);
+		irqnr = irqstat & GICC_IAR_INT_ID_MASK;
+		if (irqnr >= ABOX_GIC_SPURIOUS)
+			break;
+
+		writel(irqstat, abox->gicc + GIC_CPU_EOI);
+		if (irqnr < 16) {
+			writel(irqstat, abox->gicc + GIC_CPU_DEACTIVATE);
+			exynos7885_abox_handle_ipc(abox, irqnr);
+		}
+		handled++;
+	}
+
+	if (i == ABOX_GIC_IRQ_LIMIT)
+		dev_err_ratelimited(abox->dev,
+				    "ABOX GIC interrupt budget exhausted\n");
+
+	return handled ? IRQ_HANDLED : IRQ_NONE;
+}
 
 static bool enable;
 module_param(enable, bool, 0444);
@@ -279,6 +346,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	struct exynos7885_abox_rproc *abox;
 	struct platform_device *sysmmu_pdev;
 	struct resource *sram;
+	struct resource *gicd, *gicc;
 	struct device_node *mem_np, *iommu_np;
 	struct rproc *rproc;
 	int ret;
@@ -298,10 +366,39 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	abox = rproc->priv;
+	abox->dev = dev;
 	abox->sram_size = resource_size(sram);
 	abox->sram = devm_ioremap_resource(dev, sram);
 	if (IS_ERR(abox->sram))
 		return PTR_ERR(abox->sram);
+
+	gicd = platform_get_resource_byname(pdev, IORESOURCE_MEM, "gicd");
+	if (!gicd)
+		return -EINVAL;
+	abox->gicd = devm_ioremap_resource(dev, gicd);
+	if (IS_ERR(abox->gicd))
+		return PTR_ERR(abox->gicd);
+
+	gicc = platform_get_resource_byname(pdev, IORESOURCE_MEM, "gicc");
+	if (!gicc)
+		return -EINVAL;
+	abox->gicc = devm_ioremap_resource(dev, gicc);
+	if (IS_ERR(abox->gicc))
+		return PTR_ERR(abox->gicc);
+
+	abox->irq = platform_get_irq_byname(pdev, "abox");
+	if (abox->irq < 0)
+		return dev_err_probe(dev, abox->irq,
+				     "failed to get ABOX parent IRQ\n");
+
+	init_completion(&abox->boot_done);
+	/* Keep the parent IRQ off until a future start path initializes the GIC. */
+	ret = devm_request_irq(dev, abox->irq, exynos7885_abox_irq,
+			       IRQF_NO_AUTOEN, dev_name(dev), abox);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to request disabled ABOX parent IRQ\n");
+
 	abox->pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7885-pmu");
 	if (IS_ERR(abox->pmu))
 		return PTR_ERR(abox->pmu);
