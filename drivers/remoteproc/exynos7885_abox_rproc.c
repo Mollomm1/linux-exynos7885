@@ -71,6 +71,8 @@ struct exynos7885_abox_rproc {
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *pins_active;
 	struct pinctrl_state *pins_idle;
+	void __iomem *sfr;
+	void __iomem *sysreg;
 	struct reserved_mem *dram_rmem;
 	struct rproc_mem_entry *dram;
 	void __iomem *sram;
@@ -528,7 +530,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct exynos7885_abox_rproc *abox;
 	struct platform_device *sysmmu_pdev;
-	struct resource *sram;
+	struct resource *sfr, *sysreg, *sram;
 	struct resource *gicd, *gicc;
 	struct device_node *mem_np, *iommu_np;
 	struct rproc *rproc;
@@ -542,6 +544,14 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	if (!sram || resource_size(sram) < ABOX_SRAM_SIZE)
 		return -EINVAL;
 
+	sfr = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sfr");
+	if (!sfr)
+		return -EINVAL;
+
+	sysreg = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sysreg");
+	if (!sysreg)
+		return -EINVAL;
+
 	rproc = devm_rproc_alloc(dev, "exynos7885-abox",
 				 &exynos7885_abox_ops,
 				 "postmarketos/calliope_sram.bin",
@@ -552,6 +562,14 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	abox = rproc->priv;
 	abox->dev = dev;
 	abox->sram_size = resource_size(sram);
+	abox->sfr = devm_ioremap_resource(dev, sfr);
+	if (IS_ERR(abox->sfr))
+		return PTR_ERR(abox->sfr);
+
+	abox->sysreg = devm_ioremap_resource(dev, sysreg);
+	if (IS_ERR(abox->sysreg))
+		return PTR_ERR(abox->sysreg);
+
 	abox->sram = devm_ioremap_resource(dev, sram);
 	if (IS_ERR(abox->sram))
 		return PTR_ERR(abox->sram);
