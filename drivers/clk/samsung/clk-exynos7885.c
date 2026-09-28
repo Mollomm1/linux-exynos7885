@@ -21,7 +21,7 @@
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
-#define CLKS_NR_DISPAUD			(CLK_DOUT_UAIF3 + 1)
+#define CLKS_NR_DISPAUD			(CLK_GOUT_SMMU_ABOX_CLK + 1)
 
 /* ---- CMU_TOP ------------------------------------------------------------- */
 
@@ -823,13 +823,19 @@ static const struct samsung_cmu_info fsys_cmu_info __initconst = {
 #define PLL_CON0_PLL_AUD		0x0160
 #define PLL_CON3_PLL_AUD		0x016c
 #define CLK_CON_DIV_AUDIF		0x1800
+#define CLK_CON_DIV_AUD_BUS		0x1804
 #define CLK_CON_DIV_UAIF3		0x1824
+#define CLK_CON_GAT_ABOX_ACLK		0x200c
+#define CLK_CON_GAT_SMMU_ABOX_CLK	0x20d0
 
 static const unsigned long dispaud_clk_regs[] __initconst = {
 	PLL_CON0_PLL_AUD,
 	PLL_CON3_PLL_AUD,
 	CLK_CON_DIV_AUDIF,
+	CLK_CON_DIV_AUD_BUS,
 	CLK_CON_DIV_UAIF3,
+	CLK_CON_GAT_ABOX_ACLK,
+	CLK_CON_GAT_SMMU_ABOX_CLK,
 };
 
 static const struct samsung_pll_clock dispaud_pll_clks[] __initconst = {
@@ -840,8 +846,17 @@ static const struct samsung_pll_clock dispaud_pll_clks[] __initconst = {
 static const struct samsung_div_clock dispaud_div_clks[] __initconst = {
 	DIV(CLK_DOUT_AUDIF, "dout_audif", "fout_aud_pll",
 	    CLK_CON_DIV_AUDIF, 0, 9),
+	DIV(CLK_DOUT_AUD_BUS, "dout_aud_bus", "fout_aud_pll",
+	    CLK_CON_DIV_AUD_BUS, 0, 3),
 	DIV(CLK_DOUT_UAIF3, "dout_uaif3", "dout_audif",
 	    CLK_CON_DIV_UAIF3, 0, 5),
+};
+
+static const struct samsung_gate_clock dispaud_gate_clks[] __initconst = {
+	GATE(CLK_GOUT_ABOX_ACLK, "gout_abox_aclk", "dout_aud_bus",
+	     CLK_CON_GAT_ABOX_ACLK, 21, 0, 0),
+	GATE(CLK_GOUT_SMMU_ABOX_CLK, "gout_smmu_abox_clk",
+	     "dout_aud_bus", CLK_CON_GAT_SMMU_ABOX_CLK, 21, 0, 0),
 };
 
 static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
@@ -849,6 +864,8 @@ static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
 	.nr_pll_clks		= ARRAY_SIZE(dispaud_pll_clks),
 	.div_clks		= dispaud_div_clks,
 	.nr_div_clks		= ARRAY_SIZE(dispaud_div_clks),
+	.gate_clks		= dispaud_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(dispaud_gate_clks),
 	.nr_clk_ids		= CLKS_NR_DISPAUD,
 	.clk_regs		= dispaud_clk_regs,
 	.nr_clk_regs		= ARRAY_SIZE(dispaud_clk_regs),

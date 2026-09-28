@@ -339,6 +339,16 @@
 			interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
+		sysmmu_abox: iommu@14a30000 {
+			compatible = "samsung,exynos-sysmmu";
+			reg = <0x14a30000 0x9000>;
+			interrupts = <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cmu_dispaud CLK_GOUT_SMMU_ABOX_CLK>;
+			clock-names = "sysmmu";
+			#iommu-cells = <0>;
+			status = "disabled";
+		};
+
 		abox: audio-controller@14a50000 {
 			compatible = "samsung,exynos7885-abox";
 			reg = <0x14a50000 0x10000>,
