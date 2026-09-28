@@ -13,7 +13,7 @@ if SND_SOC_SAMSUNG
 
 config SND_SOC_EXYNOS7885_ABOX
 	tristate "Exynos7885 ABOX UAIF3 playback"
-	depends on REMOTEPROC
+	depends on EXYNOS7885_ABOX_RPROC
 	depends on ARCH_EXYNOS || COMPILE_TEST
 	help
 	  Say Y or M to expose the Exynos7885 ABOX RDMA0 playback path
