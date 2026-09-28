@@ -2,6 +2,7 @@
 /* Explicit-load, non-booting Exynos7885 ABOX remoteproc staging driver. */
 
 #include <linux/bitops.h>
+#include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
@@ -20,6 +21,7 @@
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/regmap.h>
 #include <linux/remoteproc.h>
 #include <linux/sizes.h>
@@ -55,11 +57,20 @@
 #define ABOX_STOP_TIMEOUT_US	20000
 #define ABOX_GIC_IRQ_LIMIT	32
 #define ABOX_GIC_SPURIOUS	1021
+#define ABOX_NUM_CLOCKS		6
+
+static const char * const exynos7885_abox_clock_names[ABOX_NUM_CLOCKS] = {
+	"pll", "ca7", "audif", "aclk", "uaif3-bclk", "uaif3-sync",
+};
 
 struct exynos7885_abox_rproc {
 	struct device *dev;
 	struct regmap *pmu;
 	struct device *sysmmu_dev;
+	struct clk_bulk_data clocks[ABOX_NUM_CLOCKS];
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *pins_active;
+	struct pinctrl_state *pins_idle;
 	struct reserved_mem *dram_rmem;
 	struct rproc_mem_entry *dram;
 	void __iomem *sram;
@@ -521,6 +532,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	struct resource *gicd, *gicc;
 	struct device_node *mem_np, *iommu_np;
 	struct rproc *rproc;
+	unsigned int i;
 	int ret;
 
 	if (!enable)
@@ -605,6 +617,27 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 				      abox->sysmmu_dev);
 	if (ret)
 		return ret;
+
+	for (i = 0; i < ARRAY_SIZE(abox->clocks); i++)
+		abox->clocks[i].id = exynos7885_abox_clock_names[i];
+	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(abox->clocks), abox->clocks);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to get ABOX clocks\n");
+
+	abox->pinctrl = devm_pinctrl_get(dev);
+	if (IS_ERR(abox->pinctrl))
+		return dev_err_probe(dev, PTR_ERR(abox->pinctrl),
+				     "failed to get ABOX pinctrl\n");
+
+	abox->pins_active = pinctrl_lookup_state(abox->pinctrl, "active");
+	if (IS_ERR(abox->pins_active))
+		return dev_err_probe(dev, PTR_ERR(abox->pins_active),
+				     "failed to find active pin state\n");
+
+	abox->pins_idle = pinctrl_lookup_state(abox->pinctrl, "idle");
+	if (IS_ERR(abox->pins_idle))
+		return dev_err_probe(dev, PTR_ERR(abox->pins_idle),
+				     "failed to find idle pin state\n");
 
 	rproc->has_iommu = true;
 	rproc->auto_boot = false;
