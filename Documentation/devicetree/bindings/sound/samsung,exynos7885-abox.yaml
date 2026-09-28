@@ -54,6 +54,15 @@ properties:
       - const: uaif3-bclk
       - const: uaif3-sync
 
+  pinctrl-names:
+    items:
+      - const: default
+      - const: idle
+
+  pinctrl-0: true
+
+  pinctrl-1: true
+
   memory-region:
     maxItems: 1
 
