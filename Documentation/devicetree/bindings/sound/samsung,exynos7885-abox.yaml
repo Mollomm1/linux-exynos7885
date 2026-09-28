@@ -69,6 +69,31 @@ properties:
   iommus:
     maxItems: 1
 
+patternProperties:
+  "^firmware-[a-z0-9-]+$":
+    type: object
+    properties:
+      status: true
+
+      samsung,name:
+        $ref: /schemas/types.yaml#/definitions/string
+        description: Firmware path passed to request_firmware().
+
+      samsung,area:
+        const: 1
+        description: Firmware is copied into the DRAM carveout.
+
+      samsung,offset:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: Byte offset within the DRAM carveout.
+
+    required:
+      - samsung,name
+      - samsung,area
+      - samsung,offset
+
+    additionalProperties: false
+
 required:
   - compatible
   - reg

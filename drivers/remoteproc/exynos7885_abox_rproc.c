@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Explicit-load, non-booting Exynos7885 ABOX remoteproc staging driver. */
+/* Explicit-load Exynos7885 ABOX remoteproc driver. */
 
 #include <linux/bitops.h>
 #include <linux/clk.h>
@@ -12,6 +12,7 @@
 #include <linux/irqchip/arm-gic.h>
 #include <linux/iommu.h>
 #include <linux/iopoll.h>
+#include <linux/jiffies.h>
 #include <linux/memremap.h>
 #include <linux/mfd/syscon.h>
 #include <linux/mm.h>
@@ -38,6 +39,9 @@
 #define ABOX_SYSPOWER_CTRL	0x0010
 #define ABOX_SYSPOWER_STATUS	0x0014
 #define ABOX_SYSPOWER_ON	BIT(0)
+#define ABOX_REMAP_ADDR		0x0028
+#define ABOX_TIMER0_CTRL1	0x0604
+#define ABOX_SRAM_PHYS		0x14b00000
 #define ABOX_DISPAUD_STATUS	0x4024
 #define ABOX_CA7_CONFIGURATION	0x2520
 #define ABOX_CA7_STATUS		0x2524
@@ -58,9 +62,21 @@
 #define ABOX_IPC_TIMEOUT_US	20000
 #define ABOX_WFI_TIMEOUT_US	100000
 #define ABOX_STOP_TIMEOUT_US	20000
+#define ABOX_BOOT_TIMEOUT_MS	10000
+#define ABOX_AUDIF_RATE		24576000
+#define ABOX_CA7_RATE		393216000
 #define ABOX_GIC_IRQ_LIMIT	32
 #define ABOX_GIC_SPURIOUS	1021
 #define ABOX_NUM_CLOCKS		6
+
+enum exynos7885_abox_clock_id {
+	ABOX_CLK_PLL,
+	ABOX_CLK_CA7,
+	ABOX_CLK_AUDIF,
+	ABOX_CLK_ACLK,
+	ABOX_CLK_UAIF3_BCLK,
+	ABOX_CLK_UAIF3_SYNC,
+};
 
 static const char * const exynos7885_abox_clock_names[ABOX_NUM_CLOCKS] = {
 	"pll", "ca7", "audif", "aclk", "uaif3-bclk", "uaif3-sync",
@@ -90,9 +106,10 @@ struct exynos7885_abox_rproc {
 	bool audsys_mapped;
 	bool sram_loaded;
 	bool irq_enabled;
-	bool clocks_enabled;
+	unsigned long enabled_clocks;
 	bool pins_active_selected;
 	bool firmware_running;
+	bool firmware_ready;
 	bool stopping;
 };
 
@@ -153,7 +170,13 @@ static irqreturn_t exynos7885_abox_irq(int irq, void *data)
 
 static bool enable;
 module_param(enable, bool, 0444);
-MODULE_PARM_DESC(enable, "Explicitly enable non-booting ABOX remoteproc staging");
+MODULE_PARM_DESC(enable,
+		 "Explicitly register the opt-in Exynos7885 ABOX remoteproc");
+
+static bool allow_firmware_start;
+module_param(allow_firmware_start, bool, 0444);
+MODULE_PARM_DESC(allow_firmware_start,
+		 "Allow explicit remoteproc requests to execute ABOX firmware");
 
 static int exynos7885_abox_check_idle(struct exynos7885_abox_rproc *abox)
 {
@@ -312,6 +335,7 @@ static int exynos7885_abox_load(struct rproc *rproc,
 {
 	struct exynos7885_abox_rproc *abox = rproc->priv;
 	const struct firmware *dram;
+	struct device_node *child;
 	int ret;
 
 	ret = request_firmware(&dram, "postmarketos/calliope_dram.bin",
@@ -329,6 +353,48 @@ static int exynos7885_abox_load(struct rproc *rproc,
 
 	memset(abox->dram->va, 0, abox->dram->len);
 	memcpy(abox->dram->va, dram->data, dram->size);
+	for_each_available_child_of_node(rproc->dev.parent->of_node, child) {
+		const struct firmware *extra;
+		const char *name;
+		u32 area, offset;
+
+		ret = of_property_read_string(child, "samsung,name", &name);
+		if (ret)
+			continue;
+		ret = of_property_read_u32(child, "samsung,area", &area);
+		if (ret)
+			continue;
+		ret = of_property_read_u32(child, "samsung,offset", &offset);
+		if (ret)
+			continue;
+		if (area != 1) {
+			dev_err(abox->dev,
+				"unsupported extra firmware area %u for %s\n",
+				area, name);
+			ret = -EINVAL;
+			goto out_put_child;
+		}
+
+		ret = request_firmware(&extra, name, abox->dev);
+		if (ret) {
+			dev_err(abox->dev, "failed to load ABOX firmware %s: %d\n",
+				name, ret);
+			goto out_put_child;
+		}
+		if (offset > abox->dram->len ||
+		    extra->size > abox->dram->len - offset) {
+			dev_err(abox->dev,
+				"ABOX firmware %s exceeds DRAM carveout\n", name);
+			release_firmware(extra);
+			ret = -EINVAL;
+			goto out_put_child;
+		}
+
+		memcpy((u8 *)abox->dram->va + offset, extra->data, extra->size);
+		dev_info(abox->dev, "staged ABOX firmware %s at DRAM +0x%x\n",
+			 name, offset);
+		release_firmware(extra);
+	}
 	/* Match Exynos SysMMU page-table cache maintenance: sync physical RAM. */
 	dma_sync_single_for_device(abox->sysmmu_dev, abox->dram_rmem->base,
 				   abox->dram->len, DMA_TO_DEVICE);
@@ -339,20 +405,17 @@ static int exynos7885_abox_load(struct rproc *rproc,
 	abox->sram_loaded = true;
 	dev_info(&rproc->dev, "staged SRAM %zu bytes and DRAM %zu bytes; CPU remains off\n",
 		 sram->size, dram->size);
+	ret = 0;
+	goto out;
+
+out_put_child:
+	of_node_put(child);
 out:
 	release_firmware(dram);
 	return ret;
 }
 
-static int exynos7885_abox_start(struct rproc *rproc)
-{
-	/*
-	 * The remoteproc core does not call .stop() when .start() fails; it
-	 * unprepares the device and releases its IOMMU mappings. Keep execution
-	 * disabled until every failure after CA7 release has a verified rollback.
-	 */
-	return -EOPNOTSUPP;
-}
+static int exynos7885_abox_start(struct rproc *rproc);
 
 static int exynos7885_abox_send_ipc_locked(struct exynos7885_abox_rproc *abox,
 					   const void *message, size_t size,
@@ -370,7 +433,8 @@ static int exynos7885_abox_send_ipc_locked(struct exynos7885_abox_rproc *abox,
 
 	if (abox->stopping && !stopping)
 		return -ESHUTDOWN;
-	if (!abox->firmware_running && !(abox->stopping && stopping))
+	if ((!abox->firmware_running || !abox->firmware_ready) &&
+	    !(abox->stopping && stopping))
 		return -EHOSTDOWN;
 
 	ret = readl_poll_timeout(ack, pending, !pending, 10,
@@ -473,6 +537,248 @@ static int exynos7885_abox_stop_cpu(struct exynos7885_abox_rproc *abox)
 	return 0;
 }
 
+static int exynos7885_abox_release_resources(struct exynos7885_abox_rproc *abox)
+{
+	unsigned int status;
+	int i, ret;
+
+	ret = exynos7885_abox_check_idle(abox);
+	if (ret)
+		return ret;
+
+	/* Release the ABOX DRAM power request only after confirming CPU-off. */
+	writel(0, abox->sfr + ABOX_SYSPOWER_CTRL);
+	ret = readl_poll_timeout(abox->sfr + ABOX_SYSPOWER_STATUS, status,
+				 !(status & ABOX_SYSPOWER_ON), 100,
+				 ABOX_STOP_TIMEOUT_US);
+	if (ret) {
+		dev_err(abox->dev,
+			"ABOX DRAM power request did not clear; preserving mappings\n");
+		return ret;
+	}
+
+	if (abox->irq_enabled) {
+		disable_irq(abox->irq);
+		abox->irq_enabled = false;
+	}
+	if (abox->pins_active_selected) {
+		ret = pinctrl_select_state(abox->pinctrl, abox->pins_idle);
+		if (ret)
+			return ret;
+		abox->pins_active_selected = false;
+	}
+	for (i = ARRAY_SIZE(abox->clocks) - 1; i >= 0; i--) {
+		if (!(abox->enabled_clocks & BIT(i)))
+			continue;
+		clk_disable_unprepare(abox->clocks[i].clk);
+		abox->enabled_clocks &= ~BIT(i);
+	}
+
+	return 0;
+}
+
+static void exynos7885_abox_init_local_gic(struct exynos7885_abox_rproc *abox)
+{
+	unsigned int i;
+
+	/* Match the downstream local-GIC setup; keep all firmware IRQs enabled. */
+	writel(GICD_ENABLE, abox->gicd + GIC_DIST_CTRL);
+	for (i = 0; i < 4; i++)
+		writel(0, abox->gicd + GIC_DIST_IGROUP + i * sizeof(u32));
+	writel(GICC_INT_PRI_THRESHOLD, abox->gicc + GIC_CPU_PRIMASK);
+	for (i = 0; i < 40; i++)
+		writel(0x10101010, abox->gicd + GIC_DIST_PRI + i * sizeof(u32));
+	writel(3, abox->gicd + GIC_DIST_CTRL);
+	writel(3, abox->gicc + GIC_CPU_CTRL);
+}
+
+static int exynos7885_abox_start(struct rproc *rproc)
+{
+	struct exynos7885_abox_rproc *abox = rproc->priv;
+	unsigned int option, status;
+	long waited;
+	int ret, start_ret, stop_ret;
+
+	if (!allow_firmware_start)
+		return -EOPNOTSUPP;
+
+	if (!abox->sram_loaded || !abox->dram || !abox->dram->va)
+		return -EINVAL;
+
+	ret = exynos7885_abox_check_idle(abox);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_ACLK].clk);
+	if (ret)
+		return ret;
+	abox->enabled_clocks |= BIT(ABOX_CLK_ACLK);
+
+	/* An early-wake firmware instance needs a separate attach/resume path. */
+	if (readl(abox->sfr + ABOX_TIMER0_CTRL1)) {
+		ret = -EBUSY;
+		goto fail_before_release;
+	}
+
+	/* Keep the CA7 held while setting its reset vector and clocks. */
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
+				 ABOX_CA7_ENABLE, 0);
+	if (ret)
+		goto fail_before_release;
+	ret = regmap_read_poll_timeout(abox->pmu, ABOX_CA7_STATUS, status,
+				       !(status & ABOX_CA7_STATUS_ON), 100,
+				       ABOX_STOP_TIMEOUT_US);
+	if (ret)
+		goto fail_before_release;
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
+				 ABOX_CA7_LOCAL_PWR, 0);
+	if (ret)
+		goto fail_before_release;
+	writel(ABOX_SRAM_PHYS, abox->sfr + ABOX_REMAP_ADDR);
+	/* Ensure the reset vector is visible before clocks and CPU release. */
+	wmb();
+	if (readl(abox->sfr + ABOX_REMAP_ADDR) != ABOX_SRAM_PHYS) {
+		ret = -EIO;
+		goto fail_before_release;
+	}
+
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_CA7].clk, ABOX_CA7_RATE);
+	if (ret)
+		goto fail_before_release;
+	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_CA7].clk);
+	if (ret)
+		goto fail_before_release;
+	abox->enabled_clocks |= BIT(ABOX_CLK_CA7);
+
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk, ABOX_AUDIF_RATE);
+	if (ret)
+		goto fail_before_release;
+	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_AUDIF].clk);
+	if (ret)
+		goto fail_before_release;
+	abox->enabled_clocks |= BIT(ABOX_CLK_AUDIF);
+
+	exynos7885_abox_init_local_gic(abox);
+	reinit_completion(&abox->boot_done);
+
+	/* The consumer state is named "active" to avoid pinctrl auto-selection. */
+	abox->pins_active_selected = true;
+	ret = pinctrl_select_state(abox->pinctrl, abox->pins_active);
+	if (ret)
+		goto fail_before_release;
+
+	if (!abox->irq_enabled) {
+		enable_irq(abox->irq);
+		abox->irq_enabled = true;
+	}
+
+	writel(ABOX_SYSPOWER_ON, abox->sfr + ABOX_SYSPOWER_CTRL);
+	/* Publish the DRAM power request before polling its status. */
+	wmb();
+	ret = readl_poll_timeout(abox->sfr + ABOX_SYSPOWER_STATUS, status,
+				 status & ABOX_SYSPOWER_ON, 100,
+				 ABOX_STOP_TIMEOUT_US);
+	if (ret)
+		goto fail_before_release;
+
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
+				 ABOX_CA7_LOCAL_PWR, ABOX_CA7_LOCAL_PWR);
+	if (ret)
+		goto fail_before_release;
+
+	mutex_lock(&abox->ipc_lock);
+	abox->firmware_running = true;
+	abox->firmware_ready = false;
+	abox->stopping = false;
+
+	/* An uncertain PMU write is handled as post-release from this point. */
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
+				 ABOX_CA7_ENABLE, ABOX_CA7_ENABLE);
+	if (ret)
+		goto fail_after_release;
+
+	ret = regmap_read_poll_timeout(abox->pmu, ABOX_CA7_STATUS, status,
+				       status & ABOX_CA7_STATUS_ON, 100,
+				       ABOX_STOP_TIMEOUT_US);
+	if (ret)
+		goto fail_after_release;
+
+	waited = wait_for_completion_timeout(&abox->boot_done,
+					     msecs_to_jiffies(ABOX_BOOT_TIMEOUT_MS));
+	if (!waited) {
+		ret = -ETIMEDOUT;
+		goto fail_after_release;
+	}
+
+	abox->firmware_ready = true;
+	mutex_unlock(&abox->ipc_lock);
+	dev_info(abox->dev, "Calliope firmware %u booted\n",
+		 READ_ONCE(abox->firmware_version));
+	return 0;
+
+fail_after_release:
+	start_ret = ret;
+	abox->stopping = true;
+	stop_ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &status);
+	if (stop_ret || (status & ABOX_CA7_STATUS_ON)) {
+		stop_ret = exynos7885_abox_stop_cpu(abox);
+	} else {
+		stop_ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
+					      ABOX_CA7_ENABLE, 0);
+		if (!stop_ret)
+			stop_ret = regmap_update_bits(abox->pmu,
+						      ABOX_CA7_CONFIGURATION,
+						      ABOX_CA7_LOCAL_PWR, 0);
+	}
+	if (!stop_ret) {
+		stop_ret = exynos7885_abox_release_resources(abox);
+		if (!stop_ret) {
+			abox->firmware_running = false;
+			abox->firmware_ready = false;
+			abox->stopping = false;
+			mutex_unlock(&abox->ipc_lock);
+			return start_ret;
+		}
+	}
+
+	/* Keep remoteproc mappings attached if the CA7 stop cannot be verified. */
+	dev_crit(abox->dev,
+		 "ABOX startup unconfirmed and stop failed (%d); retaining resources\n",
+		 stop_ret);
+	abox->firmware_running = true;
+	abox->firmware_ready = false;
+	abox->stopping = false;
+	mutex_unlock(&abox->ipc_lock);
+	return 0;
+
+fail_before_release:
+	start_ret = ret;
+	regmap_update_bits(abox->pmu, ABOX_CA7_OPTION, ABOX_CA7_ENABLE, 0);
+	regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
+			   ABOX_CA7_LOCAL_PWR, 0);
+	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &status);
+	if (!ret && !(status & ABOX_CA7_STATUS_ON)) {
+		ret = regmap_read(abox->pmu, ABOX_CA7_OPTION, &option);
+		if (!ret && (option & ABOX_CA7_ENABLE))
+			ret = -EBUSY;
+	}
+	if (ret || (status & ABOX_CA7_STATUS_ON)) {
+		dev_crit(abox->dev,
+			 "ABOX CPU state became uncertain before release; retaining resources\n");
+		mutex_lock(&abox->ipc_lock);
+		abox->firmware_running = true;
+		abox->firmware_ready = false;
+		mutex_unlock(&abox->ipc_lock);
+		return 0;
+	}
+	ret = exynos7885_abox_release_resources(abox);
+	if (ret)
+		dev_warn(abox->dev,
+			 "pre-start cleanup incomplete with CA7 confirmed off: %d\n",
+			 ret);
+	return start_ret;
+}
+
 static int exynos7885_abox_stop(struct rproc *rproc)
 {
 	struct exynos7885_abox_rproc *abox = rproc->priv;
@@ -496,44 +802,20 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 		if (ret)
 			goto out_unlock;
 	} else if (abox->stopping || abox->firmware_running) {
+		ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
+					 ABOX_CA7_ENABLE, 0);
+		if (ret)
+			goto out_unlock;
 		ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
 					 ABOX_CA7_LOCAL_PWR, 0);
 		if (ret)
 			goto out_unlock;
 	}
-	ret = exynos7885_abox_check_idle(abox);
-	if (ret) {
-		dev_err(rproc->dev.parent,
-			"ABOX idle state is unconfirmed; preserving mappings\n");
+	ret = exynos7885_abox_release_resources(abox);
+	if (ret)
 		goto out_unlock;
-	}
-
-	/* Release the ABOX DRAM power request after confirming the CA7 is off. */
-	writel(0, abox->sfr + ABOX_SYSPOWER_CTRL);
-	ret = readl_poll_timeout(abox->sfr + ABOX_SYSPOWER_STATUS, status,
-				 !(status & ABOX_SYSPOWER_ON), 100,
-				 ABOX_STOP_TIMEOUT_US);
-	if (ret) {
-		dev_err(rproc->dev.parent,
-			"ABOX DRAM power request did not clear; preserving mappings\n");
-		goto out_unlock;
-	}
-
-	if (abox->irq_enabled) {
-		disable_irq(abox->irq);
-		abox->irq_enabled = false;
-	}
-	if (abox->pins_active_selected) {
-		ret = pinctrl_select_state(abox->pinctrl, abox->pins_idle);
-		if (ret)
-			goto out_unlock;
-		abox->pins_active_selected = false;
-	}
-	if (abox->clocks_enabled) {
-		clk_bulk_disable_unprepare(ARRAY_SIZE(abox->clocks), abox->clocks);
-		abox->clocks_enabled = false;
-	}
 	abox->firmware_running = false;
+	abox->firmware_ready = false;
 	abox->stopping = false;
 
 	ret = 0;
@@ -698,7 +980,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	dev_info(dev, "inert ABOX remoteproc registered; start is disabled\n");
+	dev_info(dev, "ABOX remoteproc registered; firmware start is opt-in\n");
 	return 0;
 }
 
@@ -718,5 +1000,5 @@ static struct platform_driver exynos7885_abox_driver = {
 };
 module_platform_driver(exynos7885_abox_driver);
 
-MODULE_DESCRIPTION("Non-booting Exynos7885 ABOX remoteproc staging");
+MODULE_DESCRIPTION("Explicit-load Exynos7885 ABOX remoteproc");
 MODULE_LICENSE("GPL");
