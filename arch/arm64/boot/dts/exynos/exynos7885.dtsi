@@ -363,6 +363,7 @@
 			      <0x14820000 0x10000>,
 			      <0x14b00000 0x28000>;
 			reg-names = "sfr", "sysreg", "sram";
+			iommus = <&sysmmu_abox>;
 			status = "disabled";
 		};
 

@@ -33,6 +33,9 @@ properties:
   memory-region:
     maxItems: 1
 
+  iommus:
+    maxItems: 1
+
 required:
   - compatible
   - reg
