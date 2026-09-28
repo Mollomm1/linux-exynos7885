@@ -99,6 +99,9 @@ struct exynos7885_abox_rproc {
 	void __iomem *gicc;
 	struct completion boot_done;
 	struct mutex ipc_lock;
+	struct mutex handler_lock;
+	exynos7885_abox_ipc_handler_t ipc_handler;
+	void *ipc_handler_data;
 	int irq;
 	u32 firmware_version;
 	size_t sram_size;
@@ -120,16 +123,20 @@ static bool exynos7885_abox_is_dma_irq(unsigned int irq)
 
 static void exynos7885_abox_handle_ipc(struct exynos7885_abox_rproc *abox, unsigned int irq)
 {
+	u32 message[ABOX_IPC_MSG_SIZE / sizeof(u32)];
 	u32 ipc_id, msg_type, firmware_version = 0;
+	exynos7885_abox_ipc_handler_t handler;
+	void *data;
 
 	if (exynos7885_abox_is_dma_irq(irq))
 		return;
 
-	ipc_id = readl(abox->sram + ABOX_IPC_RX_OFFSET);
-	msg_type = readl(abox->sram + ABOX_IPC_RX_OFFSET + sizeof(u32) * 2);
+	memcpy_fromio(message, abox->sram + ABOX_IPC_RX_OFFSET,
+		      sizeof(message));
+	ipc_id = message[0];
+	msg_type = message[2];
 	if (ipc_id == ABOX_IPC_SYSTEM && msg_type == ABOX_BOOT_DONE)
-		firmware_version =
-			readl(abox->sram + ABOX_IPC_RX_OFFSET + sizeof(u32) * 5);
+		firmware_version = message[5];
 
 	/* Acknowledge non-DMA messages after reading the shared payload. */
 	writel(0, abox->sram + ABOX_IPC_RX_ACK_OFFSET);
@@ -137,7 +144,14 @@ static void exynos7885_abox_handle_ipc(struct exynos7885_abox_rproc *abox, unsig
 	if (ipc_id == ABOX_IPC_SYSTEM && msg_type == ABOX_BOOT_DONE) {
 		WRITE_ONCE(abox->firmware_version, firmware_version);
 		complete(&abox->boot_done);
+		return;
 	}
+
+	/* Pair with registration so the callback's data is already visible. */
+	handler = smp_load_acquire(&abox->ipc_handler);
+	data = READ_ONCE(abox->ipc_handler_data);
+	if (handler && READ_ONCE(abox->firmware_ready))
+		handler(abox->dev, message, data);
 }
 
 static irqreturn_t exynos7885_abox_irq(int irq, void *data)
@@ -483,6 +497,61 @@ int exynos7885_abox_send_ipc(struct device *dev, const void *message,
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_send_ipc);
 
+int exynos7885_abox_register_ipc_handler(struct device *dev,
+					 exynos7885_abox_ipc_handler_t handler,
+					 void *data)
+{
+	struct rproc *rproc;
+	struct exynos7885_abox_rproc *abox;
+	int ret = 0;
+
+	if (!dev || !handler)
+		return -EINVAL;
+
+	rproc = dev_get_drvdata(dev);
+	if (!rproc)
+		return -ENODEV;
+
+	abox = rproc->priv;
+	mutex_lock(&abox->handler_lock);
+	if (abox->ipc_handler) {
+		ret = -EBUSY;
+	} else {
+		WRITE_ONCE(abox->ipc_handler_data, data);
+		/* Publish the data before the IRQ can observe the handler. */
+		smp_store_release(&abox->ipc_handler, handler);
+	}
+	mutex_unlock(&abox->handler_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_register_ipc_handler);
+
+void exynos7885_abox_unregister_ipc_handler(struct device *dev,
+					    exynos7885_abox_ipc_handler_t handler)
+{
+	struct rproc *rproc;
+	struct exynos7885_abox_rproc *abox;
+
+	if (!dev || !handler)
+		return;
+
+	rproc = dev_get_drvdata(dev);
+	if (!rproc)
+		return;
+
+	abox = rproc->priv;
+	mutex_lock(&abox->handler_lock);
+	if (abox->ipc_handler == handler) {
+		/* Stop new callbacks before waiting for an in-flight one. */
+		smp_store_release(&abox->ipc_handler, NULL);
+		synchronize_irq(abox->irq);
+		WRITE_ONCE(abox->ipc_handler_data, NULL);
+	}
+	mutex_unlock(&abox->handler_lock);
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_unregister_ipc_handler);
+
 static int exynos7885_abox_request_suspend(struct exynos7885_abox_rproc *abox)
 {
 	u32 message[ABOX_IPC_MSG_SIZE / sizeof(u32)] = {};
@@ -710,7 +779,7 @@ static int exynos7885_abox_start(struct rproc *rproc)
 		goto fail_after_release;
 	}
 
-	abox->firmware_ready = true;
+	WRITE_ONCE(abox->firmware_ready, true);
 	mutex_unlock(&abox->ipc_lock);
 	dev_info(abox->dev, "Calliope firmware %u booted\n",
 		 READ_ONCE(abox->firmware_version));
@@ -909,6 +978,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 
 	init_completion(&abox->boot_done);
 	mutex_init(&abox->ipc_lock);
+	mutex_init(&abox->handler_lock);
 	/* Keep the parent IRQ off until a future start path initializes the GIC. */
 	ret = devm_request_irq(dev, abox->irq, exynos7885_abox_irq,
 			       IRQF_NO_AUTOEN, dev_name(dev), abox);
