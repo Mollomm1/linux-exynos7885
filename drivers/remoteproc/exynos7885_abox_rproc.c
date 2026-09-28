@@ -230,7 +230,7 @@ MODULE_PARM_DESC(allow_firmware_start,
 
 static int exynos7885_abox_check_idle(struct exynos7885_abox_rproc *abox)
 {
-	unsigned int dispaud, cpu;
+	unsigned int dispaud, cpu, configuration, option;
 	int ret;
 
 	ret = regmap_read(abox->pmu, ABOX_DISPAUD_STATUS, &dispaud);
@@ -239,8 +239,16 @@ static int exynos7885_abox_check_idle(struct exynos7885_abox_rproc *abox)
 	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
 	if (ret)
 		return ret;
+	ret = regmap_read(abox->pmu, ABOX_CA7_CONFIGURATION, &configuration);
+	if (ret)
+		return ret;
+	ret = regmap_read(abox->pmu, ABOX_CA7_OPTION, &option);
+	if (ret)
+		return ret;
 
-	return (dispaud & 0xf) == 0xf && !(cpu & 1) ? 0 : -EBUSY;
+	return (dispaud & 0xf) == 0xf && !(cpu & ABOX_CA7_STATUS_ON) &&
+	       !(configuration & ABOX_CA7_LOCAL_PWR) &&
+	       !(option & ABOX_CA7_ENABLE) ? 0 : -EBUSY;
 }
 
 static int exynos7885_abox_sanity_check(struct rproc *rproc,
