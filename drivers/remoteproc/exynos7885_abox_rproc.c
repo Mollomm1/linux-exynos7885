@@ -63,21 +63,24 @@ static bool exynos7885_abox_is_dma_irq(unsigned int irq)
 
 static void exynos7885_abox_handle_ipc(struct exynos7885_abox_rproc *abox, unsigned int irq)
 {
-	u32 ipc_id, msg_type;
+	u32 ipc_id, msg_type, firmware_version = 0;
 
 	if (exynos7885_abox_is_dma_irq(irq))
 		return;
 
 	ipc_id = readl(abox->sram + ABOX_IPC_RX_OFFSET);
 	msg_type = readl(abox->sram + ABOX_IPC_RX_OFFSET + sizeof(u32) * 2);
-	if (ipc_id == ABOX_IPC_SYSTEM && msg_type == ABOX_BOOT_DONE) {
-		abox->firmware_version =
+	if (ipc_id == ABOX_IPC_SYSTEM && msg_type == ABOX_BOOT_DONE)
+		firmware_version =
 			readl(abox->sram + ABOX_IPC_RX_OFFSET + sizeof(u32) * 5);
-		complete(&abox->boot_done);
-	}
 
 	/* Acknowledge non-DMA messages after reading the shared payload. */
 	writel(0, abox->sram + ABOX_IPC_RX_ACK_OFFSET);
+
+	if (ipc_id == ABOX_IPC_SYSTEM && msg_type == ABOX_BOOT_DONE) {
+		WRITE_ONCE(abox->firmware_version, firmware_version);
+		complete(&abox->boot_done);
+	}
 }
 
 static irqreturn_t exynos7885_abox_irq(int irq, void *data)
