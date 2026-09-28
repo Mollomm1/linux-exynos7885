@@ -1420,6 +1420,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	mutex_init(&abox->ipc_lock);
 	mutex_init(&abox->handler_lock);
 	mutex_init(&abox->pcm_lock);
+	mutex_init(&abox->uaif_lock);
 	/* Keep the parent IRQ off until a future start path initializes the GIC. */
 	ret = devm_request_irq(dev, abox->irq, exynos7885_abox_irq,
 			       IRQF_NO_AUTOEN, dev_name(dev), abox);
