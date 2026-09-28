@@ -4,6 +4,7 @@
 #
 
 obj-$(CONFIG_REMOTEPROC)		+= remoteproc.o
+obj-$(CONFIG_EXYNOS7885_ABOX_RPROC) += exynos7885_abox_rproc.o
 remoteproc-y				:= remoteproc_core.o
 remoteproc-y				+= remoteproc_coredump.o
 remoteproc-y				+= remoteproc_debugfs.o

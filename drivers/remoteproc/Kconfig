@@ -14,6 +14,15 @@ config REMOTEPROC
 
 if REMOTEPROC
 
+config EXYNOS7885_ABOX_RPROC
+	tristate "Exynos7885 ABOX non-booting staging driver"
+	depends on ARCH_EXYNOS && EXYNOS_IOMMU && MFD_SYSCON
+	help
+	  Stage Calliope DRAM firmware and its fixed Exynos System MMU mappings
+	  for the Galaxy Tab A 10.1 (2019). The ABOX CPU remains off because
+	  the start callback refuses execution. The driver has no autoload alias;
+	  load it explicitly with enable=1 to inspect the preparation path.
+
 config REMOTEPROC_CDEV
 	bool "Remoteproc character device interface"
 	help
