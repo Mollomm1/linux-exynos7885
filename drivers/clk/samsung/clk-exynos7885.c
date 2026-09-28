@@ -21,7 +21,7 @@
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
-#define CLKS_NR_DISPAUD			(CLK_GOUT_SMMU_ABOX_CLK + 1)
+#define CLKS_NR_DISPAUD			(CLK_GOUT_UAIF3_SYNC + 1)
 
 /* ---- CMU_TOP ------------------------------------------------------------- */
 
@@ -826,6 +826,8 @@ static const struct samsung_cmu_info fsys_cmu_info __initconst = {
 #define CLK_CON_DIV_AUD_BUS		0x1804
 #define CLK_CON_DIV_UAIF3		0x1824
 #define CLK_CON_GAT_ABOX_ACLK		0x200c
+#define CLK_CON_GAT_UAIF3_BCLK		0x201c
+#define CLK_CON_GAT_UAIF3_SYNC		0x20c4
 #define CLK_CON_GAT_SMMU_ABOX_CLK	0x20d0
 
 static const unsigned long dispaud_clk_regs[] __initconst = {
@@ -835,6 +837,8 @@ static const unsigned long dispaud_clk_regs[] __initconst = {
 	CLK_CON_DIV_AUD_BUS,
 	CLK_CON_DIV_UAIF3,
 	CLK_CON_GAT_ABOX_ACLK,
+	CLK_CON_GAT_UAIF3_BCLK,
+	CLK_CON_GAT_UAIF3_SYNC,
 	CLK_CON_GAT_SMMU_ABOX_CLK,
 };
 
@@ -857,6 +861,10 @@ static const struct samsung_gate_clock dispaud_gate_clks[] __initconst = {
 	     CLK_CON_GAT_ABOX_ACLK, 21, 0, 0),
 	GATE(CLK_GOUT_SMMU_ABOX_CLK, "gout_smmu_abox_clk",
 	     "dout_aud_bus", CLK_CON_GAT_SMMU_ABOX_CLK, 21, 0, 0),
+	GATE(CLK_GOUT_UAIF3_BCLK, "gout_uaif3_bclk", "dout_uaif3",
+	     CLK_CON_GAT_UAIF3_BCLK, 21, 0, 0),
+	GATE(CLK_GOUT_UAIF3_SYNC, "gout_uaif3_sync", "dout_uaif3",
+	     CLK_CON_GAT_UAIF3_SYNC, 21, 0, 0),
 };
 
 static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
