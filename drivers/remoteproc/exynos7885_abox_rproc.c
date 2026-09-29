@@ -228,6 +228,11 @@ module_param(allow_firmware_start, bool, 0444);
 MODULE_PARM_DESC(allow_firmware_start,
 		 "Allow explicit remoteproc requests to execute ABOX firmware");
 
+static bool populate_children = true;
+module_param(populate_children, bool, 0444);
+MODULE_PARM_DESC(populate_children,
+		 "Populate ABOX PCM child devices after remoteproc registration");
+
 static int exynos7885_abox_check_idle(struct exynos7885_abox_rproc *abox)
 {
 	unsigned int dispaud, cpu, configuration, option;
@@ -1548,11 +1553,16 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 		return ret;
 	dev_info(dev, "ABOX probe: remoteproc registered offline\n");
 
-	ret = devm_of_platform_populate(dev);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to populate ABOX child devices\n");
-	dev_info(dev, "ABOX probe: PCM child devices populated\n");
+	if (populate_children) {
+		dev_info(dev, "ABOX probe: populating child devices\n");
+		ret = devm_of_platform_populate(dev);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to populate ABOX child devices\n");
+		dev_info(dev, "ABOX probe: PCM child devices populated\n");
+	} else {
+		dev_info(dev, "ABOX probe: child population disabled by parameter\n");
+	}
 
 	dev_info(dev, "ABOX remoteproc registered; firmware start is opt-in\n");
 	return 0;
