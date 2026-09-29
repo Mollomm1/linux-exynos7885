@@ -2066,6 +2066,18 @@ config SND_SOC_TFA989X
 	  Note that the driver currently bypasses the built-in "CoolFlux DSP"
 	  and does not support (hardware) volume control.
 
+config SND_SOC_TFA9896_T510
+	tristate "NXP TFA9896 SM-T510 vendor bypass configuration"
+	depends on I2C
+	select REGMAP_I2C
+	depends on SND_SOC
+	help
+	  Enable the opt-in TFA9896 bypass setup derived from the SM-T510
+	  vendor container for its two known amplifier addresses. Probe only
+	  reads the chip revision; register setup is deferred until playback
+	  and shutdown mutes the amplifier before the ABOX interface stops.
+	  This driver does not load CoolFlux firmware or speaker protection data.
+
 config SND_SOC_TLV320ADC3XXX
 	tristate "Texas Instruments TLV320ADC3001/3101 audio ADC"
 	depends on I2C

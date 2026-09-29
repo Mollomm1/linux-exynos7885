@@ -111,6 +111,8 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 	priv->link.dai_fmt = SND_SOC_DAIFMT_DSP_A |
 			     SND_SOC_DAIFMT_CBC_CFC |
 			     SND_SOC_DAIFMT_NB_NF;
+	/* Codec mute uses I2C in trigger context; ABOX also waits for IPC. */
+	priv->link.nonatomic = 1;
 	priv->link.playback_only = 1;
 
 	card = &priv->card;
