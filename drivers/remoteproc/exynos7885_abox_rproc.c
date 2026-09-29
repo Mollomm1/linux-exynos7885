@@ -140,6 +140,7 @@ struct exynos7885_abox_rproc {
 	bool pmu_mapped;
 	bool audsys_mapped;
 	bool sram_loaded;
+	bool irq_requested;
 	bool irq_enabled;
 	unsigned long enabled_clocks;
 	bool pins_active_selected;
@@ -970,7 +971,8 @@ void exynos7885_abox_unregister_ipc_handler(struct device *dev,
 	if (abox->ipc_handler == handler) {
 		/* Stop new callbacks before waiting for an in-flight one. */
 		smp_store_release(&abox->ipc_handler, NULL);
-		synchronize_irq(abox->irq);
+		if (abox->irq_requested)
+			synchronize_irq(abox->irq);
 		WRITE_ONCE(abox->ipc_handler_data, NULL);
 	}
 	mutex_unlock(&abox->handler_lock);
@@ -1058,6 +1060,12 @@ static int exynos7885_abox_release_resources(struct exynos7885_abox_rproc *abox)
 		disable_irq(abox->irq);
 		abox->irq_enabled = false;
 	}
+	mutex_lock(&abox->handler_lock);
+	if (abox->irq_requested) {
+		devm_free_irq(abox->dev, abox->irq, abox);
+		abox->irq_requested = false;
+	}
+	mutex_unlock(&abox->handler_lock);
 	if (abox->pins_active_selected) {
 		ret = pinctrl_select_state(abox->pinctrl, abox->pins_idle);
 		if (ret)
@@ -1169,6 +1177,31 @@ static int exynos7885_abox_start(struct rproc *rproc)
 
 	exynos7885_abox_init_local_gic(abox);
 	reinit_completion(&abox->boot_done);
+
+	/* Request the parent IRQ only after the ABOX GIC is initialized. */
+	mutex_lock(&abox->handler_lock);
+	if (!abox->irq_requested) {
+		abox->irq = platform_get_irq_byname(to_platform_device(abox->dev),
+						    "abox");
+		if (abox->irq < 0) {
+			ret = dev_err_probe(abox->dev, abox->irq,
+					    "failed to get ABOX parent IRQ\n");
+			mutex_unlock(&abox->handler_lock);
+			goto fail_before_release;
+		}
+
+		ret = devm_request_irq(abox->dev, abox->irq,
+				       exynos7885_abox_irq, IRQF_NO_AUTOEN,
+				       dev_name(abox->dev), abox);
+		if (ret) {
+			ret = dev_err_probe(abox->dev, ret,
+					    "failed to request ABOX parent IRQ\n");
+			mutex_unlock(&abox->handler_lock);
+			goto fail_before_release;
+		}
+		abox->irq_requested = true;
+	}
+	mutex_unlock(&abox->handler_lock);
 
 	/* The consumer state is named "active" to avoid pinctrl auto-selection. */
 	abox->pins_active_selected = true;
@@ -1450,25 +1483,11 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 		return PTR_ERR(abox->gicc);
 	dev_info(dev, "ABOX probe: controller resources mapped\n");
 
-	abox->irq = platform_get_irq_byname(pdev, "abox");
-	if (abox->irq < 0)
-		return dev_err_probe(dev, abox->irq,
-				     "failed to get ABOX parent IRQ\n");
-
 	init_completion(&abox->boot_done);
 	mutex_init(&abox->ipc_lock);
 	mutex_init(&abox->handler_lock);
 	mutex_init(&abox->pcm_lock);
 	mutex_init(&abox->uaif_lock);
-	/* Keep the parent IRQ off until a future start path initializes the GIC. */
-	ret = devm_request_irq(dev, abox->irq, exynos7885_abox_irq,
-			       IRQF_NO_AUTOEN, dev_name(dev), abox);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to request disabled ABOX parent IRQ\n");
-	abox->irq_enabled = false;
-	dev_info(dev, "ABOX probe: parent IRQ registered disabled\n");
-
 	abox->pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7885-pmu");
 	if (IS_ERR(abox->pmu))
 		return PTR_ERR(abox->pmu);
@@ -1487,18 +1506,22 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 
 	pcm_np = of_parse_phandle(dev->of_node, "memory-region", 1);
 	if (pcm_np) {
-		abox->pcm_rmem = of_reserved_mem_lookup(pcm_np);
-		of_node_put(pcm_np);
-		if (!abox->pcm_rmem ||
-		    abox->pcm_rmem->size < ABOX_PCM_SIZE ||
-		    !IS_ALIGNED(abox->pcm_rmem->base, PAGE_SIZE))
-			return dev_err_probe(dev, -EINVAL,
-					     "PCM ring region must be at least 128 KiB and page aligned\n");
-		abox->pcm_area = devm_memremap(dev, abox->pcm_rmem->base,
-					       ABOX_PCM_SIZE, MEMREMAP_WB);
-		if (!abox->pcm_area)
-			return dev_err_probe(dev, -ENOMEM,
-					     "failed to map reserved PCM ring buffer\n");
+		if (populate_children) {
+			abox->pcm_rmem = of_reserved_mem_lookup(pcm_np);
+			of_node_put(pcm_np);
+			if (!abox->pcm_rmem ||
+			    abox->pcm_rmem->size < ABOX_PCM_SIZE ||
+			    !IS_ALIGNED(abox->pcm_rmem->base, PAGE_SIZE))
+				return dev_err_probe(dev, -EINVAL,
+						     "PCM ring region must be at least 128 KiB and page aligned\n");
+			abox->pcm_area = devm_memremap(dev, abox->pcm_rmem->base,
+						       ABOX_PCM_SIZE, MEMREMAP_WB);
+			if (!abox->pcm_area)
+				return dev_err_probe(dev, -ENOMEM,
+						     "failed to map reserved PCM ring buffer\n");
+		} else {
+			of_node_put(pcm_np);
+		}
 	}
 
 	iommu_np = of_parse_phandle(dev->of_node, "iommus", 0);
