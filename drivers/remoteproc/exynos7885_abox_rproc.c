@@ -1394,6 +1394,8 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	if (!enable)
 		return -ENODEV;
 
+	dev_info(dev, "ABOX probe: mapping controller resources\n");
+
 	sram = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sram");
 	if (!sram || resource_size(sram) < ABOX_SRAM_SIZE)
 		return -EINVAL;
@@ -1441,6 +1443,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	abox->gicc = devm_ioremap_resource(dev, gicc);
 	if (IS_ERR(abox->gicc))
 		return PTR_ERR(abox->gicc);
+	dev_info(dev, "ABOX probe: controller resources mapped\n");
 
 	abox->irq = platform_get_irq_byname(pdev, "abox");
 	if (abox->irq < 0)
@@ -1459,6 +1462,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret,
 				     "failed to request disabled ABOX parent IRQ\n");
 	abox->irq_enabled = false;
+	dev_info(dev, "ABOX probe: parent IRQ registered disabled\n");
 
 	abox->pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7885-pmu");
 	if (IS_ERR(abox->pmu))
@@ -1474,6 +1478,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	    !IS_ALIGNED(abox->dram_rmem->base, SZ_1M))
 		return dev_err_probe(dev, -EINVAL,
 				     "DRAM firmware region must be at least 12 MiB and 1 MiB aligned\n");
+	dev_info(dev, "ABOX probe: firmware memory region ready\n");
 
 	pcm_np = of_parse_phandle(dev->of_node, "memory-region", 1);
 	if (pcm_np) {
@@ -1508,12 +1513,14 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 				      abox->sysmmu_dev);
 	if (ret)
 		return ret;
+	dev_info(dev, "ABOX probe: System MMU provider ready\n");
 
 	for (i = 0; i < ARRAY_SIZE(abox->clocks); i++)
 		abox->clocks[i].id = exynos7885_abox_clock_names[i];
 	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(abox->clocks), abox->clocks);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to get ABOX clocks\n");
+	dev_info(dev, "ABOX probe: clocks resolved\n");
 
 	abox->pinctrl = devm_pinctrl_get(dev);
 	if (IS_ERR(abox->pinctrl))
@@ -1529,6 +1536,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	if (IS_ERR(abox->pins_idle))
 		return dev_err_probe(dev, PTR_ERR(abox->pins_idle),
 				     "failed to find idle pin state\n");
+	dev_info(dev, "ABOX probe: pin states resolved\n");
 
 	rproc->has_iommu = true;
 	rproc->auto_boot = false;
@@ -1538,11 +1546,13 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	ret = devm_rproc_add(dev, rproc);
 	if (ret)
 		return ret;
+	dev_info(dev, "ABOX probe: remoteproc registered offline\n");
 
 	ret = devm_of_platform_populate(dev);
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "failed to populate ABOX child devices\n");
+	dev_info(dev, "ABOX probe: PCM child devices populated\n");
 
 	dev_info(dev, "ABOX remoteproc registered; firmware start is opt-in\n");
 	return 0;
