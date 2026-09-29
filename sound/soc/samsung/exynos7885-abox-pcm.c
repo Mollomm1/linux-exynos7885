@@ -496,7 +496,6 @@ static struct snd_soc_dai_driver exynos7885_abox_dai = {
 static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 {
 	struct exynos7885_abox_pcm *pcm;
-	int ret;
 
 	if (!pdev->dev.parent)
 		return -ENODEV;
@@ -506,12 +505,6 @@ static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	pcm->abox_dev = pdev->dev.parent;
 	platform_set_drvdata(pdev, pcm);
-
-	ret = exynos7885_abox_get_pcm_buffer(pcm->abox_dev, &pcm->area,
-					     &pcm->phys, &pcm->size);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "ABOX PCM carveout is unavailable\n");
 
 	return devm_snd_soc_register_component(&pdev->dev,
 					       &exynos7885_abox_component,

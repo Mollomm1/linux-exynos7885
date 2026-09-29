@@ -609,17 +609,30 @@ int exynos7885_abox_get_pcm_buffer(struct device *dev, void **area,
 {
 	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
 	struct exynos7885_abox_rproc *abox;
+	void *pcm_area;
 
 	if (!rproc || !area || !phys || !size)
 		return -EINVAL;
 
 	abox = rproc->priv;
-	if (!abox->pcm_rmem || !abox->pcm_area)
+	if (!abox->pcm_rmem)
 		return -ENODEV;
+
+	mutex_lock(&abox->pcm_lock);
+	if (!abox->pcm_area) {
+		pcm_area = devm_memremap(abox->dev, abox->pcm_rmem->base,
+					 ABOX_PCM_SIZE, MEMREMAP_WB);
+		if (!pcm_area) {
+			mutex_unlock(&abox->pcm_lock);
+			return -ENOMEM;
+		}
+		abox->pcm_area = pcm_area;
+	}
 
 	*area = abox->pcm_area;
 	*phys = abox->pcm_rmem->base;
 	*size = min_t(size_t, abox->pcm_rmem->size, ABOX_PCM_SIZE);
+	mutex_unlock(&abox->pcm_lock);
 
 	return 0;
 }
@@ -1506,22 +1519,13 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 
 	pcm_np = of_parse_phandle(dev->of_node, "memory-region", 1);
 	if (pcm_np) {
-		if (populate_children) {
-			abox->pcm_rmem = of_reserved_mem_lookup(pcm_np);
-			of_node_put(pcm_np);
-			if (!abox->pcm_rmem ||
-			    abox->pcm_rmem->size < ABOX_PCM_SIZE ||
-			    !IS_ALIGNED(abox->pcm_rmem->base, PAGE_SIZE))
-				return dev_err_probe(dev, -EINVAL,
-						     "PCM ring region must be at least 128 KiB and page aligned\n");
-			abox->pcm_area = devm_memremap(dev, abox->pcm_rmem->base,
-						       ABOX_PCM_SIZE, MEMREMAP_WB);
-			if (!abox->pcm_area)
-				return dev_err_probe(dev, -ENOMEM,
-						     "failed to map reserved PCM ring buffer\n");
-		} else {
-			of_node_put(pcm_np);
-		}
+		abox->pcm_rmem = of_reserved_mem_lookup(pcm_np);
+		of_node_put(pcm_np);
+		if (!abox->pcm_rmem ||
+		    abox->pcm_rmem->size < ABOX_PCM_SIZE ||
+		    !IS_ALIGNED(abox->pcm_rmem->base, PAGE_SIZE))
+			return dev_err_probe(dev, -EINVAL,
+					     "PCM ring region must be at least 128 KiB and page aligned\n");
 	}
 
 	iommu_np = of_parse_phandle(dev->of_node, "iommus", 0);
