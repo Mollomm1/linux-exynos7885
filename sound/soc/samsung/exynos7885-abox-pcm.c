@@ -54,6 +54,8 @@ struct exynos7885_abox_pcm {
 	bool configured;
 	bool running;
 	struct exynos7885_abox_pcm_uaif uaif[ABOX_PCM_NUM_DAIS];
+	/* DAI index of the UAIF that plays; both UAIFs share SIFS1. */
+	unsigned int output;
 };
 
 static int exynos7885_abox_pcm_hw_free(struct snd_soc_component *component,
@@ -392,16 +394,27 @@ static const unsigned int exynos7885_abox_pcm_uaif_id[ABOX_PCM_NUM_DAIS] = {
 	3, 0,
 };
 
-/* Switch every UAIF configured for this stream on or off. */
+/*
+ * Start only the selected output, or stop every running UAIF. Two UAIFs
+ * reading SIFS1 each take part of the samples and RDMA0 runs twice as fast,
+ * so the speakers and the headphones cannot play together.
+ */
 static int exynos7885_abox_pcm_set_uaifs(struct exynos7885_abox_pcm *pcm,
 					 bool enable)
 {
 	struct exynos7885_abox_pcm_uaif *uaif;
+	unsigned int output = pcm->output;
 	int i, ret, first_err = 0;
+
+	/* Without a configured headphone DAI, play on what is there. */
+	if (!pcm->uaif[output].configured)
+		output = 0;
 
 	for (i = 0; i < ABOX_PCM_NUM_DAIS; i++) {
 		uaif = &pcm->uaif[i];
 		if (!uaif->configured || uaif->enabled == enable)
+			continue;
+		if (enable && i != output)
 			continue;
 		ret = exynos7885_abox_uaif_set_enabled(pcm->abox_dev,
 					exynos7885_abox_pcm_uaif_id[i], enable);
@@ -481,8 +494,48 @@ exynos7885_abox_pcm_pointer(struct snd_soc_component *component,
 	return READ_ONCE(pcm->hw_ptr);
 }
 
+static const char * const exynos7885_abox_output_texts[] = {
+	"Speaker", "Headphone",
+};
+
+static SOC_ENUM_SINGLE_EXT_DECL(exynos7885_abox_output_enum,
+				exynos7885_abox_output_texts);
+
+static int exynos7885_abox_output_get(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.enumerated.item[0] = pcm->output;
+	return 0;
+}
+
+static int exynos7885_abox_output_put(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	unsigned int output = ucontrol->value.enumerated.item[0];
+
+	if (output >= ARRAY_SIZE(exynos7885_abox_output_texts))
+		return -EINVAL;
+	if (output == pcm->output)
+		return 0;
+	/* Takes effect at the next stream start. */
+	pcm->output = output;
+	return 1;
+}
+
+static const struct snd_kcontrol_new exynos7885_abox_controls[] = {
+	SOC_ENUM_EXT("Playback Output", exynos7885_abox_output_enum,
+		     exynos7885_abox_output_get, exynos7885_abox_output_put),
+};
+
 static const struct snd_soc_component_driver exynos7885_abox_component = {
 	.name = "exynos7885-abox-pcm",
+	.controls = exynos7885_abox_controls,
+	.num_controls = ARRAY_SIZE(exynos7885_abox_controls),
 	.open = exynos7885_abox_pcm_open,
 	.close = exynos7885_abox_pcm_close,
 	.copy = exynos7885_abox_pcm_copy,
