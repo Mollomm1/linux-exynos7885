@@ -29,7 +29,10 @@ enum exynos7885_abox_uaif3_format {
 	EXYNOS7885_ABOX_UAIF3_DSP_A,
 };
 
-/* Called from the ABOX parent IRQ; handlers must not sleep. */
+/*
+ * Called from the ABOX parent IRQ; handlers must not sleep. An RDMA0
+ * buffer-empty interrupt arrives as a PCM_POINTER message with pointer 0.
+ */
 typedef void (*exynos7885_abox_ipc_handler_t)(struct device *dev,
 						      const u32 *message,
 						      void *data);
@@ -49,6 +52,9 @@ int exynos7885_abox_sync_pcm_buffer(struct device *dev, size_t offset,
 				    size_t size);
 int exynos7885_abox_wait_rdma_idle(struct device *dev, unsigned int channel,
 				   unsigned int timeout_us);
+/* Byte position of RDMA @channel in its ring; safe from the IPC handler. */
+ssize_t exynos7885_abox_rdma_pointer(struct device *dev, unsigned int channel,
+				     size_t buffer_bytes, size_t period_bytes);
 int exynos7885_abox_uaif3_set_fmt(struct device *dev, unsigned int format,
 				  bool invert_bclk, bool invert_frame,
 				  bool abox_master);

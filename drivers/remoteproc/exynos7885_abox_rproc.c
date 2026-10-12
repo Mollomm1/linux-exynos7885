@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Explicit-load Exynos7885 ABOX remoteproc driver. */
 
+#include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
-#include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
@@ -24,6 +24,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/remoteproc.h>
 #include <linux/sizes.h>
@@ -39,6 +40,17 @@
 #define ABOX_RDMA_INTERVAL	0x100
 #define ABOX_RDMA_STATUS	0x30
 #define ABOX_RDMA_PROGRESS	BIT(31)
+#define ABOX_RDMA_RBUF_OFFSET	GENMASK(28, 16)
+#define ABOX_RDMA_RBUF_CNT	GENMASK(12, 0)
+#define ABOX_IRQ_RDMA0_BUF_EMPTY	11
+#define ABOX_ROUTE_CTRL0	0x0040
+#define ABOX_ROUTE_UAIF3_SPK	GENMASK(15, 12)
+#define ABOX_ROUTE_SIFS1	2
+#define ABOX_SPUS_CTRL0		0x0200
+#define ABOX_SPUS_RDMA0_CHAIN	GENMASK(3, 0)
+#define ABOX_SPUS_RDMA0_ASRC	BIT(0)
+#define ABOX_SPUS_CTRL1		0x0204
+#define ABOX_SPUS_SIFS1_SEL	GENMASK(18, 16)
 #define ABOX_UAIF3_CTRL0	0x0530
 #define ABOX_UAIF3_CTRL1	0x0534
 #define ABOX_UAIF3_SPK_ENABLE	BIT(0)
@@ -60,6 +72,8 @@
 #define ABOX_SYSPOWER_ON	BIT(0)
 #define ABOX_REMAP_ADDR		0x0028
 #define ABOX_TIMER0_CTRL1	0x0604
+#define ABOX_TIMER_CTRL0(n)	(0x0600 + (n) * 0x20)
+#define ABOX_NUM_TIMERS		4
 #define ABOX_SRAM_PHYS		0x14b00000
 #define ABOX_DISPAUD_STATUS	0x4024
 #define ABOX_CA7_CONFIGURATION	0x2520
@@ -77,16 +91,26 @@
 #define ABOX_IPC_WORDS		EXYNOS7885_ABOX_IPC_WORDS
 #define ABOX_GIC_SGIR		0x0f00
 #define ABOX_IPC_SYSTEM		1
+#define ABOX_IPC_CONFIG		0xa
+#define ABOX_SET_OUT1_SAMPLE_RATE	2
+#define ABOX_SET_OUT1_FORMAT	0x11
 #define ABOX_SYSTEM_SUSPEND	1
 #define ABOX_BOOT_DONE		3
 #define ABOX_IPC_TIMEOUT_US	20000
 #define ABOX_WFI_TIMEOUT_US	100000
 #define ABOX_STOP_TIMEOUT_US	20000
+#define ABOX_FAULT_LIMIT	8
+#define ABOX_BOOTARGS_SIZE	SZ_512
+
 #define ABOX_BOOT_TIMEOUT_MS	10000
 #define ABOX_AUD_PLL_RATE_48K	1179648040
 #define ABOX_AUD_PLL_RATE_44K	1083801605
-#define ABOX_AUDIF_RATE		24576000
-#define ABOX_AUDIF_RATE_44K	22579200
+/*
+ * AUDIF is the PLL divided by 48 (24.576 or 22.5792 MHz). The PLL runs a few
+ * Hz above 48 times that, and dividers never round above a request.
+ */
+#define ABOX_AUDIF_DIV		48
+#define ABOX_AUDIF_RATE(pll)	DIV_ROUND_UP(pll, ABOX_AUDIF_DIV)
 #define ABOX_CA7_RATE		393216000
 #define ABOX_GIC_IRQ_LIMIT	32
 #define ABOX_GIC_SPURIOUS	1021
@@ -137,6 +161,12 @@ struct exynos7885_abox_rproc {
 	int irq;
 	u32 firmware_version;
 	size_t sram_size;
+	bool rpm_held;
+	bool aclk_held;
+	bool ca7_held;
+	int sysmmu_irq;
+	bool sysmmu_irq_off;
+	atomic_t faults;
 	bool pmu_mapped;
 	bool audsys_mapped;
 	bool sram_loaded;
@@ -165,8 +195,19 @@ static void exynos7885_abox_handle_ipc(struct exynos7885_abox_rproc *abox, unsig
 	exynos7885_abox_ipc_handler_t handler;
 	void *data;
 
-	if (exynos7885_abox_is_dma_irq(irq))
-		return;
+	if (exynos7885_abox_is_dma_irq(irq)) {
+		/*
+		 * RDMA0 finished a period. This carries no payload; report it
+		 * as a POINTER message with a zero pointer, meaning "read the
+		 * position from RDMA0 STATUS".
+		 */
+		if (irq != ABOX_IRQ_RDMA0_BUF_EMPTY)
+			return;
+		memset(message, 0, sizeof(message));
+		message[0] = EXYNOS7885_ABOX_IPC_PCM_PLAYBACK;
+		message[2] = EXYNOS7885_ABOX_PCM_POINTER;
+		goto dispatch;
+	}
 
 	memcpy_fromio(message, abox->sram + ABOX_IPC_RX_OFFSET,
 		      sizeof(message));
@@ -184,6 +225,7 @@ static void exynos7885_abox_handle_ipc(struct exynos7885_abox_rproc *abox, unsig
 		return;
 	}
 
+dispatch:
 	/* Pair with registration so the callback's data is already visible. */
 	handler = smp_load_acquire(&abox->ipc_handler);
 	data = READ_ONCE(abox->ipc_handler_data);
@@ -229,6 +271,16 @@ module_param(allow_firmware_start, bool, 0444);
 MODULE_PARM_DESC(allow_firmware_start,
 		 "Allow explicit remoteproc requests to execute ABOX firmware");
 
+static char *bootargs;
+module_param(bootargs, charp, 0444);
+MODULE_PARM_DESC(bootargs,
+		 "Firmware boot arguments when the DT has no samsung,bootargs");
+
+static unsigned int bootargs_offset;
+module_param(bootargs_offset, uint, 0444);
+MODULE_PARM_DESC(bootargs_offset,
+		 "SRAM offset of the module bootargs");
+
 static bool populate_children = true;
 module_param(populate_children, bool, 0444);
 MODULE_PARM_DESC(populate_children,
@@ -236,7 +288,7 @@ MODULE_PARM_DESC(populate_children,
 
 static int exynos7885_abox_check_idle(struct exynos7885_abox_rproc *abox)
 {
-	unsigned int dispaud, cpu, configuration, option;
+	unsigned int dispaud, cpu, option;
 	int ret;
 
 	ret = regmap_read(abox->pmu, ABOX_DISPAUD_STATUS, &dispaud);
@@ -245,15 +297,17 @@ static int exynos7885_abox_check_idle(struct exynos7885_abox_rproc *abox)
 	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
 	if (ret)
 		return ret;
-	ret = regmap_read(abox->pmu, ABOX_CA7_CONFIGURATION, &configuration);
-	if (ret)
-		return ret;
 	ret = regmap_read(abox->pmu, ABOX_CA7_OPTION, &option);
 	if (ret)
 		return ret;
 
+	/*
+	 * The bootloader leaves the CA7 local-power request set while the
+	 * core is held and off (CONFIGURATION 0x1, STATUS 0x10010000 on the
+	 * T510). Like the vendor driver, treat a held, off core as idle;
+	 * start clears the power request before setting the reset vector.
+	 */
 	return (dispaud & 0xf) == 0xf && !(cpu & ABOX_CA7_STATUS_ON) &&
-	       !(configuration & ABOX_CA7_LOCAL_PWR) &&
 	       !(option & ABOX_CA7_ENABLE) ? 0 : -EBUSY;
 }
 
@@ -269,6 +323,56 @@ static int exynos7885_abox_sanity_check(struct rproc *rproc,
 	return exynos7885_abox_check_idle(abox);
 }
 
+/* Translation faults are logged; reporting them unhandled panics. */
+static int exynos7885_abox_iommu_fault(struct iommu_domain *domain,
+				       struct device *dev, unsigned long iova,
+				       int flags, void *token)
+{
+	struct exynos7885_abox_rproc *abox = token;
+
+	dev_err_ratelimited(abox->dev, "System MMU fault at IOVA %#lx, flags %#x\n",
+			    iova, flags);
+	/*
+	 * A retried access faults forever. Hold the CA7 and mask the fault
+	 * interrupt, leaving the access stalled instead of flooding the log.
+	 */
+	if (atomic_inc_return(&abox->faults) == ABOX_FAULT_LIMIT) {
+		/* Like the vendor panic handler: clear enable and power. */
+		regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
+				   ABOX_CA7_ENABLE, 0);
+		regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
+				   ABOX_CA7_LOCAL_PWR, 0);
+		disable_irq_nosync(abox->sysmmu_irq);
+		WRITE_ONCE(abox->sysmmu_irq_off, true);
+		dev_crit(abox->dev, "%d System MMU faults; holding the ABOX CPU\n",
+			 ABOX_FAULT_LIMIT);
+	}
+	return 0;
+}
+
+/*
+ * Hold the CA7 and drop its local-power request, as the vendor driver does.
+ * A running core only reports off once local power is removed, so callers
+ * must have confirmed it idle (WFI) or already off.
+ */
+static int exynos7885_abox_hold_cpu(struct exynos7885_abox_rproc *abox)
+{
+	unsigned int status;
+	int ret;
+
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
+				 ABOX_CA7_ENABLE, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
+				 ABOX_CA7_LOCAL_PWR, 0);
+	if (ret)
+		return ret;
+	return regmap_read_poll_timeout(abox->pmu, ABOX_CA7_STATUS, status,
+					!(status & ABOX_CA7_STATUS_ON), 100,
+					ABOX_STOP_TIMEOUT_US);
+}
+
 static int exynos7885_abox_prepare(struct rproc *rproc)
 {
 	struct exynos7885_abox_rproc *abox = rproc->priv;
@@ -279,10 +383,62 @@ static int exynos7885_abox_prepare(struct rproc *rproc)
 	if (ret)
 		return ret;
 
+	/*
+	 * Like the vendor driver, hold the CA7 before clocking ABOX: a core
+	 * left with local power on can issue accesses through the System MMU.
+	 */
+	ret = exynos7885_abox_hold_cpu(abox);
+	if (ret)
+		return ret;
+
+	/*
+	 * The remoteproc core already set a handler that reports faults as
+	 * unhandled, which makes the Exynos System MMU panic, and a domain
+	 * takes only one iommu_set_fault_handler() call. Replace it while
+	 * the System MMU is not yet translating.
+	 */
+	atomic_set(&abox->faults, 0);
+	domain->handler_token = abox;
+	domain->handler = exynos7885_abox_iommu_fault;
+
+	/*
+	 * Set the start rates now, so the PLL is reprogrammed while nothing
+	 * uses it and .start() finds them already applied.
+	 */
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_PLL].clk,
+			   ABOX_AUD_PLL_RATE_48K);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_CA7].clk, ABOX_CA7_RATE);
+	if (ret)
+		return ret;
+
+	/*
+	 * The System MMU only programs the remoteproc domain while runtime
+	 * active; its device link resumes it with this consumer. Without
+	 * this, ABOX DMA to the firmware IOVAs would bypass translation.
+	 */
+	ret = pm_runtime_resume_and_get(abox->dev);
+	if (ret)
+		return ret;
+	abox->rpm_held = true;
+
+	/* SRAM, SFR and local-GIC accesses all stall without the ABOX ACLK. */
+	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_ACLK].clk);
+	if (ret)
+		goto put_rpm;
+	abox->aclk_held = true;
+
+	/* SRAM and the local GIC also stall without the CA7 clock. */
+	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_CA7].clk);
+	if (ret)
+		goto disable_aclk;
+	abox->ca7_held = true;
+
 	ret = iommu_map(domain, ABOX_PMU_IOVA, ABOX_PMU_IOVA,
 			ABOX_PMU_SIZE, IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
 	if (ret)
-		return ret;
+		goto disable_ca7;
 	abox->pmu_mapped = true;
 
 	ret = iommu_map(domain, ABOX_AUDSYS_IOVA, ABOX_AUDSYS_IOVA,
@@ -290,11 +446,22 @@ static int exynos7885_abox_prepare(struct rproc *rproc)
 	if (ret) {
 		iommu_unmap(domain, ABOX_PMU_IOVA, ABOX_PMU_SIZE);
 		abox->pmu_mapped = false;
-		return ret;
+		goto disable_ca7;
 	}
 	abox->audsys_mapped = true;
 
 	return 0;
+
+disable_ca7:
+	clk_disable_unprepare(abox->clocks[ABOX_CLK_CA7].clk);
+	abox->ca7_held = false;
+disable_aclk:
+	clk_disable_unprepare(abox->clocks[ABOX_CLK_ACLK].clk);
+	abox->aclk_held = false;
+put_rpm:
+	pm_runtime_put_sync(abox->dev);
+	abox->rpm_held = false;
+	return ret;
 }
 
 static int exynos7885_abox_unprepare(struct rproc *rproc)
@@ -302,14 +469,17 @@ static int exynos7885_abox_unprepare(struct rproc *rproc)
 	struct exynos7885_abox_rproc *abox = rproc->priv;
 	struct iommu_domain *domain = rproc->domain;
 	unsigned int cpu;
+	bool cpu_off;
 	int ret;
 
 	/* The core frees carveout entries before calling unprepare. */
 	abox->dram = NULL;
 
+	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
+	cpu_off = !ret && !(cpu & ABOX_CA7_STATUS_ON);
+
 	if (abox->sram_loaded) {
-		ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &cpu);
-		if (ret || (cpu & 1)) {
+		if (!cpu_off) {
 			dev_warn(rproc->dev.parent,
 				 "leaving ABOX SRAM intact; CPU-off state is unconfirmed\n");
 		} else {
@@ -329,6 +499,29 @@ static int exynos7885_abox_unprepare(struct rproc *rproc)
 		abox->pmu_mapped = false;
 	}
 
+	/* A possibly running CA7 keeps its bus clock and translation. */
+	if (!cpu_off) {
+		dev_crit(rproc->dev.parent,
+			 "keeping ABOX clocks and System MMU active\n");
+		return -EBUSY;
+	}
+	if (abox->sysmmu_irq_off) {
+		enable_irq(abox->sysmmu_irq);
+		abox->sysmmu_irq_off = false;
+	}
+	if (abox->ca7_held) {
+		clk_disable_unprepare(abox->clocks[ABOX_CLK_CA7].clk);
+		abox->ca7_held = false;
+	}
+	if (abox->aclk_held) {
+		clk_disable_unprepare(abox->clocks[ABOX_CLK_ACLK].clk);
+		abox->aclk_held = false;
+	}
+	if (abox->rpm_held) {
+		pm_runtime_put_sync(abox->dev);
+		abox->rpm_held = false;
+	}
+
 	return 0;
 }
 
@@ -338,7 +531,11 @@ static int exynos7885_abox_alloc_dram(struct rproc *rproc,
 	struct exynos7885_abox_rproc *abox = rproc->priv;
 	int ret;
 
-	mem->va = memremap(abox->dram_rmem->base, mem->len, MEMREMAP_WB);
+	/*
+	 * The carveout is no-map and ABOX is not cache coherent: use an
+	 * uncached mapping, since there is no linear alias for DMA syncs.
+	 */
+	mem->va = memremap(abox->dram_rmem->base, mem->len, MEMREMAP_WC);
 	if (!mem->va)
 		return -ENOMEM;
 	mem->dma = abox->dram_rmem->base;
@@ -391,6 +588,35 @@ static int exynos7885_abox_parse_fw(struct rproc *rproc,
 		return -ENOMEM;
 	rproc_add_carveout(rproc, abox->dram);
 
+	return 0;
+}
+
+/*
+ * The firmware reads its options from SRAM; the T510 passes "vss=0", without
+ * which the firmware writes to the unmapped modem voice window.
+ */
+static int exynos7885_abox_write_bootargs(struct exynos7885_abox_rproc *abox,
+					  size_t image_size)
+{
+	struct device_node *np = abox->dev->of_node;
+	const char *args = bootargs;
+	u32 offset = bootargs_offset;
+	size_t len;
+
+	if (!of_property_read_string(np, "samsung,bootargs", &args) &&
+	    of_property_read_u32(np, "samsung,bootargs-offset", &offset))
+		return -EINVAL;
+	if (!args)
+		return 0;
+
+	len = strlen(args) + 1;
+	if (len > ABOX_BOOTARGS_SIZE || offset < image_size ||
+	    offset > abox->sram_size - ABOX_BOOTARGS_SIZE)
+		return -EINVAL;
+
+	memcpy_toio(abox->sram + offset, args, len);
+	dev_info(abox->dev, "firmware bootargs \"%s\" at SRAM +%#x\n",
+		 args, offset);
 	return 0;
 }
 
@@ -459,11 +685,13 @@ static int exynos7885_abox_load(struct rproc *rproc,
 			 name, offset);
 		release_firmware(extra);
 	}
-	/* Match Exynos SysMMU page-table cache maintenance: sync physical RAM. */
-	dma_sync_single_for_device(abox->sysmmu_dev, abox->dram_rmem->base,
-				   abox->dram->len, DMA_TO_DEVICE);
+	/* The DRAM image is write-combined; drain it before SRAM staging. */
+	wmb();
 	memset_io(abox->sram, 0, abox->sram_size);
 	memcpy_toio(abox->sram, sram->data, sram->size);
+	ret = exynos7885_abox_write_bootargs(abox, sram->size);
+	if (ret)
+		goto out;
 	/* Firmware must be visible in SRAM before a later start operation. */
 	wmb();
 	abox->sram_loaded = true;
@@ -620,8 +848,9 @@ int exynos7885_abox_get_pcm_buffer(struct device *dev, void **area,
 
 	mutex_lock(&abox->pcm_lock);
 	if (!abox->pcm_area) {
+		/* No-map ring shared with non-coherent ABOX: uncached. */
 		pcm_area = devm_memremap(abox->dev, abox->pcm_rmem->base,
-					 ABOX_PCM_SIZE, MEMREMAP_WB);
+					 ABOX_PCM_SIZE, MEMREMAP_WC);
 		if (!pcm_area) {
 			mutex_unlock(&abox->pcm_lock);
 			return -ENOMEM;
@@ -660,10 +889,7 @@ int exynos7885_abox_map_pcm_buffer(struct device *dev)
 		ret = iommu_map(rproc->domain, ABOX_PCM_IOVA,
 				abox->pcm_rmem->base, ABOX_PCM_SIZE,
 				IOMMU_READ, GFP_KERNEL);
-		if (ret)
-			iommu_unmap(rproc->domain, ABOX_PCM_IOVA,
-				    ABOX_PCM_SIZE);
-		else
+		if (!ret)
 			abox->pcm_mapped = true;
 	}
 	mutex_unlock(&abox->pcm_lock);
@@ -672,6 +898,36 @@ int exynos7885_abox_map_pcm_buffer(struct device *dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_map_pcm_buffer);
+
+ssize_t exynos7885_abox_rdma_pointer(struct device *dev, unsigned int channel,
+				     size_t buffer_bytes, size_t period_bytes)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	ssize_t offset, bytes;
+	u32 status;
+
+	if (!rproc || channel >= 8 || !period_bytes ||
+	    buffer_bytes < period_bytes)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	status = readl(abox->sfr + ABOX_RDMA_BASE +
+		       channel * ABOX_RDMA_INTERVAL + ABOX_RDMA_STATUS);
+	if (!(status & ABOX_RDMA_PROGRESS))
+		return 0;
+
+	/* Same period normalisation of the read offset as the vendor driver. */
+	offset = FIELD_GET(ABOX_RDMA_RBUF_OFFSET, status) << 4;
+	bytes = buffer_bytes;
+	while ((offset % period_bytes) && bytes >= 0) {
+		bytes -= period_bytes;
+		if ((bytes & offset) == offset)
+			offset = bytes;
+	}
+	return offset + FIELD_GET(ABOX_RDMA_RBUF_CNT, status);
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_rdma_pointer);
 
 int exynos7885_abox_wait_rdma_idle(struct device *dev, unsigned int channel,
 				   unsigned int timeout_us)
@@ -748,9 +1004,8 @@ int exynos7885_abox_sync_pcm_buffer(struct device *dev, size_t offset,
 		return -EHOSTDOWN;
 	}
 
-	dma_sync_single_range_for_device(abox->sysmmu_dev,
-					 abox->pcm_rmem->base, offset,
-					 size, DMA_TO_DEVICE);
+	/* The ring is write-combined; order its data before later IPC. */
+	wmb();
 	mutex_unlock(&abox->pcm_lock);
 	return 0;
 }
@@ -803,6 +1058,19 @@ int exynos7885_abox_uaif3_set_fmt(struct device *dev, unsigned int format,
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_set_fmt);
 
+static int exynos7885_abox_send_config(struct device *dev, u32 type,
+				       u32 param1, u32 param2)
+{
+	u32 message[ABOX_IPC_WORDS] = {};
+
+	/* IPC_ABOX_CONFIG: ipcid, task, msgtype, param1, param2. */
+	message[0] = ABOX_IPC_CONFIG;
+	message[2] = type;
+	message[3] = param1;
+	message[4] = param2;
+	return exynos7885_abox_send_ipc(dev, message, sizeof(message));
+}
+
 int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 				    unsigned int width,
 				    unsigned int channels)
@@ -810,8 +1078,8 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
 	struct exynos7885_abox_rproc *abox;
 	unsigned int slot_width, sample_code;
-	unsigned long pll_rate, audif_rate, bclk_rate;
-	u32 ctrl1;
+	unsigned long pll_rate, bclk_rate, bclk_div;
+	u32 ctrl1, spus0, spus1, route0;
 	int ret;
 
 	if (!rproc || channels != 2 || (width != 16 && width != 24 && width != 32) ||
@@ -825,13 +1093,16 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 	sample_code = slot_width / 8 - 1;
 	bclk_rate = (unsigned long)rate * channels * slot_width;
 	/* All standard 44.1 kHz-family rates are integer multiples of 11.025 kHz. */
-	if (!(rate % 11025)) {
+	if (!(rate % 11025))
 		pll_rate = ABOX_AUD_PLL_RATE_44K;
-		audif_rate = ABOX_AUDIF_RATE_44K;
-	} else {
+	else
 		pll_rate = ABOX_AUD_PLL_RATE_48K;
-		audif_rate = ABOX_AUDIF_RATE;
-	}
+	/* BCLK is an integer division of the nominal AUDIF rate. */
+	bclk_div = pll_rate / ABOX_AUDIF_DIV / bclk_rate;
+	if (!bclk_div || pll_rate / ABOX_AUDIF_DIV % bclk_rate)
+		return -EINVAL;
+	/* AUDIF runs a few Hz fast, so request the rounded-up quotient. */
+	bclk_rate = DIV_ROUND_UP(ABOX_AUDIF_RATE(pll_rate), bclk_div);
 
 	mutex_lock(&abox->uaif_lock);
 	if (abox->uaif3_enabled) {
@@ -841,15 +1112,17 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 	ret = clk_set_rate(abox->clocks[ABOX_CLK_PLL].clk, pll_rate);
 	if (ret)
 		goto out_unlock;
-	ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk, audif_rate);
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk,
+			   ABOX_AUDIF_RATE(pll_rate));
 	if (ret)
 		goto out_unlock;
 	ret = clk_set_parent(abox->clocks[ABOX_CLK_UAIF3_MUX].clk,
 			     abox->clocks[ABOX_CLK_UAIF3_DIV].clk);
 	if (ret)
 		goto out_unlock;
-	if (clk_get_parent(abox->clocks[ABOX_CLK_UAIF3_MUX].clk) !=
-	    abox->clocks[ABOX_CLK_UAIF3_DIV].clk) {
+	/* Consumer handles differ from the provider's; compare the clocks. */
+	if (!clk_is_match(clk_get_parent(abox->clocks[ABOX_CLK_UAIF3_MUX].clk),
+			  abox->clocks[ABOX_CLK_UAIF3_DIV].clk)) {
 		ret = -EIO;
 		goto out_unlock;
 	}
@@ -871,12 +1144,43 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 	ctrl1 |= FIELD_PREP(ABOX_UAIF3_SLOT_MAX, channels - 1);
 	ctrl1 |= FIELD_PREP(ABOX_UAIF3_SBIT_MAX, slot_width - 1);
 	writel(ctrl1, abox->sfr + ABOX_UAIF3_CTRL1);
+
+	/*
+	 * Speaker route RDMA0 -> SPUS OUT0 -> SIFS1 -> UAIF3, with the SPUS
+	 * ASRC on. The vendor speaker path uses the same SIFS1 -> UAIF3 leg.
+	 */
+	spus0 = readl(abox->sfr + ABOX_SPUS_CTRL0);
+	spus1 = readl(abox->sfr + ABOX_SPUS_CTRL1);
+	route0 = readl(abox->sfr + ABOX_ROUTE_CTRL0);
+	spus0 &= ~ABOX_SPUS_RDMA0_CHAIN;
+	spus0 |= ABOX_SPUS_RDMA0_ASRC;
+	spus1 &= ~ABOX_SPUS_SIFS1_SEL;
+	route0 &= ~ABOX_ROUTE_UAIF3_SPK;
+	route0 |= FIELD_PREP(ABOX_ROUTE_UAIF3_SPK, ABOX_ROUTE_SIFS1);
+	writel(spus0, abox->sfr + ABOX_SPUS_CTRL0);
+	writel(spus1, abox->sfr + ABOX_SPUS_CTRL1);
+	writel(route0, abox->sfr + ABOX_ROUTE_CTRL0);
+	dev_dbg(abox->dev, "route: SPUS %#x %#x ROUTE %#x\n", spus0, spus1,
+		route0);
 	/* Make the slot configuration visible before the PCM trigger. */
 	wmb();
 
 out_unlock:
 	mutex_unlock(&abox->uaif_lock);
-	return ret;
+	if (ret)
+		return ret;
+
+	/*
+	 * SIFS1 ("OUT1") paces RDMA0 at its configured rate; unconfigured,
+	 * the firmware drains the ring several times faster than real time.
+	 * The vendor mixer paths set it to the UAIF rate and format.
+	 */
+	ret = exynos7885_abox_send_config(dev, ABOX_SET_OUT1_SAMPLE_RATE,
+					  rate, 0);
+	if (ret)
+		return ret;
+	return exynos7885_abox_send_config(dev, ABOX_SET_OUT1_FORMAT, width,
+					   channels);
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_hw_params);
 
@@ -1023,27 +1327,12 @@ static int exynos7885_abox_stop_cpu(struct exynos7885_abox_rproc *abox)
 		dev_warn(abox->dev,
 			 "suspend IPC was not acknowledged; CA7 WFI confirms idle\n");
 
-	/* Hold the quiescent CA7 before removing its local power. */
-	ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
-				 ABOX_CA7_ENABLE, 0);
+	/* The CA7 is quiescent; hold it and remove its local power. */
+	ret = exynos7885_abox_hold_cpu(abox);
 	if (ret)
-		return ret;
-
-	ret = regmap_read_poll_timeout(abox->pmu, ABOX_CA7_STATUS, status,
-				       !(status & ABOX_CA7_STATUS_ON), 100,
-				       ABOX_STOP_TIMEOUT_US);
-	if (ret) {
 		dev_err(abox->dev,
-			"ABOX CA7 did not report off; preserving power and mappings\n");
-		return ret;
-	}
-
-	ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
-				 ABOX_CA7_LOCAL_PWR, 0);
-	if (ret)
-		return ret;
-
-	return 0;
+			"ABOX CA7 did not report off; preserving mappings\n");
+	return ret;
 }
 
 static int exynos7885_abox_release_resources(struct exynos7885_abox_rproc *abox)
@@ -1054,6 +1343,15 @@ static int exynos7885_abox_release_resources(struct exynos7885_abox_rproc *abox)
 	ret = exynos7885_abox_check_idle(abox);
 	if (ret)
 		return ret;
+
+	/*
+	 * The vendor driver reads a non-zero TIMER0_CTRL1 as firmware left
+	 * resident by a suspend. The CA7 is off here and the next start
+	 * reloads the firmware, so stop the timers and clear that marker.
+	 */
+	for (i = 0; i < ABOX_NUM_TIMERS; i++)
+		writel(0, abox->sfr + ABOX_TIMER_CTRL0(i));
+	writel(0, abox->sfr + ABOX_TIMER0_CTRL1);
 
 	if (abox->dram_requested) {
 		/* Release DRAM only after confirming CA7-off. */
@@ -1151,17 +1449,7 @@ static int exynos7885_abox_start(struct rproc *rproc)
 	}
 
 	/* Keep the CA7 held while setting its reset vector and clocks. */
-	ret = regmap_update_bits(abox->pmu, ABOX_CA7_OPTION,
-				 ABOX_CA7_ENABLE, 0);
-	if (ret)
-		goto fail_before_release;
-	ret = regmap_read_poll_timeout(abox->pmu, ABOX_CA7_STATUS, status,
-				       !(status & ABOX_CA7_STATUS_ON), 100,
-				       ABOX_STOP_TIMEOUT_US);
-	if (ret)
-		goto fail_before_release;
-	ret = regmap_update_bits(abox->pmu, ABOX_CA7_CONFIGURATION,
-				 ABOX_CA7_LOCAL_PWR, 0);
+	ret = exynos7885_abox_hold_cpu(abox);
 	if (ret)
 		goto fail_before_release;
 	writel(ABOX_SRAM_PHYS, abox->sfr + ABOX_REMAP_ADDR);
@@ -1180,7 +1468,8 @@ static int exynos7885_abox_start(struct rproc *rproc)
 		goto fail_before_release;
 	abox->enabled_clocks |= BIT(ABOX_CLK_CA7);
 
-	ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk, ABOX_AUDIF_RATE);
+	ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk,
+			   ABOX_AUDIF_RATE(ABOX_AUD_PLL_RATE_48K));
 	if (ret)
 		goto fail_before_release;
 	ret = clk_prepare_enable(abox->clocks[ABOX_CLK_AUDIF].clk);
@@ -1227,6 +1516,7 @@ static int exynos7885_abox_start(struct rproc *rproc)
 		abox->irq_enabled = true;
 	}
 
+	dev_dbg(abox->dev, "ABOX clocks and GIC ready; releasing CPU\n");
 	abox->dram_requested = true;
 	writel(ABOX_SYSPOWER_ON, abox->sfr + ABOX_SYSPOWER_CTRL);
 	/* Publish the DRAM power request before polling its status. */
@@ -1545,6 +1835,9 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 				      abox->sysmmu_dev);
 	if (ret)
 		return ret;
+	abox->sysmmu_irq = platform_get_irq(sysmmu_pdev, 0);
+	if (abox->sysmmu_irq < 0)
+		return abox->sysmmu_irq;
 	dev_info(dev, "ABOX probe: System MMU provider ready\n");
 
 	for (i = 0; i < ARRAY_SIZE(abox->clocks); i++)
@@ -1569,6 +1862,10 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(abox->pins_idle),
 				     "failed to find idle pin state\n");
 	dev_info(dev, "ABOX probe: pin states resolved\n");
+
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return ret;
 
 	rproc->has_iommu = true;
 	rproc->auto_boot = false;
