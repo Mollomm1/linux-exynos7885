@@ -43,9 +43,10 @@ properties:
 
   clocks:
     minItems: 8
-    maxItems: 8
+    maxItems: 12
 
   clock-names:
+    minItems: 8
     items:
       - const: pll
       - const: ca7
@@ -55,6 +56,10 @@ properties:
       - const: aclk
       - const: uaif3-bclk
       - const: uaif3-sync
+      - const: uaif0-div
+      - const: uaif0-mux
+      - const: uaif0-bclk
+      - const: uaif0-sync
 
   pinctrl-names:
     items:
@@ -96,7 +101,10 @@ patternProperties:
         const: samsung,exynos7885-abox-audio
 
       "#sound-dai-cells":
-        const: 0
+        description:
+          With one cell, DAI 0 is UAIF3 (speaker amplifiers) and DAI 1 is
+          UAIF0 (headphone codec).
+        enum: [0, 1]
 
       status: true
 
