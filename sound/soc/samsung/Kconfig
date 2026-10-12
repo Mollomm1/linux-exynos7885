@@ -27,7 +27,8 @@ config SND_SOC_EXYNOS7885_TFA9896
 	help
 	  Say Y or M to expose the GTA3XL Wi-Fi UAIF3 playback link to its two
 	  TFA9896 speaker amplifiers. The board audio node must be enabled, and a
-	  TFA9896 codec driver must provide both codec DAIs.
+	  TFA9896 codec driver must provide both codec DAIs. With a headphone
+	  node, the same stream also feeds the COD3035X codec on UAIF0.
 
 config SND_SAMSUNG_PCM
 	tristate "Samsung PCM interface support"
