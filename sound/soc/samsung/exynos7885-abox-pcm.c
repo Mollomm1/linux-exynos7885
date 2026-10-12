@@ -137,6 +137,18 @@ static int exynos7885_abox_pcm_open(struct snd_soc_component *component,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	if (ret < 0)
 		goto shutdown;
+	/*
+	 * RDMA0 ran past a ring of 4800-byte periods without wrapping, and the
+	 * vendor pointer code masks offsets as powers of two; 16 KiB x 4 plays.
+	 */
+	ret = snd_pcm_hw_constraint_pow2(substream->runtime, 0,
+					 SNDRV_PCM_HW_PARAM_PERIOD_BYTES);
+	if (ret < 0)
+		goto shutdown;
+	ret = snd_pcm_hw_constraint_pow2(substream->runtime, 0,
+					 SNDRV_PCM_HW_PARAM_BUFFER_BYTES);
+	if (ret < 0)
+		goto shutdown;
 
 	ret = exynos7885_abox_register_ipc_handler(pcm->abox_dev,
 						   exynos7885_abox_pcm_ipc, pcm);
