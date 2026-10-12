@@ -391,6 +391,7 @@
 				      "uaif0-bclk", "uaif0-sync";
 			power-domains = <&pd_dispaud>;
 			iommus = <&sysmmu_abox>;
+			#clock-cells = <0>;
 			status = "disabled";
 		};
 
