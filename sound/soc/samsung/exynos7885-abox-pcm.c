@@ -2,6 +2,7 @@
 /* Exynos7885 ABOX RDMA0 playback PCM component. */
 
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/sizes.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -53,6 +54,8 @@ struct exynos7885_abox_pcm {
 	bool mapped;
 	bool configured;
 	bool running;
+	/* Serializes UAIF start/stop with output changes from the control. */
+	struct mutex lock;
 	struct exynos7885_abox_pcm_uaif uaif[ABOX_PCM_NUM_DAIS];
 	/* DAI index of the UAIF that plays; both UAIFs share SIFS1. */
 	unsigned int output;
@@ -406,6 +409,8 @@ static int exynos7885_abox_pcm_set_uaifs(struct exynos7885_abox_pcm *pcm,
 	unsigned int output = pcm->output;
 	int i, ret, first_err = 0;
 
+	lockdep_assert_held(&pcm->lock);
+
 	/* Without a configured headphone DAI, play on what is there. */
 	if (!pcm->uaif[output].configured)
 		output = 0;
@@ -460,6 +465,7 @@ static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 		return -EINVAL;
 	}
 
+	guard(mutex)(&pcm->lock);
 	if (start) {
 		ret = exynos7885_abox_pcm_set_uaifs(pcm, true);
 		if (ret)
@@ -517,12 +523,28 @@ static int exynos7885_abox_output_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
 	unsigned int output = ucontrol->value.enumerated.item[0];
+	int i, ret;
 
 	if (output >= ARRAY_SIZE(exynos7885_abox_output_texts))
 		return -EINVAL;
+
+	guard(mutex)(&pcm->lock);
 	if (output == pcm->output)
 		return 0;
-	/* Takes effect at the next stream start. */
+	/* Move a running stream now; otherwise it applies at the next start. */
+	for (i = 0; i < ABOX_PCM_NUM_DAIS; i++) {
+		if (!pcm->uaif[i].enabled || i == output ||
+		    !pcm->uaif[output].configured)
+			continue;
+		ret = exynos7885_abox_uaif_switch(pcm->abox_dev,
+					exynos7885_abox_pcm_uaif_id[i],
+					exynos7885_abox_pcm_uaif_id[output]);
+		if (ret)
+			return ret;
+		pcm->uaif[i].enabled = false;
+		pcm->uaif[output].enabled = true;
+		break;
+	}
 	pcm->output = output;
 	return 1;
 }
@@ -630,16 +652,21 @@ static int exynos7885_abox_dai_hw_params(struct snd_pcm_substream *substream,
 					     params_rate(params),
 					     params_width(params),
 					     params_channels(params));
-	if (!ret)
+	if (ret)
+		return ret;
+	scoped_guard(mutex, &pcm->lock)
 		uaif->configured = true;
-	return ret;
+	return 0;
 }
 
 static int exynos7885_abox_dai_hw_free(struct snd_pcm_substream *substream,
 				       struct snd_soc_dai *dai)
 {
+	struct exynos7885_abox_pcm *pcm =
+		snd_soc_component_get_drvdata(dai->component);
 	struct exynos7885_abox_pcm_uaif *uaif = exynos7885_abox_dai_uaif(dai);
 
+	guard(mutex)(&pcm->lock);
 	if (uaif->enabled)
 		return -EBUSY;
 	uaif->configured = false;
@@ -676,6 +703,7 @@ static struct snd_soc_dai_driver exynos7885_abox_dais[ABOX_PCM_NUM_DAIS] = {
 static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 {
 	struct exynos7885_abox_pcm *pcm;
+	int ret;
 
 	if (!pdev->dev.parent)
 		return -ENODEV;
@@ -683,6 +711,9 @@ static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 	pcm = devm_kzalloc(&pdev->dev, sizeof(*pcm), GFP_KERNEL);
 	if (!pcm)
 		return -ENOMEM;
+	ret = devm_mutex_init(&pdev->dev, &pcm->lock);
+	if (ret)
+		return ret;
 	pcm->abox_dev = pdev->dev.parent;
 	INIT_WORK(&pcm->period_work, exynos7885_abox_pcm_period_work);
 	platform_set_drvdata(pdev, pcm);
