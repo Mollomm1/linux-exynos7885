@@ -62,6 +62,15 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 				    unsigned int width,
 				    unsigned int channels);
 int exynos7885_abox_uaif3_set_enabled(struct device *dev, bool enable);
+/* Same as the uaif3 helpers, for UAIF @n (0: headphone codec, 3: amps). */
+int exynos7885_abox_uaif_set_fmt(struct device *dev, unsigned int n,
+				 unsigned int format, bool invert_bclk,
+				 bool invert_frame, bool abox_master);
+int exynos7885_abox_uaif_hw_params(struct device *dev, unsigned int n,
+				   unsigned int rate, unsigned int width,
+				   unsigned int channels);
+int exynos7885_abox_uaif_set_enabled(struct device *dev, unsigned int n,
+				     bool enable);
 int exynos7885_abox_register_ipc_handler(struct device *dev,
 					 exynos7885_abox_ipc_handler_t handler,
 					 void *data);

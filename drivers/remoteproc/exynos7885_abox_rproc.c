@@ -44,25 +44,26 @@
 #define ABOX_RDMA_RBUF_CNT	GENMASK(12, 0)
 #define ABOX_IRQ_RDMA0_BUF_EMPTY	11
 #define ABOX_ROUTE_CTRL0	0x0040
-#define ABOX_ROUTE_UAIF3_SPK	GENMASK(15, 12)
+#define ABOX_ROUTE_UAIF_SPK(n)	GENMASK(4 * (n) + 3, 4 * (n))
 #define ABOX_ROUTE_SIFS1	2
 #define ABOX_SPUS_CTRL0		0x0200
 #define ABOX_SPUS_RDMA0_CHAIN	GENMASK(3, 0)
 #define ABOX_SPUS_RDMA0_ASRC	BIT(0)
 #define ABOX_SPUS_CTRL1		0x0204
 #define ABOX_SPUS_SIFS1_SEL	GENMASK(18, 16)
-#define ABOX_UAIF3_CTRL0	0x0530
-#define ABOX_UAIF3_CTRL1	0x0534
-#define ABOX_UAIF3_SPK_ENABLE	BIT(0)
-#define ABOX_UAIF3_MODE		BIT(2)
-#define ABOX_UAIF3_FORMAT	GENMASK(28, 24)
-#define ABOX_UAIF3_BCLK_POLARITY	BIT(23)
-#define ABOX_UAIF3_WS_MODE	BIT(22)
-#define ABOX_UAIF3_WS_POLARITY	BIT(21)
-#define ABOX_UAIF3_SLOT_MAX	GENMASK(20, 18)
-#define ABOX_UAIF3_SBIT_MAX	GENMASK(17, 12)
-#define ABOX_UAIF3_VALID_START	GENMASK(11, 6)
-#define ABOX_UAIF3_VALID_END	GENMASK(5, 0)
+#define ABOX_UAIF_CTRL0(n)	(0x0500 + (n) * 0x10)
+#define ABOX_UAIF_CTRL1(n)	(0x0504 + (n) * 0x10)
+#define ABOX_UAIF_SPK_ENABLE	BIT(0)
+#define ABOX_UAIF_MODE		BIT(2)
+#define ABOX_UAIF_FORMAT	GENMASK(28, 24)
+#define ABOX_UAIF_BCLK_POLARITY	BIT(23)
+#define ABOX_UAIF_WS_MODE	BIT(22)
+#define ABOX_UAIF_WS_POLARITY	BIT(21)
+#define ABOX_UAIF_SLOT_MAX	GENMASK(20, 18)
+#define ABOX_UAIF_SBIT_MAX	GENMASK(17, 12)
+#define ABOX_UAIF_VALID_START	GENMASK(11, 6)
+#define ABOX_UAIF_VALID_END	GENMASK(5, 0)
+#define ABOX_NUM_UAIF		5
 #define ABOX_PMU_IOVA		0x11c80000
 #define ABOX_PMU_SIZE		SZ_64K
 #define ABOX_AUDSYS_IOVA	0x12090000
@@ -132,6 +133,14 @@ static const char * const exynos7885_abox_clock_names[ABOX_NUM_CLOCKS] = {
 	"uaif3-bclk", "uaif3-sync",
 };
 
+struct exynos7885_abox_uaif {
+	struct clk *div;
+	struct clk *mux;
+	struct clk *bclk;
+	struct clk *sync;
+	bool enabled;
+};
+
 struct exynos7885_abox_rproc {
 	struct device *dev;
 	struct regmap *pmu;
@@ -177,7 +186,8 @@ struct exynos7885_abox_rproc {
 	bool dram_requested;
 	bool pcm_mapped;
 	bool pcm_shutting_down;
-	bool uaif3_enabled;
+	/* Indexed by UAIF number; only UAIF0 and UAIF3 are wired up. */
+	struct exynos7885_abox_uaif uaif[ABOX_NUM_UAIF];
 	bool firmware_running;
 	bool firmware_ready;
 	bool stopping;
@@ -1011,12 +1021,60 @@ int exynos7885_abox_sync_pcm_buffer(struct device *dev, size_t offset,
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_sync_pcm_buffer);
 
-int exynos7885_abox_uaif3_set_fmt(struct device *dev, unsigned int format,
-				  bool invert_bclk, bool invert_frame,
-				  bool abox_master)
+/* UAIF0 (headphone codec) is optional; take all four clocks or none. */
+static int exynos7885_abox_get_uaif0_clocks(struct exynos7885_abox_rproc *abox)
+{
+	static const char * const names[] = {
+		"uaif0-div", "uaif0-mux", "uaif0-bclk", "uaif0-sync",
+	};
+	struct clk *clks[ARRAY_SIZE(names)];
+	unsigned int i, found = 0;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		clks[i] = devm_clk_get_optional(abox->dev, names[i]);
+		if (IS_ERR(clks[i]))
+			return dev_err_probe(abox->dev, PTR_ERR(clks[i]),
+					     "failed to get %s\n", names[i]);
+		found += !!clks[i];
+	}
+	if (!found)
+		return 0;
+	if (found != ARRAY_SIZE(names))
+		return dev_err_probe(abox->dev, -EINVAL,
+				     "incomplete UAIF0 clocks\n");
+
+	abox->uaif[0] = (struct exynos7885_abox_uaif) {
+		.div = clks[0], .mux = clks[1], .bclk = clks[2], .sync = clks[3],
+	};
+	return 0;
+}
+
+/* The UAIF @n, or NULL if this board does not describe its clocks. */
+static struct exynos7885_abox_uaif *
+exynos7885_abox_get_uaif(struct exynos7885_abox_rproc *abox, unsigned int n)
+{
+	if (n >= ABOX_NUM_UAIF || !abox->uaif[n].div)
+		return NULL;
+	return &abox->uaif[n];
+}
+
+static bool exynos7885_abox_any_uaif_enabled(struct exynos7885_abox_rproc *abox)
+{
+	unsigned int n;
+
+	for (n = 0; n < ABOX_NUM_UAIF; n++)
+		if (abox->uaif[n].enabled)
+			return true;
+	return false;
+}
+
+int exynos7885_abox_uaif_set_fmt(struct device *dev, unsigned int n,
+				 unsigned int format, bool invert_bclk,
+				 bool invert_frame, bool abox_master)
 {
 	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
 	struct exynos7885_abox_rproc *abox;
+	struct exynos7885_abox_uaif *uaif;
 	u32 ctrl0, ctrl1;
 
 	if (!rproc)
@@ -1027,34 +1085,46 @@ int exynos7885_abox_uaif3_set_fmt(struct device *dev, unsigned int format,
 		return -EOPNOTSUPP;
 
 	abox = rproc->priv;
+	uaif = exynos7885_abox_get_uaif(abox, n);
+	if (!uaif)
+		return -ENODEV;
 	if (!READ_ONCE(abox->firmware_ready))
 		return -EHOSTDOWN;
 
 	mutex_lock(&abox->uaif_lock);
-	if (abox->uaif3_enabled) {
+	if (uaif->enabled) {
 		mutex_unlock(&abox->uaif_lock);
 		return -EBUSY;
 	}
-	ctrl0 = readl(abox->sfr + ABOX_UAIF3_CTRL0);
-	ctrl1 = readl(abox->sfr + ABOX_UAIF3_CTRL1);
-	ctrl0 &= ~(ABOX_UAIF3_MODE | ABOX_UAIF3_SPK_ENABLE);
+	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(n));
+	ctrl1 = readl(abox->sfr + ABOX_UAIF_CTRL1(n));
+	ctrl0 &= ~(ABOX_UAIF_MODE | ABOX_UAIF_SPK_ENABLE);
 	if (abox_master)
-		ctrl0 |= ABOX_UAIF3_MODE;
-	ctrl1 &= ~(ABOX_UAIF3_BCLK_POLARITY | ABOX_UAIF3_WS_MODE |
-		   ABOX_UAIF3_WS_POLARITY);
+		ctrl0 |= ABOX_UAIF_MODE;
+	ctrl1 &= ~(ABOX_UAIF_BCLK_POLARITY | ABOX_UAIF_WS_MODE |
+		   ABOX_UAIF_WS_POLARITY);
 	if (!invert_bclk)
-		ctrl1 |= ABOX_UAIF3_BCLK_POLARITY;
+		ctrl1 |= ABOX_UAIF_BCLK_POLARITY;
 	if (format == EXYNOS7885_ABOX_UAIF3_DSP_A)
-		ctrl1 |= ABOX_UAIF3_WS_MODE;
+		ctrl1 |= ABOX_UAIF_WS_MODE;
 	if (invert_frame)
-		ctrl1 |= ABOX_UAIF3_WS_POLARITY;
-	writel(ctrl0, abox->sfr + ABOX_UAIF3_CTRL0);
-	writel(ctrl1, abox->sfr + ABOX_UAIF3_CTRL1);
+		ctrl1 |= ABOX_UAIF_WS_POLARITY;
+	writel(ctrl0, abox->sfr + ABOX_UAIF_CTRL0(n));
+	writel(ctrl1, abox->sfr + ABOX_UAIF_CTRL1(n));
 	/* Publish frame format before a later clock enable starts the pins. */
 	wmb();
 	mutex_unlock(&abox->uaif_lock);
 
 	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_set_fmt);
+
+int exynos7885_abox_uaif3_set_fmt(struct device *dev, unsigned int format,
+				  bool invert_bclk, bool invert_frame,
+				  bool abox_master)
+{
+	return exynos7885_abox_uaif_set_fmt(dev, 3, format, invert_bclk,
+					    invert_frame, abox_master);
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_set_fmt);
 
@@ -1071,12 +1141,13 @@ static int exynos7885_abox_send_config(struct device *dev, u32 type,
 	return exynos7885_abox_send_ipc(dev, message, sizeof(message));
 }
 
-int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
-				    unsigned int width,
-				    unsigned int channels)
+int exynos7885_abox_uaif_hw_params(struct device *dev, unsigned int n,
+				   unsigned int rate, unsigned int width,
+				   unsigned int channels)
 {
 	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
 	struct exynos7885_abox_rproc *abox;
+	struct exynos7885_abox_uaif *uaif;
 	unsigned int slot_width, sample_code;
 	unsigned long pll_rate, bclk_rate, bclk_div;
 	u32 ctrl1, spus0, spus1, route0;
@@ -1087,6 +1158,9 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 		return -EINVAL;
 
 	abox = rproc->priv;
+	uaif = exynos7885_abox_get_uaif(abox, n);
+	if (!uaif)
+		return -ENODEV;
 	if (!READ_ONCE(abox->firmware_ready))
 		return -EHOSTDOWN;
 	slot_width = width == 24 ? 32 : width;
@@ -1105,7 +1179,8 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 	bclk_rate = DIV_ROUND_UP(ABOX_AUDIF_RATE(pll_rate), bclk_div);
 
 	mutex_lock(&abox->uaif_lock);
-	if (abox->uaif3_enabled) {
+	/* The PLL and AUDIF are shared by every UAIF. */
+	if (exynos7885_abox_any_uaif_enabled(abox)) {
 		ret = -EBUSY;
 		goto out_unlock;
 	}
@@ -1116,38 +1191,37 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 			   ABOX_AUDIF_RATE(pll_rate));
 	if (ret)
 		goto out_unlock;
-	ret = clk_set_parent(abox->clocks[ABOX_CLK_UAIF3_MUX].clk,
-			     abox->clocks[ABOX_CLK_UAIF3_DIV].clk);
+	ret = clk_set_parent(uaif->mux, uaif->div);
 	if (ret)
 		goto out_unlock;
 	/* Consumer handles differ from the provider's; compare the clocks. */
-	if (!clk_is_match(clk_get_parent(abox->clocks[ABOX_CLK_UAIF3_MUX].clk),
-			  abox->clocks[ABOX_CLK_UAIF3_DIV].clk)) {
+	if (!clk_is_match(clk_get_parent(uaif->mux), uaif->div)) {
 		ret = -EIO;
 		goto out_unlock;
 	}
-	ret = clk_set_rate(abox->clocks[ABOX_CLK_UAIF3_DIV].clk, bclk_rate);
+	ret = clk_set_rate(uaif->div, bclk_rate);
 	if (ret)
 		goto out_unlock;
-	if (clk_get_rate(abox->clocks[ABOX_CLK_UAIF3_DIV].clk) != bclk_rate ||
-	    clk_get_rate(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk) != bclk_rate) {
+	if (clk_get_rate(uaif->div) != bclk_rate ||
+	    clk_get_rate(uaif->bclk) != bclk_rate) {
 		ret = -EINVAL;
 		goto out_unlock;
 	}
 
-	ctrl1 = readl(abox->sfr + ABOX_UAIF3_CTRL1);
-	ctrl1 &= ~(ABOX_UAIF3_FORMAT | ABOX_UAIF3_SLOT_MAX |
-		   ABOX_UAIF3_SBIT_MAX | ABOX_UAIF3_VALID_START |
-		   ABOX_UAIF3_VALID_END);
-	ctrl1 |= FIELD_PREP(ABOX_UAIF3_FORMAT,
+	ctrl1 = readl(abox->sfr + ABOX_UAIF_CTRL1(n));
+	ctrl1 &= ~(ABOX_UAIF_FORMAT | ABOX_UAIF_SLOT_MAX |
+		   ABOX_UAIF_SBIT_MAX | ABOX_UAIF_VALID_START |
+		   ABOX_UAIF_VALID_END);
+	ctrl1 |= FIELD_PREP(ABOX_UAIF_FORMAT,
 			    1 | (sample_code << 3));
-	ctrl1 |= FIELD_PREP(ABOX_UAIF3_SLOT_MAX, channels - 1);
-	ctrl1 |= FIELD_PREP(ABOX_UAIF3_SBIT_MAX, slot_width - 1);
-	writel(ctrl1, abox->sfr + ABOX_UAIF3_CTRL1);
+	ctrl1 |= FIELD_PREP(ABOX_UAIF_SLOT_MAX, channels - 1);
+	ctrl1 |= FIELD_PREP(ABOX_UAIF_SBIT_MAX, slot_width - 1);
+	writel(ctrl1, abox->sfr + ABOX_UAIF_CTRL1(n));
 
 	/*
-	 * Speaker route RDMA0 -> SPUS OUT0 -> SIFS1 -> UAIF3, with the SPUS
-	 * ASRC on. The vendor speaker path uses the same SIFS1 -> UAIF3 leg.
+	 * Route RDMA0 -> SPUS OUT0 -> SIFS1 -> this UAIF, with the SPUS ASRC
+	 * on. The vendor speaker path uses the same SIFS1 -> UAIF3 leg; the
+	 * headphone UAIF0 is fed from the same SIFS1.
 	 */
 	spus0 = readl(abox->sfr + ABOX_SPUS_CTRL0);
 	spus1 = readl(abox->sfr + ABOX_SPUS_CTRL1);
@@ -1155,13 +1229,13 @@ int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
 	spus0 &= ~ABOX_SPUS_RDMA0_CHAIN;
 	spus0 |= ABOX_SPUS_RDMA0_ASRC;
 	spus1 &= ~ABOX_SPUS_SIFS1_SEL;
-	route0 &= ~ABOX_ROUTE_UAIF3_SPK;
-	route0 |= FIELD_PREP(ABOX_ROUTE_UAIF3_SPK, ABOX_ROUTE_SIFS1);
+	route0 &= ~ABOX_ROUTE_UAIF_SPK(n);
+	route0 |= ABOX_ROUTE_SIFS1 << (4 * n);
 	writel(spus0, abox->sfr + ABOX_SPUS_CTRL0);
 	writel(spus1, abox->sfr + ABOX_SPUS_CTRL1);
 	writel(route0, abox->sfr + ABOX_ROUTE_CTRL0);
-	dev_dbg(abox->dev, "route: SPUS %#x %#x ROUTE %#x\n", spus0, spus1,
-		route0);
+	dev_dbg(abox->dev, "UAIF%u route: SPUS %#x %#x ROUTE %#x\n", n, spus0,
+		spus1, route0);
 	/* Make the slot configuration visible before the PCM trigger. */
 	wmb();
 
@@ -1182,41 +1256,54 @@ out_unlock:
 	return exynos7885_abox_send_config(dev, ABOX_SET_OUT1_FORMAT, width,
 					   channels);
 }
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_hw_params);
+
+int exynos7885_abox_uaif3_hw_params(struct device *dev, unsigned int rate,
+				    unsigned int width,
+				    unsigned int channels)
+{
+	return exynos7885_abox_uaif_hw_params(dev, 3, rate, width, channels);
+}
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_hw_params);
 
-int exynos7885_abox_uaif3_set_enabled(struct device *dev, bool enable)
+int exynos7885_abox_uaif_set_enabled(struct device *dev, unsigned int n,
+				     bool enable)
 {
 	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
 	struct exynos7885_abox_rproc *abox;
+	struct exynos7885_abox_uaif *uaif;
 	u32 ctrl0;
 	int ret;
 
 	if (!rproc)
 		return -ENODEV;
 	abox = rproc->priv;
+	uaif = exynos7885_abox_get_uaif(abox, n);
+	if (!uaif)
+		return -ENODEV;
 	if (!READ_ONCE(abox->firmware_ready))
 		return -EHOSTDOWN;
 
 	mutex_lock(&abox->uaif_lock);
-	if (enable == abox->uaif3_enabled) {
+	if (enable == uaif->enabled) {
 		ret = 0;
 		goto out_unlock;
 	}
 	if (enable) {
-		ret = clk_prepare_enable(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk);
+		ret = clk_prepare_enable(uaif->bclk);
 		if (ret)
 			goto out_unlock;
-		ret = clk_prepare_enable(abox->clocks[ABOX_CLK_UAIF3_SYNC].clk);
+		ret = clk_prepare_enable(uaif->sync);
 		if (ret) {
-			clk_disable_unprepare(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk);
+			clk_disable_unprepare(uaif->bclk);
 			goto out_unlock;
 		}
-		ctrl0 = readl(abox->sfr + ABOX_UAIF3_CTRL0);
-		writel(ctrl0 | ABOX_UAIF3_SPK_ENABLE,
-		       abox->sfr + ABOX_UAIF3_CTRL0);
+		ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(n));
+		writel(ctrl0 | ABOX_UAIF_SPK_ENABLE,
+		       abox->sfr + ABOX_UAIF_CTRL0(n));
 		/* Enable the output before asking firmware to start RDMA. */
 		wmb();
-		abox->uaif3_enabled = true;
+		uaif->enabled = true;
 		ret = 0;
 		goto out_unlock;
 	}
@@ -1224,19 +1311,25 @@ int exynos7885_abox_uaif3_set_enabled(struct device *dev, bool enable)
 	ret = exynos7885_abox_wait_rdma_idle(dev, 0, ABOX_STOP_TIMEOUT_US);
 	if (ret)
 		goto out_unlock;
-	ctrl0 = readl(abox->sfr + ABOX_UAIF3_CTRL0);
-	writel(ctrl0 & ~ABOX_UAIF3_SPK_ENABLE,
-	       abox->sfr + ABOX_UAIF3_CTRL0);
+	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(n));
+	writel(ctrl0 & ~ABOX_UAIF_SPK_ENABLE,
+	       abox->sfr + ABOX_UAIF_CTRL0(n));
 	/* Disable the output before removing its clocks. */
 	wmb();
-	clk_disable_unprepare(abox->clocks[ABOX_CLK_UAIF3_SYNC].clk);
-	clk_disable_unprepare(abox->clocks[ABOX_CLK_UAIF3_BCLK].clk);
-	abox->uaif3_enabled = false;
+	clk_disable_unprepare(uaif->sync);
+	clk_disable_unprepare(uaif->bclk);
+	uaif->enabled = false;
 	ret = 0;
 
 out_unlock:
 	mutex_unlock(&abox->uaif_lock);
 	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_set_enabled);
+
+int exynos7885_abox_uaif3_set_enabled(struct device *dev, bool enable)
+{
+	return exynos7885_abox_uaif_set_enabled(dev, 3, enable);
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif3_set_enabled);
 
@@ -1845,6 +1938,15 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(abox->clocks), abox->clocks);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to get ABOX clocks\n");
+	abox->uaif[3] = (struct exynos7885_abox_uaif) {
+		.div = abox->clocks[ABOX_CLK_UAIF3_DIV].clk,
+		.mux = abox->clocks[ABOX_CLK_UAIF3_MUX].clk,
+		.bclk = abox->clocks[ABOX_CLK_UAIF3_BCLK].clk,
+		.sync = abox->clocks[ABOX_CLK_UAIF3_SYNC].clk,
+	};
+	ret = exynos7885_abox_get_uaif0_clocks(abox);
+	if (ret)
+		return ret;
 	dev_info(dev, "ABOX probe: clocks resolved\n");
 
 	abox->pinctrl = devm_pinctrl_get(dev);
