@@ -169,6 +169,9 @@ static u32 lv2ent_offset(sysmmu_iova_t iova)
 #define REG_V7_CAPA0		0x870
 #define REG_V7_CAPA1		0x874
 #define REG_V7_CTRL_VM		0x8000
+/* Second page table of the Exynos7885 ABOX System MMU */
+#define REG_V7_PT_BASE1		0x1020
+#define FLUSH_PT1		BIT(4)
 
 #define has_sysmmu(dev)		(dev_iommu_priv_get(dev) != NULL)
 
@@ -305,6 +308,7 @@ struct sysmmu_drvdata {
 
 	/* v7 fields */
 	bool has_vcr;			/* virtual machine control register */
+	bool has_pt1;			/* second page table (Exynos7885 ABOX) */
 };
 
 #define SYSMMU_REG(data, reg) ((data)->sfrbase + (data)->variant->reg)
@@ -448,6 +452,8 @@ static bool sysmmu_block(struct sysmmu_drvdata *data)
 static void __sysmmu_tlb_invalidate(struct sysmmu_drvdata *data)
 {
 	writel(0x1, SYSMMU_REG(data, flush_all));
+	if (data->has_pt1)
+		writel(FLUSH_PT1 | 0x1, SYSMMU_REG(data, flush_all));
 }
 
 static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
@@ -467,6 +473,14 @@ static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
 		       SYSMMU_REG(data, flush_end));
 		writel(0x1, SYSMMU_REG(data, flush_range));
 	}
+
+	/* The second page table is only invalidated by range. */
+	if (data->has_pt1) {
+		writel(iova & SPAGE_MASK, SYSMMU_REG(data, flush_start));
+		writel((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE,
+		       SYSMMU_REG(data, flush_end));
+		writel(FLUSH_PT1 | 0x1, SYSMMU_REG(data, flush_range));
+	}
 }
 
 static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
@@ -479,6 +493,8 @@ static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
 		pt_base = pgd >> SPAGE_ORDER;
 
 	writel(pt_base, SYSMMU_REG(data, pt_base));
+	if (data->has_pt1)
+		writel(pt_base, data->sfrbase + REG_V7_PT_BASE1);
 	__sysmmu_tlb_invalidate(data);
 }
 
@@ -775,6 +791,17 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 	spin_lock_init(&data->lock);
 
 	__sysmmu_get_version(data);
+
+	/*
+	 * The Exynos7885 ABOX System MMU walks a second page table for part of
+	 * its masters (its CA7). Point it at the same tables.
+	 */
+	data->has_pt1 = of_device_is_compatible(dev->of_node,
+						"samsung,exynos7885-abox-sysmmu");
+	if (data->has_pt1 && MMU_MAJ_VER(data->version) < 7) {
+		dev_err(dev, "second page table needs System MMU v7\n");
+		return -EINVAL;
+	}
 
 	ret = iommu_device_sysfs_add(&data->iommu, &pdev->dev, NULL,
 				     dev_name(data->sysmmu));
