@@ -17,6 +17,8 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/workqueue.h>
+#include <sound/jack.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
@@ -24,6 +26,12 @@
 #define COD3035X_ACPM_TYPE_CODEC	3
 #define COD3035X_ACPM_TYPE_ANALOG	7
 
+#define COD3035X_01_IRQ1PEND		0x01
+#define COD3035X_IRQ1_ST_JACKIN_R	BIT(7)
+#define COD3035X_IRQ1_ST_JACKOUT_R	BIT(6)
+#define COD3035X_IRQ1_ST_APCHECK_R	BIT(5)
+#define COD3035X_09_STATUS1		0x09
+#define COD3035X_STATUS1_JACK_DET	BIT(0)
 #define COD3035X_10_PD_REF		0x10
 #define COD3035X_18_PWAUTO_DA		0x18
 #define COD3035X_PW_AUTO_DA		BIT(4)
@@ -69,6 +77,10 @@
 #define COD3035X_PDB_JD_CLK_EN		BIT(1)
 #define COD3035X_81_PDB_ACC2		0x81
 #define COD3035X_T_PDB_IMP		BIT(3)
+#define COD3035X_93_CTR_DLY6		0x93
+#define COD3035X_AP_JACK_IN		BIT(5)
+#define COD3035X_94_JACK_CTR		0x94
+#define COD3035X_JACK_CTR_3POLE		0x20
 #define COD3035X_BB_AUTO_HP12		0xbb
 #define COD3035X_DC_CTRL_EPS		0xdc
 #define COD3035X_CTMI_EP_A		GENMASK(7, 6)
@@ -104,11 +116,19 @@
 /* Default digital volume, restored after the power-up mute. */
 #define COD3035X_DVOL_DEFAULT		0x54
 
+/* The codec interrupt reaches the AP through the PMIC; poll instead. */
+#define COD3035X_JACK_POLL_MS		250
+/* Vendor mic_det_delay between the AP jack-in and the status read. */
+#define COD3035X_JACK_SETTLE_MS		300
+
 struct cod3035x {
 	struct device *dev;
 	struct regmap *regmap;
 	const struct acpm_handle *acpm;
 	unsigned int acpm_chan;
+	struct snd_soc_jack *jack;
+	struct delayed_work jack_work;
+	bool jack_in;
 };
 
 static int cod3035x_acpm_read(struct cod3035x *cod, u8 type, u8 reg, u8 *val)
@@ -476,6 +496,87 @@ static struct snd_soc_dai_driver cod3035x_dai = {
 	.ops = &cod3035x_dai_ops,
 };
 
+/*
+ * On insertion the codec raises "AP check" and waits for the AP to rule out
+ * moisture (the vendor reads a ground-detect ADC) and to answer with AP jack
+ * in; unanswered, it falls back to jack out. There is no ADC described on
+ * this board, so confirm every insertion. As in the vendor jack work, then
+ * release the override and keep the jack only if the codec still sees it.
+ */
+static bool cod3035x_jack_confirm(struct cod3035x *cod)
+{
+	struct regmap *map = cod->regmap;
+	unsigned int status;
+
+	if (regmap_write(map, COD3035X_93_CTR_DLY6, COD3035X_AP_JACK_IN))
+		return false;
+	msleep(COD3035X_JACK_SETTLE_MS);
+	if (regmap_read(map, COD3035X_09_STATUS1, &status))
+		status = 0;
+	regmap_write(map, COD3035X_93_CTR_DLY6, 0);
+	if (!(status & COD3035X_STATUS1_JACK_DET))
+		return false;
+	/* Only headphones are supported, so treat every jack as 3-pole. */
+	return !regmap_write(map, COD3035X_94_JACK_CTR,
+			     COD3035X_JACK_CTR_3POLE);
+}
+
+static void cod3035x_jack_work(struct work_struct *work)
+{
+	struct cod3035x *cod = container_of(to_delayed_work(work),
+					    struct cod3035x, jack_work);
+	struct regmap *map = cod->regmap;
+	unsigned int pend, status;
+	bool in = cod->jack_in;
+
+	/* The pending bits latch events between polls. */
+	if (regmap_read(map, COD3035X_01_IRQ1PEND, &pend) ||
+	    regmap_read(map, COD3035X_09_STATUS1, &status))
+		goto requeue;
+
+	if (!in && ((status & COD3035X_STATUS1_JACK_DET) ||
+		    (pend & (COD3035X_IRQ1_ST_APCHECK_R |
+			     COD3035X_IRQ1_ST_JACKIN_R)))) {
+		in = cod3035x_jack_confirm(cod);
+	} else if (in && (!(status & COD3035X_STATUS1_JACK_DET) ||
+			  (pend & COD3035X_IRQ1_ST_JACKOUT_R))) {
+		regmap_write(map, COD3035X_93_CTR_DLY6, 0);
+		regmap_write(map, COD3035X_94_JACK_CTR, 0);
+		in = false;
+	}
+
+	if (in != cod->jack_in) {
+		cod->jack_in = in;
+		dev_dbg(cod->dev, "headphone jack %s\n", in ? "in" : "out");
+		snd_soc_jack_report(cod->jack, in ? SND_JACK_HEADPHONE : 0,
+				    SND_JACK_HEADPHONE);
+	}
+requeue:
+	queue_delayed_work(system_power_efficient_wq, &cod->jack_work,
+			   msecs_to_jiffies(COD3035X_JACK_POLL_MS));
+}
+
+static int cod3035x_set_jack(struct snd_soc_component *component,
+			     struct snd_soc_jack *jack, void *data)
+{
+	struct cod3035x *cod = snd_soc_component_get_drvdata(component);
+
+	cancel_delayed_work_sync(&cod->jack_work);
+	cod->jack = jack;
+	cod->jack_in = false;
+	if (jack)
+		queue_delayed_work(system_power_efficient_wq, &cod->jack_work,
+				   0);
+	return 0;
+}
+
+static void cod3035x_component_remove(struct snd_soc_component *component)
+{
+	struct cod3035x *cod = snd_soc_component_get_drvdata(component);
+
+	cancel_delayed_work_sync(&cod->jack_work);
+}
+
 static int cod3035x_component_probe(struct snd_soc_component *component)
 {
 	struct cod3035x *cod = snd_soc_component_get_drvdata(component);
@@ -485,6 +586,8 @@ static int cod3035x_component_probe(struct snd_soc_component *component)
 
 static const struct snd_soc_component_driver cod3035x_component = {
 	.probe = cod3035x_component_probe,
+	.remove = cod3035x_component_remove,
+	.set_jack = cod3035x_set_jack,
 	.dapm_widgets = cod3035x_dapm_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(cod3035x_dapm_widgets),
 	.dapm_routes = cod3035x_dapm_routes,
@@ -508,6 +611,7 @@ static int cod3035x_probe(struct platform_device *pdev)
 	if (!cod)
 		return -ENOMEM;
 	cod->dev = dev;
+	INIT_DELAYED_WORK(&cod->jack_work, cod3035x_jack_work);
 	platform_set_drvdata(pdev, cod);
 
 	ret = of_parse_phandle_with_fixed_args(dev->of_node, "samsung,acpm-ipc",
