@@ -164,6 +164,11 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 		priv->link.num_cpus = 2;
 		priv->link.name = "Speaker and Headphone";
 		priv->link.stream_name = "Playback";
+		/*
+		 * The codec MCLK comes from the ABOX firmware, which stops when
+		 * the PCM closes; power the codec down before that, not later.
+		 */
+		priv->link.ignore_pmdown_time = 1;
 	}
 	priv->link.cpus = priv->cpus;
 	priv->link.codecs = priv->codecs;
