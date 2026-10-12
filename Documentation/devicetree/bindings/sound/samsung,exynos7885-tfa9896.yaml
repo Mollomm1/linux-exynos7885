@@ -13,6 +13,8 @@ description:
   Sound card for the Exynos7885-based Samsung GTA3XL Wi-Fi tablet. A single
   ABOX UAIF3 playback DAI feeds the two TFA9896 amplifiers over a shared TDM
   bus. The amplifier slot assignments are supplied by their firmware data.
+  An optional headphone link feeds the COD3035X codec from ABOX UAIF0 with
+  the same playback stream.
 
 allOf:
   - $ref: sound-card-common.yaml#
@@ -44,6 +46,33 @@ properties:
     required:
       - sound-dai
 
+  headphone:
+    type: object
+    additionalProperties: false
+    properties:
+      cpu:
+        type: object
+        additionalProperties: false
+        properties:
+          sound-dai:
+            maxItems: 1
+            description: Phandle to the ABOX UAIF0 playback DAI.
+        required:
+          - sound-dai
+
+      codec:
+        type: object
+        additionalProperties: false
+        properties:
+          sound-dai:
+            maxItems: 1
+            description: Phandle to the COD3035X codec DAI.
+        required:
+          - sound-dai
+    required:
+      - cpu
+      - codec
+
 required:
   - compatible
   - audio-routing
@@ -62,7 +91,7 @@ examples:
                         "Speaker", "Left Speaker OUT";
 
         cpu {
-            sound-dai = <&abox_audio>;
+            sound-dai = <&abox_audio 0>;
         };
 
         codecs {
