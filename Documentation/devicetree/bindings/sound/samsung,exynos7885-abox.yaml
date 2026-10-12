@@ -93,6 +93,12 @@ properties:
     maxItems: 1
     description: DISPAUD power domain containing the ABOX processor.
 
+  "#clock-cells":
+    const: 0
+    description:
+      Codec master clock driven on the UAIF2 clock pin. It runs only while
+      the ABOX firmware is up.
+
 patternProperties:
   "^abox-audio$":
     type: object
