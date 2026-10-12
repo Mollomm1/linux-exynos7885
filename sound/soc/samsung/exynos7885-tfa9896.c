@@ -10,6 +10,8 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
+#include <sound/control.h>
+#include <sound/jack.h>
 #include <sound/soc.h>
 
 #define GTA3XL_NUM_AMPS		2
@@ -22,6 +24,12 @@ struct exynos7885_tfa9896_card {
 	struct snd_soc_dai_link_component cpus[GTA3XL_MAX_CPUS];
 	struct snd_soc_dai_link_component codecs[GTA3XL_MAX_CODECS];
 	struct snd_soc_dai_link_ch_map ch_maps[GTA3XL_MAX_CODECS];
+	struct snd_soc_jack hp_jack;
+	struct notifier_block hp_nb;
+};
+
+static struct snd_soc_jack_pin exynos7885_tfa9896_jack_pins[] = {
+	{ .pin = "Headphone", .mask = SND_JACK_HEADPHONE },
 };
 
 static const struct snd_soc_dapm_widget exynos7885_tfa9896_widgets[] = {
@@ -34,6 +42,83 @@ static const struct snd_soc_dapm_widget exynos7885_tfa9896_widgets[] = {
  * I2S from UAIF0, so the formats are set per DAI rather than per link. ABOX
  * drives BCLK and the frame clock on both.
  */
+/*
+ * Headphones in: speakers off. The ABOX PCM plays on one UAIF at a time
+ * ("Playback Output"), so follow the jack with it too; the control moves a
+ * running stream immediately. The speaker pin is switched here rather than
+ * as an inverted jack pin, which would add a misleading "Speaker Jack".
+ */
+static int exynos7885_tfa9896_jack_event(struct notifier_block *nb,
+					 unsigned long status, void *data)
+{
+	struct exynos7885_tfa9896_card *priv =
+		container_of(nb, struct exynos7885_tfa9896_card, hp_nb);
+	struct snd_soc_dapm_context *dapm = &priv->card.dapm;
+	bool hp = status & SND_JACK_HEADPHONE;
+	struct snd_ctl_elem_value *value;
+	struct snd_kcontrol *kctl;
+	int ret;
+
+	if (hp)
+		snd_soc_dapm_disable_pin(dapm, "Speaker");
+	else
+		snd_soc_dapm_enable_pin(dapm, "Speaker");
+	snd_soc_dapm_sync(dapm);
+
+	kctl = snd_soc_card_get_kcontrol(&priv->card, "Playback Output");
+	if (!kctl)
+		return NOTIFY_DONE;
+	value = kzalloc(sizeof(*value), GFP_KERNEL);
+	if (!value)
+		return NOTIFY_DONE;
+	value->value.enumerated.item[0] = hp;
+	ret = kctl->put(kctl, value);
+	kfree(value);
+	if (ret > 0)
+		snd_ctl_notify(priv->card.snd_card, SNDRV_CTL_EVENT_MASK_VALUE,
+			       &kctl->id);
+	else if (ret < 0)
+		dev_warn(priv->card.dev, "failed to follow the jack: %d\n", ret);
+	return NOTIFY_OK;
+}
+
+static int exynos7885_tfa9896_init_jack(struct snd_soc_pcm_runtime *rtd)
+{
+	struct exynos7885_tfa9896_card *priv =
+		container_of(rtd->card, struct exynos7885_tfa9896_card, card);
+	struct snd_soc_component *codec;
+	int ret;
+
+	ret = snd_soc_card_jack_new_pins(rtd->card, "Headphone Jack",
+					 SND_JACK_HEADPHONE, &priv->hp_jack,
+					 exynos7885_tfa9896_jack_pins,
+					 ARRAY_SIZE(exynos7885_tfa9896_jack_pins));
+	if (ret)
+		return ret;
+	priv->hp_nb.notifier_call = exynos7885_tfa9896_jack_event;
+	snd_soc_jack_notifier_register(&priv->hp_jack, &priv->hp_nb);
+
+	/* The headphone codec is the last codec DAI. */
+	codec = snd_soc_rtd_to_codec(rtd, rtd->dai_link->num_codecs - 1)->component;
+	ret = snd_soc_component_set_jack(codec, &priv->hp_jack, NULL);
+	if (ret)
+		snd_soc_jack_notifier_unregister(&priv->hp_jack, &priv->hp_nb);
+	return ret;
+}
+
+static void exynos7885_tfa9896_exit(struct snd_soc_pcm_runtime *rtd)
+{
+	struct exynos7885_tfa9896_card *priv =
+		container_of(rtd->card, struct exynos7885_tfa9896_card, card);
+	struct snd_soc_component *codec;
+
+	if (rtd->dai_link->num_codecs <= GTA3XL_NUM_AMPS)
+		return;
+	codec = snd_soc_rtd_to_codec(rtd, rtd->dai_link->num_codecs - 1)->component;
+	snd_soc_component_set_jack(codec, NULL, NULL);
+	snd_soc_jack_notifier_unregister(&priv->hp_jack, &priv->hp_nb);
+}
+
 static int exynos7885_tfa9896_init(struct snd_soc_pcm_runtime *rtd)
 {
 	const unsigned int amp_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_NB_NF;
@@ -55,6 +140,8 @@ static int exynos7885_tfa9896_init(struct snd_soc_pcm_runtime *rtd)
 		if (ret && ret != -ENOTSUPP)
 			return ret;
 	}
+	if (rtd->dai_link->num_codecs > GTA3XL_NUM_AMPS)
+		return exynos7885_tfa9896_init_jack(rtd);
 	return 0;
 }
 
@@ -175,6 +262,7 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 	priv->link.num_codecs = num_codecs;
 	priv->link.ch_maps = priv->ch_maps;
 	priv->link.init = exynos7885_tfa9896_init;
+	priv->link.exit = exynos7885_tfa9896_exit;
 	/* Codec mute uses I2C in trigger context; ABOX also waits for IPC. */
 	priv->link.nonatomic = 1;
 	priv->link.playback_only = 1;
@@ -182,6 +270,8 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 	card = &priv->card;
 	card->dev = dev;
 	card->owner = THIS_MODULE;
+	/* ALSA driver ID, which UCM looks profiles up by. */
+	card->driver_name = "gta3xlwifi";
 	card->dai_link = &priv->link;
 	card->num_links = 1;
 	ret = snd_soc_of_parse_card_name(card, "model");
