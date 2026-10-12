@@ -756,6 +756,17 @@ config SND_SOC_CHV3_CODEC
 	  This codec does not have a control interface, it always outputs
 	  8 channel S32_LE audio.
 
+config SND_SOC_COD3035X
+	tristate "Samsung COD3035X headphone codec"
+	depends on EXYNOS_ACPM_PROTOCOL
+	depends on OF
+	help
+	  Enable headphone playback on the Samsung COD3035X codec found in the
+	  S2MPU08 PMIC package, as used on the Galaxy Tab A 10.1 (SM-T510).
+	  The codec sits on the SPEEDY bus owned by the APM firmware, so its
+	  registers are accessed through the ACPM IPC service. Jack detection
+	  and capture are not supported yet.
+
 config SND_SOC_CPCAP
 	tristate "Motorola CPCAP codec"
 	depends on MFD_CPCAP || COMPILE_TEST
