@@ -46,6 +46,7 @@
 #define ACPM_DVFS_GET_RATE		1
 #define ACPM_DVFS_SET_FLAG		6
 #define ACPM_EXYNOS7885_INTSR0		0x14
+#define ACPM_EXYNOS7885_IDLE_TIMEOUT_US	2000
 #define ACPM_EXYNOS7885_INTCR1		0x20
 #define ACPM_EXYNOS7885_INTMR1		0x24
 #define ACPM_EXYNOS7885_PLUGIN_TABLE	0x4b80
@@ -508,6 +509,14 @@ static int acpm_wait_for_message_response(struct acpm_chan *achan,
 	return acpm_dequeue_by_polling(achan, xfer);
 }
 
+static bool acpm_exynos7885_chan_idle(struct acpm_info *acpm,
+				      struct acpm_chan *achan)
+{
+	return readl(achan->tx.front) == readl(achan->tx.rear) &&
+	       !(readl(acpm->mbox_regs + ACPM_EXYNOS7885_INTSR0) &
+		 BIT(achan->id + 16));
+}
+
 /**
  * acpm_do_xfer() - do one transfer.
  * @handle:	pointer to the acpm handle.
@@ -521,6 +530,7 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 	struct exynos_mbox_msg msg;
 	struct acpm_chan *achan;
 	u32 idx, tx_front;
+	bool idle;
 	int ret;
 
 	if (xfer->acpm_chan_id >= acpm->num_chans)
@@ -539,10 +549,14 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 	/* A stale Exynos7885 queue must not receive more requests on this probe. */
 	if (acpm->exynos7885 && achan->failed)
 		return -ESHUTDOWN;
+	/*
+	 * The APM clears its doorbell shortly after it has replied, so give a
+	 * previous request a moment to drain before calling the queue stale.
+	 */
 	if (acpm->exynos7885 &&
-	    (readl(achan->tx.front) != readl(achan->tx.rear) ||
-	     readl(acpm->mbox_regs + ACPM_EXYNOS7885_INTSR0) &
-	     BIT(achan->id + 16))) {
+	    read_poll_timeout(acpm_exynos7885_chan_idle, idle, idle, 10,
+			      ACPM_EXYNOS7885_IDLE_TIMEOUT_US, false, acpm,
+			      achan)) {
 		achan->failed = true;
 		return -EBUSY;
 	}
