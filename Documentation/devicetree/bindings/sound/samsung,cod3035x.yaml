@@ -12,8 +12,8 @@ maintainers:
 description:
   Headphone codec inside the Samsung S2MPU08 PMIC package. It sits on the
   SPEEDY bus, which the APM firmware owns, so register accesses go through
-  the ACPM IPC service. It takes I2S from an ABOX UAIF and runs from the
-  SoC CLKOUT0 master clock.
+  the ACPM IPC service. It takes I2S from an ABOX UAIF and runs from a
+  master clock that ABOX provides while it streams.
 
 allOf:
   - $ref: dai-common.yaml#
@@ -53,7 +53,7 @@ examples:
     audio-codec {
         compatible = "samsung,cod3035x";
         samsung,acpm-ipc = <&acpm_ipc 2>;
-        clocks = <&pmu_system_controller 0>;
+        clocks = <&abox>;
         clock-names = "mclk";
         #sound-dai-cells = <0>;
     };
