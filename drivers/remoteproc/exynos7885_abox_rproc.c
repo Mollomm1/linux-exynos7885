@@ -5,6 +5,7 @@
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/completion.h>
 #include <linux/err.h>
 #include <linux/firmware.h>
@@ -54,6 +55,7 @@
 #define ABOX_UAIF_CTRL0(n)	(0x0500 + (n) * 0x10)
 #define ABOX_UAIF_CTRL1(n)	(0x0504 + (n) * 0x10)
 #define ABOX_UAIF_SPK_ENABLE	BIT(0)
+#define ABOX_UAIF_MIC_ENABLE	BIT(1)
 #define ABOX_UAIF_MODE		BIT(2)
 #define ABOX_UAIF_FORMAT	GENMASK(28, 24)
 #define ABOX_UAIF_BCLK_POLARITY	BIT(23)
@@ -188,6 +190,14 @@ struct exynos7885_abox_rproc {
 	bool pcm_shutting_down;
 	/* Indexed by UAIF number; only UAIF0 and UAIF3 are wired up. */
 	struct exynos7885_abox_uaif uaif[ABOX_NUM_UAIF];
+	/*
+	 * Codec master clock on the UAIF2 clock pin. A leaf lock: the clk core
+	 * calls in with its prepare lock held, and uaif_lock nests that lock.
+	 */
+	struct clk_hw mclk_hw;
+	struct mutex mclk_lock;
+	bool mclk_allowed;
+	bool mclk_on;
 	bool firmware_running;
 	bool firmware_ready;
 	bool stopping;
@@ -1651,6 +1661,9 @@ static int exynos7885_abox_start(struct rproc *rproc)
 
 	WRITE_ONCE(abox->firmware_ready, true);
 	mutex_unlock(&abox->ipc_lock);
+	mutex_lock(&abox->mclk_lock);
+	abox->mclk_allowed = true;
+	mutex_unlock(&abox->mclk_lock);
 	dev_info(abox->dev, "Calliope firmware %u booted\n",
 		 READ_ONCE(abox->firmware_version));
 	return 0;
@@ -1742,6 +1755,19 @@ fail_before_release_retain:
 	return 0;
 }
 
+/* Turn the codec MCLK off and refuse it until the next firmware boot. */
+static void exynos7885_abox_mclk_block(struct exynos7885_abox_rproc *abox)
+{
+	mutex_lock(&abox->mclk_lock);
+	if (abox->mclk_on) {
+		dev_warn(abox->dev, "stopping with the codec MCLK still on\n");
+		writel(0, abox->sfr + ABOX_UAIF_CTRL0(2));
+		abox->mclk_on = false;
+	}
+	abox->mclk_allowed = false;
+	mutex_unlock(&abox->mclk_lock);
+}
+
 static int exynos7885_abox_stop(struct rproc *rproc)
 {
 	struct exynos7885_abox_rproc *abox = rproc->priv;
@@ -1755,6 +1781,8 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 	}
 	abox->pcm_shutting_down = true;
 	mutex_unlock(&abox->pcm_lock);
+
+	exynos7885_abox_mclk_block(abox);
 
 	mutex_lock(&abox->ipc_lock);
 	ret = regmap_read(abox->pmu, ABOX_CA7_STATUS, &status);
@@ -1811,6 +1839,79 @@ static const struct rproc_ops exynos7885_abox_ops = {
 static void exynos7885_abox_put_sysmmu_dev(void *data)
 {
 	put_device(data);
+}
+
+/*
+ * The board routes the UAIF2 clock pin to the headphone codec as its master
+ * clock. As in the vendor abox_enable_mclk(), running UAIF2 in microphone
+ * mode drives that pin from the AUDIF divider. The SFR is only reachable
+ * while the firmware is up, so the clock cannot be prepared before a boot.
+ */
+static int exynos7885_abox_mclk_prepare(struct clk_hw *hw)
+{
+	struct exynos7885_abox_rproc *abox =
+		container_of(hw, struct exynos7885_abox_rproc, mclk_hw);
+	int ret = 0;
+
+	mutex_lock(&abox->mclk_lock);
+	if (!abox->mclk_allowed) {
+		ret = -EHOSTDOWN;
+	} else if (!abox->mclk_on) {
+		writel(ABOX_UAIF_MIC_ENABLE, abox->sfr + ABOX_UAIF_CTRL0(2));
+		abox->mclk_on = true;
+	}
+	mutex_unlock(&abox->mclk_lock);
+	return ret;
+}
+
+static void exynos7885_abox_mclk_unprepare(struct clk_hw *hw)
+{
+	struct exynos7885_abox_rproc *abox =
+		container_of(hw, struct exynos7885_abox_rproc, mclk_hw);
+
+	mutex_lock(&abox->mclk_lock);
+	if (abox->mclk_on && abox->mclk_allowed)
+		writel(0, abox->sfr + ABOX_UAIF_CTRL0(2));
+	abox->mclk_on = false;
+	mutex_unlock(&abox->mclk_lock);
+}
+
+static int exynos7885_abox_mclk_is_prepared(struct clk_hw *hw)
+{
+	struct exynos7885_abox_rproc *abox =
+		container_of(hw, struct exynos7885_abox_rproc, mclk_hw);
+
+	return abox->mclk_on;
+}
+
+static const struct clk_ops exynos7885_abox_mclk_ops = {
+	.prepare = exynos7885_abox_mclk_prepare,
+	.unprepare = exynos7885_abox_mclk_unprepare,
+	.is_prepared = exynos7885_abox_mclk_is_prepared,
+};
+
+static int exynos7885_abox_register_mclk(struct exynos7885_abox_rproc *abox)
+{
+	struct device *dev = abox->dev;
+	struct clk_init_data init = {
+		.ops = &exynos7885_abox_mclk_ops,
+		/* Never touch the SFR from clk_disable_unused(). */
+		.flags = CLK_IGNORE_UNUSED,
+	};
+	int ret;
+
+	if (!of_property_present(dev->of_node, "#clock-cells"))
+		return 0;
+
+	init.name = devm_kasprintf(dev, GFP_KERNEL, "%s-mclk", dev_name(dev));
+	if (!init.name)
+		return -ENOMEM;
+	abox->mclk_hw.init = &init;
+	ret = devm_clk_hw_register(dev, &abox->mclk_hw);
+	if (ret)
+		return ret;
+	return devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get,
+					   &abox->mclk_hw);
 }
 
 static int exynos7885_abox_probe(struct platform_device *pdev)
@@ -1884,6 +1985,7 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	mutex_init(&abox->handler_lock);
 	mutex_init(&abox->pcm_lock);
 	mutex_init(&abox->uaif_lock);
+	mutex_init(&abox->mclk_lock);
 	abox->pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7885-pmu");
 	if (IS_ERR(abox->pmu))
 		return PTR_ERR(abox->pmu);
@@ -1978,6 +2080,10 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	dev_info(dev, "ABOX probe: remoteproc registered offline\n");
+
+	ret = exynos7885_abox_register_mclk(abox);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to register codec MCLK\n");
 
 	if (populate_children) {
 		dev_info(dev, "ABOX probe: populating child devices\n");
