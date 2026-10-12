@@ -25,6 +25,19 @@
 #define ABOX_PCM_CHANNEL	0
 #define ABOX_PCM_POINTER	4
 
+/* DAI 0 drives UAIF3 (speaker amplifiers), DAI 1 UAIF0 (headphone codec). */
+#define ABOX_PCM_NUM_DAIS	2
+
+struct exynos7885_abox_pcm_uaif {
+	unsigned int format;
+	bool fmt_valid;
+	bool invert_bclk;
+	bool invert_frame;
+	bool abox_master;
+	bool configured;
+	bool enabled;
+};
+
 struct exynos7885_abox_pcm {
 	struct device *abox_dev;
 	void *area;
@@ -40,11 +53,7 @@ struct exynos7885_abox_pcm {
 	bool mapped;
 	bool configured;
 	bool running;
-	bool dai_fmt_valid;
-	bool invert_bclk;
-	bool invert_frame;
-	bool abox_master;
-	unsigned int dai_format;
+	struct exynos7885_abox_pcm_uaif uaif[ABOX_PCM_NUM_DAIS];
 };
 
 static int exynos7885_abox_pcm_hw_free(struct snd_soc_component *component,
@@ -378,6 +387,43 @@ static int exynos7885_abox_pcm_prepare(struct snd_soc_component *component,
 	return ret;
 }
 
+/* Each UAIF's number is its CPU DAI's id. */
+static const unsigned int exynos7885_abox_pcm_uaif_id[ABOX_PCM_NUM_DAIS] = {
+	3, 0,
+};
+
+/* Switch every UAIF configured for this stream on or off. */
+static int exynos7885_abox_pcm_set_uaifs(struct exynos7885_abox_pcm *pcm,
+					 bool enable)
+{
+	struct exynos7885_abox_pcm_uaif *uaif;
+	int i, ret, first_err = 0;
+
+	for (i = 0; i < ABOX_PCM_NUM_DAIS; i++) {
+		uaif = &pcm->uaif[i];
+		if (!uaif->configured || uaif->enabled == enable)
+			continue;
+		ret = exynos7885_abox_uaif_set_enabled(pcm->abox_dev,
+					exynos7885_abox_pcm_uaif_id[i], enable);
+		if (!ret) {
+			uaif->enabled = enable;
+			continue;
+		}
+		if (!enable) {
+			first_err = first_err ?: ret;
+			continue;
+		}
+		/* Undo a partial start. */
+		while (--i >= 0)
+			if (pcm->uaif[i].enabled &&
+			    !exynos7885_abox_uaif_set_enabled(pcm->abox_dev,
+					exynos7885_abox_pcm_uaif_id[i], false))
+				pcm->uaif[i].enabled = false;
+		return ret;
+	}
+	return first_err;
+}
+
 static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 				       struct snd_pcm_substream *substream,
 				       int cmd)
@@ -402,7 +448,7 @@ static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 	}
 
 	if (start) {
-		ret = exynos7885_abox_uaif3_set_enabled(pcm->abox_dev, true);
+		ret = exynos7885_abox_pcm_set_uaifs(pcm, true);
 		if (ret)
 			return ret;
 		WRITE_ONCE(pcm->running, true);
@@ -410,8 +456,7 @@ static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
 				       EXYNOS7885_ABOX_PCM_TRIGGER, start, 0, 0);
 	if (ret) {
-		if (start &&
-		    !exynos7885_abox_uaif3_set_enabled(pcm->abox_dev, false))
+		if (start && !exynos7885_abox_pcm_set_uaifs(pcm, false))
 			WRITE_ONCE(pcm->running, false);
 		return ret;
 	}
@@ -421,7 +466,7 @@ static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 					     20000);
 	if (ret)
 		return ret;
-	ret = exynos7885_abox_uaif3_set_enabled(pcm->abox_dev, false);
+	ret = exynos7885_abox_pcm_set_uaifs(pcm, false);
 	if (!ret)
 		WRITE_ONCE(pcm->running, false);
 	return ret;
@@ -449,18 +494,26 @@ static const struct snd_soc_component_driver exynos7885_abox_component = {
 	.pointer = exynos7885_abox_pcm_pointer,
 };
 
-static int exynos7885_abox_dai_set_fmt(struct snd_soc_dai *dai,
-				       unsigned int fmt)
+static struct exynos7885_abox_pcm_uaif *
+exynos7885_abox_dai_uaif(struct snd_soc_dai *dai)
 {
 	struct exynos7885_abox_pcm *pcm =
 		snd_soc_component_get_drvdata(dai->component);
 
+	return &pcm->uaif[dai->id];
+}
+
+static int exynos7885_abox_dai_set_fmt(struct snd_soc_dai *dai,
+				       unsigned int fmt)
+{
+	struct exynos7885_abox_pcm_uaif *uaif = exynos7885_abox_dai_uaif(dai);
+
 	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_I2S:
-		pcm->dai_format = EXYNOS7885_ABOX_UAIF3_I2S;
+		uaif->format = EXYNOS7885_ABOX_UAIF3_I2S;
 		break;
 	case SND_SOC_DAIFMT_DSP_A:
-		pcm->dai_format = EXYNOS7885_ABOX_UAIF3_DSP_A;
+		uaif->format = EXYNOS7885_ABOX_UAIF3_DSP_A;
 		break;
 	default:
 		return -EINVAL;
@@ -468,35 +521,35 @@ static int exynos7885_abox_dai_set_fmt(struct snd_soc_dai *dai,
 
 	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
 	case SND_SOC_DAIFMT_NB_NF:
-		pcm->invert_bclk = false;
-		pcm->invert_frame = false;
+		uaif->invert_bclk = false;
+		uaif->invert_frame = false;
 		break;
 	case SND_SOC_DAIFMT_NB_IF:
-		pcm->invert_bclk = false;
-		pcm->invert_frame = true;
+		uaif->invert_bclk = false;
+		uaif->invert_frame = true;
 		break;
 	case SND_SOC_DAIFMT_IB_NF:
-		pcm->invert_bclk = true;
-		pcm->invert_frame = false;
+		uaif->invert_bclk = true;
+		uaif->invert_frame = false;
 		break;
 	case SND_SOC_DAIFMT_IB_IF:
-		pcm->invert_bclk = true;
-		pcm->invert_frame = true;
+		uaif->invert_bclk = true;
+		uaif->invert_frame = true;
 		break;
 	default:
 		return -EINVAL;
 	}
 
-	/* ASoC flips the link format, so BP_FP means UAIF3 drives BCLK/FS. */
+	/* ASoC flips the link format, so BP_FP means the UAIF drives BCLK/FS. */
 	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
 	case SND_SOC_DAIFMT_BP_FP:
-		pcm->abox_master = true;
+		uaif->abox_master = true;
 		break;
 	default:
 		return -EOPNOTSUPP;
 	}
 
-	pcm->dai_fmt_valid = true;
+	uaif->fmt_valid = true;
 	return 0;
 }
 
@@ -506,40 +559,65 @@ static int exynos7885_abox_dai_hw_params(struct snd_pcm_substream *substream,
 {
 	struct exynos7885_abox_pcm *pcm =
 		snd_soc_component_get_drvdata(dai->component);
+	struct exynos7885_abox_pcm_uaif *uaif = exynos7885_abox_dai_uaif(dai);
+	unsigned int n = exynos7885_abox_pcm_uaif_id[dai->id];
 	int ret;
 
-	if (!pcm->dai_fmt_valid)
+	if (!uaif->fmt_valid)
 		return -EINVAL;
 
-	ret = exynos7885_abox_uaif3_set_fmt(pcm->abox_dev, pcm->dai_format,
-					    pcm->invert_bclk,
-					    pcm->invert_frame,
-					    pcm->abox_master);
+	ret = exynos7885_abox_uaif_set_fmt(pcm->abox_dev, n, uaif->format,
+					   uaif->invert_bclk,
+					   uaif->invert_frame,
+					   uaif->abox_master);
 	if (ret)
 		return ret;
 
-	return exynos7885_abox_uaif3_hw_params(pcm->abox_dev,
-					       params_rate(params),
-					       params_width(params),
-					       params_channels(params));
+	ret = exynos7885_abox_uaif_hw_params(pcm->abox_dev, n,
+					     params_rate(params),
+					     params_width(params),
+					     params_channels(params));
+	if (!ret)
+		uaif->configured = true;
+	return ret;
+}
+
+static int exynos7885_abox_dai_hw_free(struct snd_pcm_substream *substream,
+				       struct snd_soc_dai *dai)
+{
+	struct exynos7885_abox_pcm_uaif *uaif = exynos7885_abox_dai_uaif(dai);
+
+	if (uaif->enabled)
+		return -EBUSY;
+	uaif->configured = false;
+	return 0;
 }
 
 static const struct snd_soc_dai_ops exynos7885_abox_dai_ops = {
 	.set_fmt = exynos7885_abox_dai_set_fmt,
 	.hw_params = exynos7885_abox_dai_hw_params,
+	.hw_free = exynos7885_abox_dai_hw_free,
 };
 
-static struct snd_soc_dai_driver exynos7885_abox_dai = {
-	.name = "exynos7885-abox-uaif3",
-	.playback = {
-		.stream_name = "UAIF3 Playback",
-		.channels_min = 2,
-		.channels_max = 2,
-		.rates = SNDRV_PCM_RATE_8000_192000,
-		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE |
-			   SNDRV_PCM_FMTBIT_S32_LE,
-	},
-	.ops = &exynos7885_abox_dai_ops,
+#define EXYNOS7885_ABOX_UAIF_DAI(_id, _name, _stream)			\
+	{								\
+		.id = _id,						\
+		.name = _name,						\
+		.playback = {						\
+			.stream_name = _stream,				\
+			.channels_min = 2,				\
+			.channels_max = 2,				\
+			.rates = SNDRV_PCM_RATE_8000_192000,		\
+			.formats = SNDRV_PCM_FMTBIT_S16_LE |		\
+				   SNDRV_PCM_FMTBIT_S24_LE |		\
+				   SNDRV_PCM_FMTBIT_S32_LE,		\
+		},							\
+		.ops = &exynos7885_abox_dai_ops,			\
+	}
+
+static struct snd_soc_dai_driver exynos7885_abox_dais[ABOX_PCM_NUM_DAIS] = {
+	EXYNOS7885_ABOX_UAIF_DAI(0, "exynos7885-abox-uaif3", "UAIF3 Playback"),
+	EXYNOS7885_ABOX_UAIF_DAI(1, "exynos7885-abox-uaif0", "UAIF0 Playback"),
 };
 
 static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
@@ -558,7 +636,8 @@ static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 
 	return devm_snd_soc_register_component(&pdev->dev,
 					       &exynos7885_abox_component,
-					       &exynos7885_abox_dai, 1);
+					       exynos7885_abox_dais,
+					       ARRAY_SIZE(exynos7885_abox_dais));
 }
 
 static const struct of_device_id exynos7885_abox_pcm_of_match[] = {
