@@ -39,7 +39,13 @@ description: |+
 
 properties:
   compatible:
-    const: samsung,exynos-sysmmu
+    oneOf:
+      - const: samsung,exynos-sysmmu
+      - description:
+          Exynos7885 ABOX System MMU, which also walks a second page table
+        items:
+          - const: samsung,exynos7885-abox-sysmmu
+          - const: samsung,exynos-sysmmu
 
   reg:
     maxItems: 1
