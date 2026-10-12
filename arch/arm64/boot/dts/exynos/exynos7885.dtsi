@@ -349,7 +349,8 @@
 		};
 
 		sysmmu_abox: iommu@14a30000 {
-			compatible = "samsung,exynos-sysmmu";
+			compatible = "samsung,exynos7885-abox-sysmmu",
+				     "samsung,exynos-sysmmu";
 			reg = <0x14a30000 0x9000>;
 			interrupts = <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>;
 			/* Its registers are only reachable with the ABOX bus clock. */
