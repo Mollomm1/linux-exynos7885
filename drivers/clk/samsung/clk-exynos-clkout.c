@@ -28,6 +28,7 @@
 #define EXYNOS_CLKOUT_MUX_SHIFT		8
 #define EXYNOS4_CLKOUT_MUX_MASK		0xf
 #define EXYNOS5_CLKOUT_MUX_MASK		0x1f
+#define EXYNOS7885_CLKOUT_MUX_MASK	0x3f
 
 struct exynos_clkout {
 	struct clk_gate gate;
@@ -49,6 +50,10 @@ static const struct exynos_clkout_variant exynos_clkout_exynos4 = {
 
 static const struct exynos_clkout_variant exynos_clkout_exynos5 = {
 	.mux_mask	= EXYNOS5_CLKOUT_MUX_MASK,
+};
+
+static const struct exynos_clkout_variant exynos_clkout_exynos7885 = {
+	.mux_mask	= EXYNOS7885_CLKOUT_MUX_MASK,
 };
 
 static const struct of_device_id exynos_clkout_ids[] = {
@@ -76,6 +81,9 @@ static const struct of_device_id exynos_clkout_ids[] = {
 	}, {
 		.compatible = "samsung,exynos5433-pmu",
 		.data = &exynos_clkout_exynos5,
+	}, {
+		.compatible = "samsung,exynos7885-pmu",
+		.data = &exynos_clkout_exynos7885,
 	}, { }
 };
 
