@@ -379,10 +379,16 @@
 				 <&cmu_dispaud CLK_MOUT_AUD_UAIF3>,
 				 <&cmu_dispaud CLK_GOUT_ABOX_ACLK>,
 				 <&cmu_dispaud CLK_GOUT_UAIF3_BCLK>,
-				 <&cmu_dispaud CLK_GOUT_UAIF3_SYNC>;
+				 <&cmu_dispaud CLK_GOUT_UAIF3_SYNC>,
+				 <&cmu_dispaud CLK_DOUT_UAIF0>,
+				 <&cmu_dispaud CLK_MOUT_AUD_UAIF0>,
+				 <&cmu_dispaud CLK_GOUT_UAIF0_BCLK>,
+				 <&cmu_dispaud CLK_GOUT_UAIF0_SYNC>;
 			clock-names = "pll", "ca7", "audif", "uaif3-div",
 				      "uaif3-mux", "aclk",
-				      "uaif3-bclk", "uaif3-sync";
+				      "uaif3-bclk", "uaif3-sync",
+				      "uaif0-div", "uaif0-mux",
+				      "uaif0-bclk", "uaif0-sync";
 			power-domains = <&pd_dispaud>;
 			iommus = <&sysmmu_abox>;
 			status = "disabled";
@@ -392,6 +398,10 @@
 			compatible = "samsung,exynos7885-pmu",
 				     "samsung,exynos7-pmu", "syscon";
 			reg = <0x11c80000 0x10000>;
+			#clock-cells = <1>;
+			/* CLKOUT0 mux input 1 is the 26 MHz oscillator (TCXO). */
+			clock-names = "clkout1";
+			clocks = <&oscclk>;
 			reboot-mode {
 				compatible = "syscon-reboot-mode";
 				offset = <0x0810>;
