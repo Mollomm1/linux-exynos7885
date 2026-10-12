@@ -11,7 +11,6 @@
 
 #include <linux/bitfield.h>
 #include <linux/bits.h>
-#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/firmware/samsung/exynos-acpm-protocol.h>
 #include <linux/module.h>
@@ -21,6 +20,7 @@
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
+#define COD3035X_ACPM_TYPE_PMIC		1
 #define COD3035X_ACPM_TYPE_CODEC	3
 #define COD3035X_ACPM_TYPE_ANALOG	7
 
@@ -77,6 +77,17 @@
 #define COD3035X_F5_PRESET_AVC		0xf5
 #define COD3035X_F6_PRESET_AVC		0xf6
 
+#define COD3035X_D0_CTRL_IREF1		0xd0
+#define COD3035X_CTMI_VCM		GENMASK(6, 4)
+#define COD3035X_CTMI_VCM_4U		2
+#define COD3035X_CTMI_MIX		GENMASK(2, 0)
+#define COD3035X_CTMI_MIX_2U		2
+
+/* S2MPU08 LDO36/LDO37, the codec supplies (SPEEDY type 1). */
+#define S2MPU08_L36CTRL			0x50
+#define S2MPU08_L37CTRL			0x51
+#define S2MPU08_LDO_ENABLE		GENMASK(7, 6)
+
 /* Analog block (SPEEDY type 7). */
 #define COD3035A_41_DNC1		0x41
 #define COD3035A_42_DNC2		0x42
@@ -98,7 +109,6 @@ struct cod3035x {
 	struct regmap *regmap;
 	const struct acpm_handle *acpm;
 	unsigned int acpm_chan;
-	struct clk *mclk;
 };
 
 static int cod3035x_acpm_read(struct cod3035x *cod, u8 type, u8 reg, u8 *val)
@@ -178,12 +188,54 @@ static const struct reg_sequence cod3035x_init_seq2[] = {
 	{ COD3035X_51_DVOLL, COD3035X_DVOL_DEFAULT },
 	{ COD3035X_52_DVOLR, COD3035X_DVOL_DEFAULT },
 	{ COD3035X_10_PD_REF, 0x10 },
+	/* LassenA additions from the vendor codec probe */
+	{ 0x57, 0x80 }, { 0xbe, 0x00 }, { 0x5a, 0x05 }, { 0x55, 0x6e },
+	{ 0xf4, 0xd3 }, { 0xe9, 0x1f }, { 0xea, 0x1f }, { 0xe1, 0x22 },
 };
+
+static int cod3035x_enable_ldo(struct cod3035x *cod, u8 reg)
+{
+	u8 val;
+	int ret;
+
+	ret = cod3035x_acpm_read(cod, COD3035X_ACPM_TYPE_PMIC, reg, &val);
+	if (ret)
+		return ret;
+	if ((val & S2MPU08_LDO_ENABLE) == S2MPU08_LDO_ENABLE)
+		return 0;
+	ret = cod3035x_acpm_write(cod, COD3035X_ACPM_TYPE_PMIC, reg,
+				  val | S2MPU08_LDO_ENABLE);
+	if (ret)
+		return ret;
+	usleep_range(1000, 1100);
+	return 0;
+}
+
+/*
+ * The vendor keeps both codec supplies always on. LDO36 feeds the core
+ * (without it core registers read back as zero); LDO37 feeds the headphone
+ * output stage (without it the DAC runs but the jack only pops). Nothing
+ * else describes the PMIC on this board, so switch both on here, keeping
+ * their boot-time voltages.
+ */
+static int cod3035x_enable_supply(struct cod3035x *cod)
+{
+	int ret;
+
+	ret = cod3035x_enable_ldo(cod, S2MPU08_L36CTRL);
+	if (ret)
+		return ret;
+	return cod3035x_enable_ldo(cod, S2MPU08_L37CTRL);
+}
 
 static int cod3035x_hw_init(struct cod3035x *cod)
 {
 	struct regmap *map = cod->regmap;
 	int ret;
+
+	ret = cod3035x_enable_supply(cod);
+	if (ret)
+		return ret;
 
 	/* Jack-detect clock first, as the vendor resume path does. */
 	ret = regmap_set_bits(map, COD3035X_80_PDB_ACC1,
@@ -202,6 +254,12 @@ static int cod3035x_hw_init(struct cod3035x *cod)
 	if (ret)
 		return ret;
 	ret = regmap_set_bits(map, COD3035X_81_PDB_ACC2, COD3035X_T_PDB_IMP);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, COD3035X_D0_CTRL_IREF1,
+				 COD3035X_CTMI_VCM | COD3035X_CTMI_MIX,
+				 FIELD_PREP(COD3035X_CTMI_VCM, COD3035X_CTMI_VCM_4U) |
+				 FIELD_PREP(COD3035X_CTMI_MIX, COD3035X_CTMI_MIX_2U));
 	if (ret)
 		return ret;
 	/* Receiver reference current 2 uA (rcv-drv-current = 1) */
@@ -301,6 +359,10 @@ static int cod3035x_hpdrv_event(struct snd_soc_dapm_widget *w,
 }
 
 static const struct snd_soc_dapm_widget cod3035x_dapm_widgets[] = {
+	/* The DAC and HP power sequencer run from MCLK; it exists only while
+	 * the ABOX firmware is up, so it is a stream-time supply.
+	 */
+	SND_SOC_DAPM_CLOCK_SUPPLY("mclk"),
 	SND_SOC_DAPM_DAC_E("DAC", "AIF Playback", SND_SOC_NOPM, 0, 0,
 			   cod3035x_dac_event,
 			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_PRE_PMD),
@@ -312,6 +374,7 @@ static const struct snd_soc_dapm_widget cod3035x_dapm_widgets[] = {
 };
 
 static const struct snd_soc_dapm_route cod3035x_dapm_routes[] = {
+	{ "DAC", NULL, "mclk" },
 	{ "HPDRV", NULL, "DAC" },
 	{ "HPOUT", NULL, "HPDRV" },
 };
@@ -459,12 +522,6 @@ static int cod3035x_probe(struct platform_device *pdev)
 	if (IS_ERR(cod->acpm))
 		return dev_err_probe(dev, PTR_ERR(cod->acpm),
 				     "failed to get ACPM handle\n");
-
-	/* The codec runs from the SoC's 26 MHz CLKOUT0. */
-	cod->mclk = devm_clk_get_enabled(dev, "mclk");
-	if (IS_ERR(cod->mclk))
-		return dev_err_probe(dev, PTR_ERR(cod->mclk),
-				     "failed to enable mclk\n");
 
 	cod->regmap = devm_regmap_init(dev, NULL, cod, &cod3035x_regmap_config);
 	if (IS_ERR(cod->regmap))
