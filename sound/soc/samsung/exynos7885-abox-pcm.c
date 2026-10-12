@@ -7,11 +7,17 @@
 #include <linux/platform_device.h>
 #include <linux/soc/samsung/exynos7885-abox.h>
 #include <linux/uaccess.h>
+#include <linux/workqueue.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
-#define ABOX_PCM_BUFFER_BYTES	SZ_128K
+/*
+ * Half of the 128 KiB mapped ring. Only buffers up to 64 KiB have been
+ * tested; larger ones faulted at the end of the mapping, though that was
+ * before the SIFS1 rate was configured and RDMA0 ran unpaced.
+ */
+#define ABOX_PCM_BUFFER_BYTES	SZ_64K
 #define ABOX_PCM_PERIOD_MIN	SZ_4K
 #define ABOX_PCM_PERIOD_MAX	SZ_64K
 #define ABOX_PCM_PERIODS_MIN	2
@@ -25,6 +31,8 @@ struct exynos7885_abox_pcm {
 	phys_addr_t phys;
 	size_t size;
 	struct snd_pcm_substream *substream;
+	/* The link is nonatomic: period_elapsed takes a mutex, not IRQ-safe. */
+	struct work_struct period_work;
 	snd_pcm_uframes_t hw_ptr;
 	snd_pcm_uframes_t appl_ptr;
 	bool booted;
@@ -73,14 +81,35 @@ static void exynos7885_abox_pcm_ipc(struct device *dev, const u32 *message,
 		return;
 
 	pointer = message[ABOX_PCM_POINTER];
-	if (pointer >= 0x81000000)
+	if (!pointer) {
+		/* Buffer-empty interrupt: read the position from RDMA0. */
+		struct snd_pcm_runtime *runtime = substream->runtime;
+		ssize_t pos = exynos7885_abox_rdma_pointer(pcm->abox_dev,
+				ABOX_PCM_CHANNEL, runtime->dma_bytes,
+				frames_to_bytes(runtime, runtime->period_size));
+
+		if (pos < 0)
+			return;
+		pointer = pos % runtime->dma_bytes;
+	} else if (pointer >= 0x81000000) {
 		pointer -= 0x81000000;
+	}
 	if (pointer >= substream->runtime->dma_bytes)
 		return;
 
 	WRITE_ONCE(pcm->hw_ptr,
 		   bytes_to_frames(substream->runtime, pointer));
-	snd_pcm_period_elapsed(substream);
+	schedule_work(&pcm->period_work);
+}
+
+static void exynos7885_abox_pcm_period_work(struct work_struct *work)
+{
+	struct exynos7885_abox_pcm *pcm =
+		container_of(work, struct exynos7885_abox_pcm, period_work);
+	struct snd_pcm_substream *substream = READ_ONCE(pcm->substream);
+
+	if (substream && READ_ONCE(pcm->running))
+		snd_pcm_period_elapsed(substream);
 }
 
 static int exynos7885_abox_pcm_open(struct snd_soc_component *component,
@@ -103,9 +132,10 @@ static int exynos7885_abox_pcm_open(struct snd_soc_component *component,
 		goto shutdown;
 
 	snd_soc_set_runtime_hwparams(substream, &exynos7885_abox_pcm_hardware);
+	/* Returns 1 when it narrowed the constraint. */
 	ret = snd_pcm_hw_constraint_integer(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
-	if (ret)
+	if (ret < 0)
 		goto shutdown;
 
 	ret = exynos7885_abox_register_ipc_handler(pcm->abox_dev,
@@ -140,6 +170,7 @@ static int exynos7885_abox_pcm_close(struct snd_soc_component *component,
 	WRITE_ONCE(pcm->substream, NULL);
 	exynos7885_abox_unregister_ipc_handler(pcm->abox_dev,
 					       exynos7885_abox_pcm_ipc);
+	cancel_work_sync(&pcm->period_work);
 	if (READ_ONCE(pcm->running))
 		return -EBUSY;
 	if (pcm->configured) {
@@ -269,6 +300,11 @@ static int exynos7885_abox_pcm_hw_params(struct snd_soc_component *component,
 	if (ret)
 		goto free_fw;
 
+	dev_dbg(component->dev,
+		"buffer %zu bytes, period %u bytes x %u, rate %u, width %u, channels %u\n",
+		runtime->dma_bytes, params_period_bytes(params),
+		params_periods(params), params_rate(params),
+		params_width(params), params_channels(params));
 	WRITE_ONCE(pcm->configured, true);
 	pcm->hw_ptr = 0;
 	pcm->appl_ptr = 0;
@@ -439,8 +475,9 @@ static int exynos7885_abox_dai_set_fmt(struct snd_soc_dai *dai,
 		return -EINVAL;
 	}
 
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBC_CFC:
+	/* ASoC flips the link format, so BP_FP means UAIF3 drives BCLK/FS. */
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BP_FP:
 		pcm->abox_master = true;
 		break;
 	default:
@@ -504,6 +541,7 @@ static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 	if (!pcm)
 		return -ENOMEM;
 	pcm->abox_dev = pdev->dev.parent;
+	INIT_WORK(&pcm->period_work, exynos7885_abox_pcm_period_work);
 	platform_set_drvdata(pdev, pcm);
 
 	return devm_snd_soc_register_component(&pdev->dev,
