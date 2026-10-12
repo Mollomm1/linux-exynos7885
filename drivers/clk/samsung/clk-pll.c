@@ -441,6 +441,105 @@ static unsigned long samsung_pll1431x_recalc_rate(struct clk_hw *hw,
 }
 
 #define PLL1431X_MUX_SEL	BIT(4)
+#define PLL1431X_MUX_BUSY	BIT(7)
+#define PLL1431X_LOCK_TIME_MASK	GENMASK(19, 0)
+#define PLL1431X_MAX_LOCK_US	1000U
+#define PLL1431X_MUX_TIMEOUT_US	100U
+
+/*
+ * PLL1431X feeds its consumers through the glitch-free mux at CON0[4]. With
+ * the mux on the PLL and the PLL disabled, every child clock stops, so the
+ * mux has to be moved to OSCCLK before the PLL is disabled and back only
+ * once the PLL has locked again. This follows the vendor CMU sequence.
+ */
+static int samsung_pll1431x_mux_wait(struct samsung_clk_pll *pll)
+{
+	int i, ret;
+	u32 val;
+
+	if (pll_early_timeout || timekeeping_suspended) {
+		i = PLL_TIMEOUT_LOOPS;
+		while (i-- > 0) {
+			if (!(readl_relaxed(pll->con_reg) & PLL1431X_MUX_BUSY))
+				return 0;
+
+			cpu_relax();
+		}
+		ret = -ETIMEDOUT;
+	} else {
+		ret = readl_relaxed_poll_timeout_atomic(pll->con_reg, val,
+					!(val & PLL1431X_MUX_BUSY), 0,
+					PLL1431X_MUX_TIMEOUT_US);
+	}
+
+	if (ret < 0)
+		pr_err("PLL %s output mux did not settle\n",
+		       clk_hw_get_name(&pll->hw));
+
+	return ret;
+}
+
+static int samsung_pll1431x_enable(struct clk_hw *hw)
+{
+	struct samsung_clk_pll *pll = to_clk_pll(hw);
+	unsigned long fin = clk_hw_get_rate(clk_hw_get_parent(hw));
+	u32 con0, lock_us;
+	int ret;
+
+	con0 = readl_relaxed(pll->con_reg);
+	if (!(con0 & BIT(pll->enable_offs))) {
+		con0 |= BIT(pll->enable_offs);
+		writel_relaxed(con0, pll->con_reg);
+
+		/*
+		 * The STABLE bit can read as set while the PLL is disabled, so
+		 * also wait for the programmed lock time before trusting it.
+		 */
+		if (fin && !pll_early_timeout && !timekeeping_suspended) {
+			lock_us = readl_relaxed(pll->lock_reg) &
+				  PLL1431X_LOCK_TIME_MASK;
+			lock_us = DIV_ROUND_UP_ULL((u64)lock_us * USEC_PER_SEC,
+						   fin);
+			udelay(min(lock_us, PLL1431X_MAX_LOCK_US));
+		}
+
+		ret = samsung_pll_lock_wait(pll, BIT(pll->lock_offs));
+		if (ret)
+			return ret;
+	}
+
+	if (!(con0 & PLL1431X_MUX_SEL))
+		writel_relaxed(con0 | PLL1431X_MUX_SEL, pll->con_reg);
+
+	return samsung_pll1431x_mux_wait(pll);
+}
+
+static int samsung_pll1431x_stop(struct samsung_clk_pll *pll)
+{
+	u32 con0;
+	int ret;
+
+	con0 = readl_relaxed(pll->con_reg);
+	if (con0 & PLL1431X_MUX_SEL) {
+		con0 &= ~PLL1431X_MUX_SEL;
+		writel_relaxed(con0, pll->con_reg);
+
+		/* Leave the PLL running if consumers may still be on it. */
+		ret = samsung_pll1431x_mux_wait(pll);
+		if (ret)
+			return ret;
+	}
+
+	con0 &= ~BIT(pll->enable_offs);
+	writel_relaxed(con0, pll->con_reg);
+
+	return 0;
+}
+
+static void samsung_pll1431x_disable(struct clk_hw *hw)
+{
+	samsung_pll1431x_stop(to_clk_pll(hw));
+}
 
 static int samsung_pll1431x_set_rate(struct clk_hw *hw, unsigned long drate,
 				     unsigned long parent_rate)
@@ -448,6 +547,8 @@ static int samsung_pll1431x_set_rate(struct clk_hw *hw, unsigned long drate,
 	struct samsung_clk_pll *pll = to_clk_pll(hw);
 	const struct samsung_pll_rate_table *rate;
 	u32 pll_con0, pll_con3;
+	bool enabled;
+	int ret;
 
 	rate = samsung_get_pll_settings(pll, drate);
 	if (!rate)
@@ -462,24 +563,32 @@ static int samsung_pll1431x_set_rate(struct clk_hw *hw, unsigned long drate,
 			   PLL36XX_PDIV_MASK) &&
 	    (s16)rate->kdiv == (s16)pll_con3 &&
 	    rate->sdiv == ((pll_con0 >> PLL36XX_SDIV_SHIFT) &
-			   PLL36XX_SDIV_MASK) && (pll_con0 & PLL1431X_MUX_SEL))
+			   PLL36XX_SDIV_MASK))
 		return 0;
+
+	enabled = pll_con0 & BIT(pll->enable_offs);
+	if (enabled) {
+		ret = samsung_pll1431x_stop(pll);
+		if (ret)
+			return ret;
+	}
 
 	/* PLL1431X stores its signed fractional divider in CON3, unlike 36XX. */
 	writel_relaxed(rate->pdiv * PLL36XX_LOCK_FACTOR, pll->lock_reg);
 	pll_con3 &= ~PLL36XX_KDIV_MASK;
 	pll_con3 |= rate->kdiv & PLL36XX_KDIV_MASK;
 	writel_relaxed(pll_con3, pll->con_reg + 0xc);
+	pll_con0 = readl_relaxed(pll->con_reg);
 	pll_con0 &= ~((PLL36XX_MDIV_MASK << PLL36XX_MDIV_SHIFT) |
 		      (PLL36XX_PDIV_MASK << PLL36XX_PDIV_SHIFT) |
 		      (PLL36XX_SDIV_MASK << PLL36XX_SDIV_SHIFT));
 	pll_con0 |= (rate->mdiv << PLL36XX_MDIV_SHIFT) |
 		    (rate->pdiv << PLL36XX_PDIV_SHIFT) |
-		    (rate->sdiv << PLL36XX_SDIV_SHIFT) | PLL1431X_MUX_SEL;
+		    (rate->sdiv << PLL36XX_SDIV_SHIFT);
 	writel_relaxed(pll_con0, pll->con_reg);
 
-	if (pll_con0 & BIT(pll->enable_offs))
-		return samsung_pll_lock_wait(pll, BIT(pll->lock_offs));
+	if (enabled)
+		return samsung_pll1431x_enable(hw);
 
 	return 0;
 }
@@ -488,8 +597,8 @@ static const struct clk_ops samsung_pll1431x_clk_ops = {
 	.recalc_rate = samsung_pll1431x_recalc_rate,
 	.set_rate = samsung_pll1431x_set_rate,
 	.round_rate = samsung_pll_round_rate,
-	.enable = samsung_pll3xxx_enable,
-	.disable = samsung_pll3xxx_disable,
+	.enable = samsung_pll1431x_enable,
+	.disable = samsung_pll1431x_disable,
 };
 
 /*
