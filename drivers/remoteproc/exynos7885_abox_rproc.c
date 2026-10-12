@@ -1337,6 +1337,61 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_set_enabled);
 
+/*
+ * Both UAIFs read SIFS1, so only one may run. Start the new output before
+ * stopping the old one: SIFS1 is then read twice for a few microseconds
+ * instead of stalling RDMA0, which keeps running throughout.
+ */
+int exynos7885_abox_uaif_switch(struct device *dev, unsigned int from,
+				unsigned int to)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_uaif *old, *new;
+	struct exynos7885_abox_rproc *abox;
+	u32 ctrl0;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+	abox = rproc->priv;
+	old = exynos7885_abox_get_uaif(abox, from);
+	new = exynos7885_abox_get_uaif(abox, to);
+	if (!old || !new || old == new)
+		return -EINVAL;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+
+	mutex_lock(&abox->uaif_lock);
+	if (!old->enabled || new->enabled) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+	ret = clk_prepare_enable(new->bclk);
+	if (ret)
+		goto out_unlock;
+	ret = clk_prepare_enable(new->sync);
+	if (ret) {
+		clk_disable_unprepare(new->bclk);
+		goto out_unlock;
+	}
+	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(to));
+	writel(ctrl0 | ABOX_UAIF_SPK_ENABLE, abox->sfr + ABOX_UAIF_CTRL0(to));
+	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(from));
+	writel(ctrl0 & ~ABOX_UAIF_SPK_ENABLE,
+	       abox->sfr + ABOX_UAIF_CTRL0(from));
+	/* Stop the old output before removing its clocks. */
+	wmb();
+	clk_disable_unprepare(old->sync);
+	clk_disable_unprepare(old->bclk);
+	new->enabled = true;
+	old->enabled = false;
+
+out_unlock:
+	mutex_unlock(&abox->uaif_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_switch);
+
 int exynos7885_abox_uaif3_set_enabled(struct device *dev, bool enable)
 {
 	return exynos7885_abox_uaif_set_enabled(dev, 3, enable);

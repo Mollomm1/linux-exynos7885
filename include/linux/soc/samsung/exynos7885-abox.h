@@ -71,6 +71,9 @@ int exynos7885_abox_uaif_hw_params(struct device *dev, unsigned int n,
 				   unsigned int channels);
 int exynos7885_abox_uaif_set_enabled(struct device *dev, unsigned int n,
 				     bool enable);
+/* Move a running stream from UAIF @from to UAIF @to, both configured. */
+int exynos7885_abox_uaif_switch(struct device *dev, unsigned int from,
+				unsigned int to);
 int exynos7885_abox_register_ipc_handler(struct device *dev,
 					 exynos7885_abox_ipc_handler_t handler,
 					 void *data);
