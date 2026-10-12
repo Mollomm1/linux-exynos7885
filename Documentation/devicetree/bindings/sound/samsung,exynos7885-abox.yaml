@@ -73,6 +73,17 @@ properties:
   iommus:
     maxItems: 1
 
+  samsung,bootargs:
+    $ref: /schemas/types.yaml#/definitions/string
+    description:
+      Option string the firmware reads from SRAM at boot. The SM-T510 passes
+      "init=ab0x vss=0"; without vss=0 the firmware writes to a modem voice
+      buffer that WiFi-only boards do not map.
+
+  samsung,bootargs-offset:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: SRAM offset of samsung,bootargs, past the firmware image.
+
   power-domains:
     maxItems: 1
     description: DISPAUD power domain containing the ABOX processor.
@@ -129,6 +140,9 @@ required:
   - clocks
   - clock-names
   - power-domains
+
+dependencies:
+  samsung,bootargs: [ "samsung,bootargs-offset" ]
 
 additionalProperties: false
 
