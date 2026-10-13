@@ -6,10 +6,13 @@
  * Common Clock Framework support for Exynos7885 SoC.
  */
 
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/init.h>
+#include <linux/iopoll.h>
 #include <linux/mod_devicetable.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/string.h>
 
@@ -1009,12 +1012,13 @@ static const unsigned long g3d_clk_regs[] __initconst = {
 	CLK_CON_DIV_DIV_CLK_G3D_BUSP,
 };
 
+/* GPU DVFS levels, with the P/M/S settings from the bootloader's ECT. */
 static const struct samsung_pll_rate_table g3d_pll_rates[] __initconst = {
-	PLL_35XX_RATE(26 * MHZ, 1196000000U, 138, 3, 0),
-	PLL_35XX_RATE(26 * MHZ, 949000000U, 146, 4, 0),
-	PLL_35XX_RATE(26 * MHZ, 747500000U, 115, 4, 0),
-	PLL_35XX_RATE(26 * MHZ, 550333333U, 127, 3, 1),
-	PLL_35XX_RATE(26 * MHZ, 301000000U, 301, 13, 1),
+	PLL_35XX_RATE(26 * MHZ, 845000000U, 130, 4, 0),
+	PLL_35XX_RATE(26 * MHZ, 676000000U, 104, 4, 0),
+	PLL_35XX_RATE(26 * MHZ, 545000000U, 545, 13, 1),
+	PLL_35XX_RATE(26 * MHZ, 450000000U, 450, 13, 1),
+	PLL_35XX_RATE(26 * MHZ, 343000000U, 343, 13, 1),
 };
 
 static const struct samsung_pll_clock g3d_pll_clks[] __initconst = {
@@ -1027,13 +1031,18 @@ PNAME(mout_g3d_switch_user_p)	= { "oscclk", "dout_g3d_switch" };
 PNAME(mout_g3d_busd_p)		= { "mout_g3d_pll", "mout_g3d_switch_user" };
 
 static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
-	MUX(CLK_MOUT_G3D_PLL, "mout_g3d_pll", mout_g3d_pll_p,
-	    PLL_CON0_PLL_G3D, 4, 1),
+	MUX_F(CLK_MOUT_G3D_PLL, "mout_g3d_pll", mout_g3d_pll_p,
+	      PLL_CON0_PLL_G3D, 4, 1,
+	      CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT, 0),
 	MUX(CLK_MOUT_G3D_SWITCH_USER, "mout_g3d_switch_user",
 	    mout_g3d_switch_user_p, PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER, 4, 1),
-	/* Clocks both the Mali core and the G3D data bus. */
-	MUX(CLK_MOUT_G3D_BUSD, "mout_g3d_busd", mout_g3d_busd_p,
-	    CLK_CON_MUX_MUX_CLK_G3D_BUSD, 0, 1),
+	/*
+	 * Clocks both the Mali core and the G3D data bus. GPU frequency
+	 * requests go to PLL_G3D; reparenting is left to the notifier below.
+	 */
+	MUX_F(CLK_MOUT_G3D_BUSD, "mout_g3d_busd", mout_g3d_busd_p,
+	      CLK_CON_MUX_MUX_CLK_G3D_BUSD, 0, 1,
+	      CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT, 0),
 };
 
 static const struct samsung_div_clock g3d_div_clks[] __initconst = {
@@ -1054,6 +1063,79 @@ static const struct samsung_cmu_info g3d_cmu_info __initconst = {
 	/* Keep the switching clock running while CMU_G3D is in use. */
 	.clk_name		= "dout_g3d_switch",
 };
+
+#define G3D_BUSD_SEL_SWITCH	BIT(0)
+#define G3D_MUX_BUSY		BIT(16)
+
+static void __iomem *g3d_busd_reg;
+static bool g3d_parked;
+
+static void exynos7885_g3d_busd_select(bool use_switch)
+{
+	u32 val = readl(g3d_busd_reg);
+
+	if (use_switch)
+		val |= G3D_BUSD_SEL_SWITCH;
+	else
+		val &= ~G3D_BUSD_SEL_SWITCH;
+	writel(val, g3d_busd_reg);
+
+	if (readl_poll_timeout_atomic(g3d_busd_reg, val,
+				      !(val & G3D_MUX_BUSY), 1, 100))
+		pr_warn("exynos7885: G3D BUSD mux stays busy\n");
+}
+
+/*
+ * Retuning PLL_G3D leaves its output unstable until it locks again, so run
+ * the GPU from the CMU_TOP switching clock (about 400 MHz) meanwhile, as the
+ * vendor DVFS does. The supply voltage is at least the lower of the two
+ * levels' voltages, which covers 400 MHz.
+ */
+static int exynos7885_g3d_pll_notifier(struct notifier_block *nb,
+				       unsigned long event, void *data)
+{
+	switch (event) {
+	case PRE_RATE_CHANGE:
+		g3d_parked = !(readl(g3d_busd_reg) & G3D_BUSD_SEL_SWITCH);
+		if (g3d_parked)
+			exynos7885_g3d_busd_select(true);
+		break;
+	case POST_RATE_CHANGE:
+	case ABORT_RATE_CHANGE:
+		if (g3d_parked)
+			exynos7885_g3d_busd_select(false);
+		g3d_parked = false;
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block exynos7885_g3d_pll_nb = {
+	.notifier_call = exynos7885_g3d_pll_notifier,
+};
+
+static int exynos7885_g3d_register_notifier(struct device *dev)
+{
+	struct of_phandle_args args = {
+		.np = dev->of_node,
+		.args_count = 1,
+		.args = { CLK_FOUT_G3D_PLL },
+	};
+	struct clk *pll;
+
+	/* Mapped like the CMU registers themselves, for the driver's lifetime. */
+	g3d_busd_reg = of_iomap(dev->of_node, 0);
+	if (!g3d_busd_reg)
+		return -ENOMEM;
+	g3d_busd_reg += CLK_CON_MUX_MUX_CLK_G3D_BUSD;
+
+	pll = of_clk_get_from_provider(&args);
+	if (IS_ERR(pll))
+		return PTR_ERR(pll);
+
+	return clk_notifier_register(pll, &exynos7885_g3d_pll_nb);
+}
 
 static int __init exynos7885_dispaud_setup(char *str)
 {
@@ -1078,6 +1160,9 @@ static int __init exynos7885_cmu_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	exynos_arm64_register_cmu(dev, dev->of_node, info);
+
+	if (info == &g3d_cmu_info)
+		return exynos7885_g3d_register_notifier(dev);
 
 	return 0;
 }
