@@ -387,6 +387,39 @@
 			interrupt-names = "frame-start";
 			power-domains = <&pd_dispaud>;
 			status = "disabled";
+
+			port {
+				dpu_out: endpoint {
+					remote-endpoint = <&dsi_in>;
+				};
+			};
+		};
+
+		dsi: dsi@14870000 {
+			compatible = "samsung,exynos7885-dsim";
+			reg = <0x14870000 0x100>;
+			interrupts = <GIC_SPI 125 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&pd_dispaud>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					dsi_in: endpoint {
+						remote-endpoint = <&dpu_out>;
+					};
+				};
+
+				dsi_out_port: port@1 {
+					reg = <1>;
+				};
+			};
 		};
 
 		sysmmu_abox: iommu@14a30000 {
