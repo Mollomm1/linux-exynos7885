@@ -50,9 +50,38 @@ static struct file			s_file;
 static struct platform_device *slsi_btz_pdev;
 static struct rfkill *btz_rfkill;
 
+/* HCI error: Different Transaction Collision */
+#define SCSC_BT_ERR_DIFF_TRANSACTION_COLLISION	0x2a
+
+/*
+ * When a remote requests a role switch on an E0-encrypted link, the firmware
+ * pauses and resumes encryption and then reports Encryption Change with
+ * "Different Transaction Collision" while the link is still encrypted,
+ * followed by a successful Encryption Key Refresh Complete. The core treats
+ * any error status here as an encryption failure and disconnects, which
+ * drops A2DP headsets right after the stream opens. Report that event as
+ * the success it is; other errors still disconnect.
+ */
+static int scsc_bt_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct hci_event_hdr *hdr = (void *)skb->data;
+	struct hci_ev_encrypt_change *ev;
+
+	if (skb->len == HCI_EVENT_HDR_SIZE + sizeof(*ev) &&
+	    hdr->evt == HCI_EV_ENCRYPT_CHANGE) {
+		ev = (void *)(skb->data + HCI_EVENT_HDR_SIZE);
+		if (ev->status == SCSC_BT_ERR_DIFF_TRANSACTION_COLLISION &&
+		    ev->encrypt) {
+			bt_dev_info(hdev, "encryption still on after a transaction collision; treating it as success");
+			ev->status = 0;
+		}
+	}
+	return hci_recv_frame(hdev, skb);
+}
+
 static const struct h4_recv_pkt scsc_recv_pkts[] = {
 	{ H4_RECV_ACL,   .recv = hci_recv_frame },
-	{ H4_RECV_EVENT, .recv = hci_recv_frame },
+	{ H4_RECV_EVENT, .recv = scsc_bt_recv_event },
 };
 
 static void slsi_bt_fs_read_func(struct work_struct *work)
