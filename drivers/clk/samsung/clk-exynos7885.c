@@ -28,6 +28,7 @@
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
 #define CLKS_NR_DISPAUD			(CLK_GOUT_UAIF0_SYNC + 1)
 #define CLKS_NR_G3D			(CLK_DOUT_G3D_BUSP + 1)
+#define CLKS_NR_CPUCL			(CLK_DOUT_CPUCL_CPU + 1)
 
 static bool exynos7885_enable_dispaud;
 
@@ -1137,6 +1138,185 @@ static int exynos7885_g3d_register_notifier(struct device *dev)
 	return clk_notifier_register(pll, &exynos7885_g3d_pll_nb);
 }
 
+/* ---- CMU_CPUCL0 (A73), CMU_CPUCL1, CMU_CPUCL2 (A53) ------------------------ */
+
+#define PLL_LOCKTIME_PLL_CPUCL			0x0000
+#define PLL_CON0_PLL_CPUCL0			0x0140
+#define PLL_CON0_MUX_CLKCMU_CPUCL0_SWITCH_USER	0x0120
+#define PLL_CON0_PLL_CPUCL12			0x0120
+#define PLL_CON0_MUX_CLKCMU_CPUCL12_SWITCH_USER	0x0100
+#define CLK_CON_MUX_MUX_CLK_CPUCL_PLL		0x1000
+#define CLK_CON_DIV_DIV_CLK_CPUCL_CPU		0x1810
+
+/*
+ * Only PLL, mux and divider registers are listed, so probing writes
+ * nothing. The ACLK/ATCLK/PCLK dividers keep the bootloader's ratios: the
+ * vendor DVFS tables change only the PLL between levels.
+ */
+static const unsigned long cpucl0_clk_regs[] __initconst = {
+	PLL_LOCKTIME_PLL_CPUCL,
+	PLL_CON0_PLL_CPUCL0,
+	PLL_CON0_MUX_CLKCMU_CPUCL0_SWITCH_USER,
+	CLK_CON_MUX_MUX_CLK_CPUCL_PLL,
+	CLK_CON_DIV_DIV_CLK_CPUCL_CPU,
+};
+
+static const unsigned long cpucl12_clk_regs[] __initconst = {
+	PLL_LOCKTIME_PLL_CPUCL,
+	PLL_CON0_PLL_CPUCL12,
+	PLL_CON0_MUX_CLKCMU_CPUCL12_SWITCH_USER,
+	CLK_CON_MUX_MUX_CLK_CPUCL_PLL,
+	CLK_CON_DIV_DIV_CLK_CPUCL_CPU,
+};
+
+/* Levels from the bootloader's ECT PLL tables. */
+static const struct samsung_pll_rate_table cpucl0_pll_rates[] __initconst = {
+	PLL_35XX_RATE(26 * MHZ, 1768000000U, 204, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1664000000U, 192, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1560000000U, 180, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1352000000U, 156, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1144000000U, 132, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 936000000U, 216, 3, 1),
+};
+
+static const struct samsung_pll_rate_table cpucl12_pll_rates[] __initconst = {
+	PLL_35XX_RATE(26 * MHZ, 1482000000U, 171, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1352000000U, 156, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1248000000U, 144, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1144000000U, 132, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 1014000000U, 117, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 676000000U, 156, 3, 1),
+	PLL_35XX_RATE(26 * MHZ, 546000000U, 126, 3, 1),
+};
+
+#define CPUCL_CLKS(n, pll_con0, switch_user, rates)			\
+static const struct samsung_pll_clock cpucl##n##_pll_clks[] __initconst = { \
+	PLL(pll_1417x, CLK_FOUT_CPUCL_PLL, "fout_cpucl" #n "_pll", "oscclk", \
+	    PLL_LOCKTIME_PLL_CPUCL, pll_con0, rates),			\
+};									\
+PNAME(mout_cpucl##n##_pll_p) = { "oscclk", "fout_cpucl" #n "_pll" };	\
+PNAME(mout_cpucl##n##_switch_user_p) = { "oscclk",			\
+					  "dout_cpucl" #n "_switch" };	\
+PNAME(mout_cpucl##n##_cpu_p) = { "mout_cpucl" #n "_pll",		\
+				  "mout_cpucl" #n "_switch_user" };	\
+static const struct samsung_mux_clock cpucl##n##_mux_clks[] __initconst = { \
+	MUX_F(CLK_MOUT_CPUCL_PLL, "mout_cpucl" #n "_pll",		\
+	      mout_cpucl##n##_pll_p, pll_con0, 4, 1,			\
+	      CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT, 0),	\
+	MUX(CLK_MOUT_CPUCL_SWITCH_USER, "mout_cpucl" #n "_switch_user",	\
+	    mout_cpucl##n##_switch_user_p, switch_user, 4, 1),		\
+	MUX_F(CLK_MOUT_CPUCL_CPU, "mout_cpucl" #n "_cpu",		\
+	      mout_cpucl##n##_cpu_p, CLK_CON_MUX_MUX_CLK_CPUCL_PLL, 0, 1, \
+	      CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT, 0),	\
+};									\
+static const struct samsung_div_clock cpucl##n##_div_clks[] __initconst = { \
+	DIV_F(CLK_DOUT_CPUCL_CPU, "dout_cpucl" #n "_cpu",		\
+	      "mout_cpucl" #n "_cpu", CLK_CON_DIV_DIV_CLK_CPUCL_CPU, 0, 3, \
+	      CLK_SET_RATE_PARENT | CLK_IS_CRITICAL, 0),		\
+}
+
+CPUCL_CLKS(0, PLL_CON0_PLL_CPUCL0, PLL_CON0_MUX_CLKCMU_CPUCL0_SWITCH_USER,
+	   cpucl0_pll_rates);
+CPUCL_CLKS(1, PLL_CON0_PLL_CPUCL12, PLL_CON0_MUX_CLKCMU_CPUCL12_SWITCH_USER,
+	   cpucl12_pll_rates);
+CPUCL_CLKS(2, PLL_CON0_PLL_CPUCL12, PLL_CON0_MUX_CLKCMU_CPUCL12_SWITCH_USER,
+	   cpucl12_pll_rates);
+
+#define CPUCL_CMU_INFO(n, regs)						\
+static const struct samsung_cmu_info cpucl##n##_cmu_info __initconst = { \
+	.pll_clks		= cpucl##n##_pll_clks,			\
+	.nr_pll_clks		= ARRAY_SIZE(cpucl##n##_pll_clks),	\
+	.mux_clks		= cpucl##n##_mux_clks,			\
+	.nr_mux_clks		= ARRAY_SIZE(cpucl##n##_mux_clks),	\
+	.div_clks		= cpucl##n##_div_clks,			\
+	.nr_div_clks		= ARRAY_SIZE(cpucl##n##_div_clks),	\
+	.nr_clk_ids		= CLKS_NR_CPUCL,			\
+	.clk_regs		= regs,					\
+	.nr_clk_regs		= ARRAY_SIZE(regs),			\
+}
+
+CPUCL_CMU_INFO(0, cpucl0_clk_regs);
+CPUCL_CMU_INFO(1, cpucl12_clk_regs);
+CPUCL_CMU_INFO(2, cpucl12_clk_regs);
+
+#define CPUCL_MUX_SEL_SWITCH	BIT(0)
+#define CPUCL_MUX_BUSY		BIT(16)
+
+struct exynos7885_cpucl_park {
+	struct notifier_block nb;
+	void __iomem *mux_reg;
+	bool parked;
+};
+
+static struct exynos7885_cpucl_park exynos7885_cpucl_park[3];
+
+static void exynos7885_cpucl_mux_select(void __iomem *reg, bool use_switch)
+{
+	u32 val = readl(reg);
+
+	if (use_switch)
+		val |= CPUCL_MUX_SEL_SWITCH;
+	else
+		val &= ~CPUCL_MUX_SEL_SWITCH;
+	writel(val, reg);
+
+	if (readl_poll_timeout_atomic(reg, val, !(val & CPUCL_MUX_BUSY), 1, 100))
+		pr_warn("exynos7885: CPU cluster mux stays busy\n");
+}
+
+/*
+ * A cluster PLL's output is unstable until it relocks, so run the cluster
+ * from its switch-user clock (the 26 MHz oscillator as the bootloader sets
+ * that mux) while the PLL is retuned.
+ */
+static int exynos7885_cpucl_pll_notifier(struct notifier_block *nb,
+					 unsigned long event, void *data)
+{
+	struct exynos7885_cpucl_park *park =
+		container_of(nb, struct exynos7885_cpucl_park, nb);
+
+	switch (event) {
+	case PRE_RATE_CHANGE:
+		park->parked = !(readl(park->mux_reg) & CPUCL_MUX_SEL_SWITCH);
+		if (park->parked)
+			exynos7885_cpucl_mux_select(park->mux_reg, true);
+		break;
+	case POST_RATE_CHANGE:
+	case ABORT_RATE_CHANGE:
+		if (park->parked)
+			exynos7885_cpucl_mux_select(park->mux_reg, false);
+		park->parked = false;
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static int exynos7885_cpucl_register_notifier(struct device *dev,
+					      unsigned int cluster)
+{
+	struct exynos7885_cpucl_park *park = &exynos7885_cpucl_park[cluster];
+	struct of_phandle_args args = {
+		.np = dev->of_node,
+		.args_count = 1,
+		.args = { CLK_FOUT_CPUCL_PLL },
+	};
+	void __iomem *base;
+	struct clk *pll;
+
+	base = of_iomap(dev->of_node, 0);
+	if (!base)
+		return -ENOMEM;
+	park->mux_reg = base + CLK_CON_MUX_MUX_CLK_CPUCL_PLL;
+	park->nb.notifier_call = exynos7885_cpucl_pll_notifier;
+
+	pll = of_clk_get_from_provider(&args);
+	if (IS_ERR(pll))
+		return PTR_ERR(pll);
+
+	return clk_notifier_register(pll, &park->nb);
+}
+
 static int __init exynos7885_dispaud_setup(char *str)
 {
 	if (!str || strcmp(str, "1"))
@@ -1163,6 +1343,12 @@ static int __init exynos7885_cmu_probe(struct platform_device *pdev)
 
 	if (info == &g3d_cmu_info)
 		return exynos7885_g3d_register_notifier(dev);
+	if (info == &cpucl0_cmu_info)
+		return exynos7885_cpucl_register_notifier(dev, 0);
+	if (info == &cpucl1_cmu_info)
+		return exynos7885_cpucl_register_notifier(dev, 1);
+	if (info == &cpucl2_cmu_info)
+		return exynos7885_cpucl_register_notifier(dev, 2);
 
 	return 0;
 }
@@ -1180,6 +1366,15 @@ static const struct of_device_id exynos7885_cmu_of_match[] = {
 	}, {
 		.compatible = "samsung,exynos7885-cmu-g3d",
 		.data = &g3d_cmu_info,
+	}, {
+		.compatible = "samsung,exynos7885-cmu-cpucl0",
+		.data = &cpucl0_cmu_info,
+	}, {
+		.compatible = "samsung,exynos7885-cmu-cpucl1",
+		.data = &cpucl1_cmu_info,
+	}, {
+		.compatible = "samsung,exynos7885-cmu-cpucl2",
+		.data = &cpucl2_cmu_info,
 	}, {
 	},
 };
