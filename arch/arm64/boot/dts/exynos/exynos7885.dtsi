@@ -379,6 +379,16 @@
 			status = "disabled";
 		};
 
+		dpu: display-controller@14860000 {
+			compatible = "samsung,exynos7885-dpu";
+			reg = <0x14860000 0x10000>, <0x148b1000 0x1000>;
+			reg-names = "decon", "idma-g0";
+			interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "frame-start";
+			power-domains = <&pd_dispaud>;
+			status = "disabled";
+		};
+
 		sysmmu_abox: iommu@14a30000 {
 			compatible = "samsung,exynos7885-abox-sysmmu",
 				     "samsung,exynos-sysmmu";
