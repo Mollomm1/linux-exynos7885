@@ -724,6 +724,8 @@ static const struct clk_ops samsung_pll0822x_clk_min_ops = {
 #define PLL1417X_MUX_SEL		BIT(4)
 #define PLL1417X_MUX_BUSY		BIT(7)
 #define PLL1417X_MUX_TIMEOUT_US		100
+#define PLL1417X_LOCK_TIMEOUT_US	1000
+#define PLL1417X_LOCK_ATTEMPTS		5
 
 static int samsung_pll1417x_mux_write(struct samsung_clk_pll *pll, u32 con)
 {
@@ -745,7 +747,8 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 {
 	const struct samsung_pll_rate_table *rate;
 	struct samsung_clk_pll *pll = to_clk_pll(hw);
-	u32 con;
+	unsigned int attempt;
+	u32 con, cur, val;
 	int ret;
 
 	con = readl_relaxed(pll->con_reg);
@@ -759,28 +762,44 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 		return -EINVAL;
 	}
 
-	con &= ~PLL1417X_MUX_SEL;
-	ret = samsung_pll1417x_mux_write(pll, con);
-	if (ret)
-		return ret;
-
-	con &= ~BIT(pll->enable_offs);
-	writel_relaxed(con, pll->con_reg);
-
 	con &= ~((PLL0822X_MDIV_MASK << PLL0822X_MDIV_SHIFT) |
 		 (PLL0822X_PDIV_MASK << PLL0822X_PDIV_SHIFT) |
-		 (PLL0822X_SDIV_MASK << PLL0822X_SDIV_SHIFT));
+		 (PLL0822X_SDIV_MASK << PLL0822X_SDIV_SHIFT) |
+		 PLL1417X_MUX_SEL | BIT(pll->enable_offs));
 	con |= (rate->mdiv << PLL0822X_MDIV_SHIFT) |
 	       (rate->pdiv << PLL0822X_PDIV_SHIFT) |
 	       (rate->sdiv << PLL0822X_SDIV_SHIFT);
 
 	writel_relaxed(rate->pdiv * PLL0822X_LOCK_FACTOR, pll->lock_reg);
-	writel_relaxed(con | BIT(pll->enable_offs) | PLL1417X_MUX_SEL,
-		       pll->con_reg);
 
-	ret = samsung_pll_lock_wait(pll, BIT(pll->lock_offs));
-	if (ret)
-		samsung_pll1417x_mux_write(pll, con | BIT(pll->enable_offs));
+	/*
+	 * About one restart in a hundred never locks, while the next one
+	 * normally does: retry instead of waiting out a long timeout.
+	 */
+	for (attempt = 1; attempt <= PLL1417X_LOCK_ATTEMPTS; attempt++) {
+		cur = readl_relaxed(pll->con_reg) & ~PLL1417X_MUX_SEL;
+		ret = samsung_pll1417x_mux_write(pll, cur);
+		if (ret)
+			return ret;
+
+		writel_relaxed(cur & ~BIT(pll->enable_offs), pll->con_reg);
+		writel_relaxed(con | BIT(pll->enable_offs) | PLL1417X_MUX_SEL,
+			       pll->con_reg);
+
+		ret = readl_relaxed_poll_timeout_atomic(pll->con_reg, val,
+					val & BIT(pll->lock_offs), 1,
+					PLL1417X_LOCK_TIMEOUT_US);
+		if (!ret) {
+			if (attempt > 1)
+				pr_info_ratelimited("%s: locked on attempt %u\n",
+						    clk_hw_get_name(hw),
+						    attempt);
+			return 0;
+		}
+	}
+
+	pr_err("Could not lock PLL %s\n", clk_hw_get_name(hw));
+	samsung_pll1417x_mux_write(pll, con | BIT(pll->enable_offs));
 
 	return ret;
 }
