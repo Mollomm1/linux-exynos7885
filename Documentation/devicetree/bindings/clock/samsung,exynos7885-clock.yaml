@@ -37,6 +37,9 @@ properties:
       - samsung,exynos7885-cmu-peri
       - samsung,exynos7885-cmu-dispaud
       - samsung,exynos7885-cmu-g3d
+      - samsung,exynos7885-cmu-cpucl0
+      - samsung,exynos7885-cmu-cpucl1
+      - samsung,exynos7885-cmu-cpucl2
 
   clocks:
     minItems: 1
@@ -98,6 +101,25 @@ allOf:
           items:
             - const: oscclk
             - const: dout_g3d_switch
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - samsung,exynos7885-cmu-cpucl0
+              - samsung,exynos7885-cmu-cpucl1
+              - samsung,exynos7885-cmu-cpucl2
+
+    then:
+      properties:
+        clocks:
+          items:
+            - description: External reference clock (26 MHz)
+
+        clock-names:
+          items:
+            - const: oscclk
 
   - if:
       properties:
