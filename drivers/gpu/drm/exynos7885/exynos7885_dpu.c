@@ -6,8 +6,9 @@
  * mode, scanning out its framebuffer through window 3 and IDMA_G0. This
  * driver takes that pipeline over: it moves the IDMA_G0 fetch address to
  * DRM framebuffers and latches each change at frame start through the DECON
- * shadow registers, so page flips are tear-free. The DSI host, the panel,
- * clocks and power are left as the bootloader set them.
+ * shadow registers, so page flips are tear-free. The DSI host and the panel
+ * are reached through the DRM bridge chain; clocks and power are left as the
+ * bootloader set them.
  */
 
 #include <linux/aperture.h>
@@ -23,6 +24,8 @@
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_bridge.h>
+#include <drm/drm_bridge_connector.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_drv.h>
@@ -32,6 +35,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_modes.h>
+#include <drm/drm_of.h>
 #include <drm/drm_plane.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
@@ -78,9 +82,8 @@ struct exynos7885_dpu {
 	struct drm_plane plane;
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
-	struct drm_connector connector;
+	struct drm_bridge *bridge;
 	struct drm_display_mode mode;
-	u32 width_mm, height_mm;
 
 	void __iomem *decon;
 	void __iomem *idma;
@@ -380,35 +383,6 @@ static irqreturn_t dpu_frame_start_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static int dpu_connector_get_modes(struct drm_connector *connector)
-{
-	struct exynos7885_dpu *dpu = to_dpu(connector->dev);
-	struct drm_display_mode *mode;
-
-	mode = drm_mode_duplicate(connector->dev, &dpu->mode);
-	if (!mode)
-		return 0;
-
-	mode->type |= DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
-	drm_mode_probed_add(connector, mode);
-	connector->display_info.width_mm = dpu->width_mm;
-	connector->display_info.height_mm = dpu->height_mm;
-
-	return 1;
-}
-
-static const struct drm_connector_helper_funcs dpu_connector_helper_funcs = {
-	.get_modes = dpu_connector_get_modes,
-};
-
-static const struct drm_connector_funcs dpu_connector_funcs = {
-	.fill_modes = drm_helper_probe_single_connector_modes,
-	.destroy = drm_connector_cleanup,
-	.reset = drm_atomic_helper_connector_reset,
-	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
-	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
-};
-
 /*
  * Enable the CRTC (and with it vblank) before committing planes, so the
  * flush can arm its event. Release the old framebuffers only after
@@ -454,6 +428,7 @@ static const struct drm_driver dpu_driver = {
 static int dpu_kms_init(struct exynos7885_dpu *dpu)
 {
 	struct drm_device *drm = &dpu->drm;
+	struct drm_connector *connector;
 	int ret;
 
 	ret = drmm_mode_config_init(drm);
@@ -487,14 +462,16 @@ static int dpu_kms_init(struct exynos7885_dpu *dpu)
 		return ret;
 	dpu->encoder.possible_crtcs = drm_crtc_mask(&dpu->crtc);
 
-	ret = drm_connector_init(drm, &dpu->connector, &dpu_connector_funcs,
-				 DRM_MODE_CONNECTOR_DSI);
+	ret = drm_bridge_attach(&dpu->encoder, dpu->bridge, NULL,
+				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 	if (ret)
 		return ret;
-	drm_connector_helper_add(&dpu->connector, &dpu_connector_helper_funcs);
-	dpu->connector.status = connector_status_connected;
 
-	ret = drm_connector_attach_encoder(&dpu->connector, &dpu->encoder);
+	connector = drm_bridge_connector_init(drm, &dpu->encoder);
+	if (IS_ERR(connector))
+		return PTR_ERR(connector);
+
+	ret = drm_connector_attach_encoder(connector, &dpu->encoder);
 	if (ret)
 		return ret;
 
@@ -559,8 +536,12 @@ static int dpu_probe(struct platform_device *pdev)
 	ret = of_get_drm_panel_display_mode(np, &dpu->mode, NULL);
 	if (ret)
 		return dev_err_probe(dev, ret, "invalid panel-timing\n");
-	of_property_read_u32(np, "width-mm", &dpu->width_mm);
-	of_property_read_u32(np, "height-mm", &dpu->height_mm);
+
+	/* The DSI host bridge appears once the panel attached to it. */
+	dpu->bridge = devm_drm_of_get_bridge(dev, np, 0, 0);
+	if (IS_ERR(dpu->bridge))
+		return dev_err_probe(dev, PTR_ERR(dpu->bridge),
+				     "failed to get the DSI bridge\n");
 
 	/* IDMA base address registers are 32 bits wide. */
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
