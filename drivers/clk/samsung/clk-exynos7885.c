@@ -19,11 +19,12 @@
 #include "clk-exynos-arm64.h"
 
 /* NOTE: Must be equal to the last clock ID increased by one */
-#define CLKS_NR_TOP			(CLK_DOUT_DISPAUD_CPU + 1)
+#define CLKS_NR_TOP			(CLK_DOUT_G3D_SWITCH + 1)
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
 #define CLKS_NR_DISPAUD			(CLK_GOUT_UAIF0_SYNC + 1)
+#define CLKS_NR_G3D			(CLK_DOUT_G3D_BUSP + 1)
 
 static bool exynos7885_enable_dispaud;
 
@@ -61,6 +62,7 @@ static bool exynos7885_enable_dispaud;
 #define CLK_CON_DIV_CLKCMU_FSYS_MMC_EMBD	0x184c
 #define CLK_CON_DIV_CLKCMU_FSYS_MMC_SDIO	0x1850
 #define CLK_CON_DIV_CLKCMU_FSYS_USB30DRD	0x1854
+#define CLK_CON_DIV_CLKCMU_G3D_SWITCH		0x1858
 #define CLK_CON_DIV_CLKCMU_PERI_BUS		0x1874
 #define CLK_CON_DIV_CLKCMU_PERI_SPI0		0x1878
 #define CLK_CON_DIV_CLKCMU_PERI_SPI1		0x187c
@@ -87,6 +89,7 @@ static bool exynos7885_enable_dispaud;
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_MMC_EMBD	0x204c
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_MMC_SDIO	0x2050
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_USB30DRD	0x2054
+#define CLK_CON_GAT_GATE_CLKCMU_G3D_SWITCH	0x2058
 #define CLK_CON_GAT_GATE_CLKCMU_PERI_BUS	0x207c
 #define CLK_CON_GAT_GATE_CLKCMU_PERI_SPI0	0x2080
 #define CLK_CON_GAT_GATE_CLKCMU_PERI_SPI1	0x2084
@@ -128,6 +131,7 @@ static const unsigned long top_clk_regs[] __initconst = {
 	CLK_CON_DIV_CLKCMU_FSYS_MMC_EMBD,
 	CLK_CON_DIV_CLKCMU_FSYS_MMC_SDIO,
 	CLK_CON_DIV_CLKCMU_FSYS_USB30DRD,
+	CLK_CON_DIV_CLKCMU_G3D_SWITCH,
 	CLK_CON_DIV_CLKCMU_PERI_BUS,
 	CLK_CON_DIV_CLKCMU_PERI_SPI0,
 	CLK_CON_DIV_CLKCMU_PERI_SPI1,
@@ -271,6 +275,8 @@ static const struct samsung_div_clock top_div_clks[] __initconst = {
 	    CLK_CON_DIV_PLL_SHARED1_DIV4, 0, 1),
 	DIV(CLK_DOUT_DISPAUD_CPU, "dout_dispaud_cpu", "gout_dispaud_cpu",
 	    CLK_CON_DIV_CLKCMU_DISPAUD_CPU, 0, 3),
+	DIV(CLK_DOUT_G3D_SWITCH, "dout_g3d_switch", "gout_g3d_switch",
+	    CLK_CON_DIV_CLKCMU_G3D_SWITCH, 0, 3),
 
 	/* CORE */
 	DIV(CLK_DOUT_CORE_BUS, "dout_core_bus", "gout_core_bus",
@@ -317,6 +323,12 @@ static const struct samsung_gate_clock top_gate_clks[] __initconst = {
 	/* The audio branch is untouched until exynos7885.dispaud=1 is used. */
 	GATE(CLK_GOUT_DISPAUD_CPU, "gout_dispaud_cpu", "mout_dispaud_cpu",
 	     CLK_CON_GAT_GATE_CLKCMU_DISPAUD_VCLK, 21, CLK_IGNORE_UNUSED, 0),
+	/*
+	 * Left out of top_clk_regs, so it keeps the hardware auto-gating mode
+	 * the bootloader set. It feeds CMU_G3D, which keeps it enabled.
+	 */
+	GATE(CLK_GOUT_G3D_SWITCH, "gout_g3d_switch", "dout_shared0_div2",
+	     CLK_CON_GAT_GATE_CLKCMU_G3D_SWITCH, 21, 0, 0),
 	/* CORE */
 	GATE(CLK_GOUT_CORE_BUS, "gout_core_bus", "mout_core_bus",
 	     CLK_CON_GAT_GATE_CLKCMU_CORE_BUS, 21, 0, 0),
@@ -976,6 +988,73 @@ static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
 	.clk_name		= "oscclk",
 };
 
+/* ---- CMU_G3D ------------------------------------------------------------- */
+
+/* Register Offset definitions for CMU_G3D (0x11400000) */
+#define PLL_LOCKTIME_PLL_G3D			0x0000
+#define PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER	0x0100
+#define PLL_CON0_PLL_G3D			0x0120
+#define CLK_CON_MUX_MUX_CLK_G3D_BUSD		0x1004
+#define CLK_CON_DIV_DIV_CLK_G3D_BUSP		0x1800
+
+/*
+ * Only PLL, mux and divider registers are listed: CMU_G3D gates keep the
+ * hardware auto-gating mode the bootloader set, so probing writes nothing.
+ */
+static const unsigned long g3d_clk_regs[] __initconst = {
+	PLL_LOCKTIME_PLL_G3D,
+	PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER,
+	PLL_CON0_PLL_G3D,
+	CLK_CON_MUX_MUX_CLK_G3D_BUSD,
+	CLK_CON_DIV_DIV_CLK_G3D_BUSP,
+};
+
+static const struct samsung_pll_rate_table g3d_pll_rates[] __initconst = {
+	PLL_35XX_RATE(26 * MHZ, 1196000000U, 138, 3, 0),
+	PLL_35XX_RATE(26 * MHZ, 949000000U, 146, 4, 0),
+	PLL_35XX_RATE(26 * MHZ, 747500000U, 115, 4, 0),
+	PLL_35XX_RATE(26 * MHZ, 550333333U, 127, 3, 1),
+	PLL_35XX_RATE(26 * MHZ, 301000000U, 301, 13, 1),
+};
+
+static const struct samsung_pll_clock g3d_pll_clks[] __initconst = {
+	PLL(pll_1417x, CLK_FOUT_G3D_PLL, "fout_g3d_pll", "oscclk",
+	    PLL_LOCKTIME_PLL_G3D, PLL_CON0_PLL_G3D, g3d_pll_rates),
+};
+
+PNAME(mout_g3d_pll_p)		= { "oscclk", "fout_g3d_pll" };
+PNAME(mout_g3d_switch_user_p)	= { "oscclk", "dout_g3d_switch" };
+PNAME(mout_g3d_busd_p)		= { "mout_g3d_pll", "mout_g3d_switch_user" };
+
+static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_G3D_PLL, "mout_g3d_pll", mout_g3d_pll_p,
+	    PLL_CON0_PLL_G3D, 4, 1),
+	MUX(CLK_MOUT_G3D_SWITCH_USER, "mout_g3d_switch_user",
+	    mout_g3d_switch_user_p, PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER, 4, 1),
+	/* Clocks both the Mali core and the G3D data bus. */
+	MUX(CLK_MOUT_G3D_BUSD, "mout_g3d_busd", mout_g3d_busd_p,
+	    CLK_CON_MUX_MUX_CLK_G3D_BUSD, 0, 1),
+};
+
+static const struct samsung_div_clock g3d_div_clks[] __initconst = {
+	DIV(CLK_DOUT_G3D_BUSP, "dout_g3d_busp", "mout_g3d_busd",
+	    CLK_CON_DIV_DIV_CLK_G3D_BUSP, 0, 3),
+};
+
+static const struct samsung_cmu_info g3d_cmu_info __initconst = {
+	.pll_clks		= g3d_pll_clks,
+	.nr_pll_clks		= ARRAY_SIZE(g3d_pll_clks),
+	.mux_clks		= g3d_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(g3d_mux_clks),
+	.div_clks		= g3d_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(g3d_div_clks),
+	.nr_clk_ids		= CLKS_NR_G3D,
+	.clk_regs		= g3d_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(g3d_clk_regs),
+	/* Keep the switching clock running while CMU_G3D is in use. */
+	.clk_name		= "dout_g3d_switch",
+};
+
 static int __init exynos7885_dispaud_setup(char *str)
 {
 	if (!str || strcmp(str, "1"))
@@ -1013,6 +1092,9 @@ static const struct of_device_id exynos7885_cmu_of_match[] = {
 	}, {
 		.compatible = "samsung,exynos7885-cmu-dispaud",
 		.data = &dispaud_cmu_info,
+	}, {
+		.compatible = "samsung,exynos7885-cmu-g3d",
+		.data = &g3d_cmu_info,
 	}, {
 	},
 };
