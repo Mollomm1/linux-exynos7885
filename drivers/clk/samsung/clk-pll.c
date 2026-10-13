@@ -712,6 +712,87 @@ static const struct clk_ops samsung_pll0822x_clk_min_ops = {
 };
 
 /*
+ * PLL1417x Clock Type
+ *
+ * A running PLL1417x does not always relock after its dividers change.
+ * As the vendor driver does, switch its output mux to the oscillator,
+ * stop the PLL and restart it with the new dividers. The output only
+ * returns to the PLL once it has locked.
+ */
+#define PLL1417X_MUX_SEL		BIT(4)
+#define PLL1417X_MUX_BUSY		BIT(7)
+#define PLL1417X_MUX_TIMEOUT_US		100
+
+static int samsung_pll1417x_mux_write(struct samsung_clk_pll *pll, u32 con)
+{
+	u32 val;
+	int ret;
+
+	writel_relaxed(con, pll->con_reg);
+	ret = readl_relaxed_poll_timeout_atomic(pll->con_reg, val,
+					!(val & PLL1417X_MUX_BUSY), 1,
+					PLL1417X_MUX_TIMEOUT_US);
+	if (ret)
+		pr_err("%s: output mux stays busy\n", clk_hw_get_name(&pll->hw));
+
+	return ret;
+}
+
+static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
+				     unsigned long prate)
+{
+	const struct samsung_pll_rate_table *rate;
+	struct samsung_clk_pll *pll = to_clk_pll(hw);
+	u32 con;
+	int ret;
+
+	con = readl_relaxed(pll->con_reg);
+	if (!(con & BIT(pll->enable_offs)))
+		return samsung_pll0822x_set_rate(hw, drate, prate);
+
+	rate = samsung_get_pll_settings(pll, drate);
+	if (!rate) {
+		pr_err("%s: Invalid rate : %lu for pll clk %s\n", __func__,
+			drate, clk_hw_get_name(hw));
+		return -EINVAL;
+	}
+
+	con &= ~PLL1417X_MUX_SEL;
+	ret = samsung_pll1417x_mux_write(pll, con);
+	if (ret)
+		return ret;
+
+	con &= ~BIT(pll->enable_offs);
+	writel_relaxed(con, pll->con_reg);
+
+	con &= ~((PLL0822X_MDIV_MASK << PLL0822X_MDIV_SHIFT) |
+		 (PLL0822X_PDIV_MASK << PLL0822X_PDIV_SHIFT) |
+		 (PLL0822X_SDIV_MASK << PLL0822X_SDIV_SHIFT));
+	con |= (rate->mdiv << PLL0822X_MDIV_SHIFT) |
+	       (rate->pdiv << PLL0822X_PDIV_SHIFT) |
+	       (rate->sdiv << PLL0822X_SDIV_SHIFT) |
+	       BIT(pll->enable_offs);
+
+	writel_relaxed(rate->pdiv * PLL0822X_LOCK_FACTOR, pll->lock_reg);
+	writel_relaxed(con, pll->con_reg);
+
+	/* An unlocked PLL leaves its output on the oscillator. */
+	ret = samsung_pll_lock_wait(pll, BIT(pll->lock_offs));
+	if (ret)
+		return ret;
+
+	return samsung_pll1417x_mux_write(pll, con | PLL1417X_MUX_SEL);
+}
+
+static const struct clk_ops samsung_pll1417x_clk_ops = {
+	.recalc_rate = samsung_pll0822x_recalc_rate,
+	.round_rate = samsung_pll_round_rate,
+	.set_rate = samsung_pll1417x_set_rate,
+	.enable = samsung_pll3xxx_enable,
+	.disable = samsung_pll3xxx_disable,
+};
+
+/*
  * PLL0831x Clock Type
  */
 /* Maximum lock time can be 500 * PDIV cycles */
@@ -1568,6 +1649,13 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 			init.ops = &samsung_pll35xx_clk_ops;
 		break;
 	case pll_1417x:
+		pll->enable_offs = PLL0822X_ENABLE_SHIFT;
+		pll->lock_offs = PLL0822X_LOCK_STAT_SHIFT;
+		if (!pll->rate_table)
+			init.ops = &samsung_pll0822x_clk_min_ops;
+		else
+			init.ops = &samsung_pll1417x_clk_ops;
+		break;
 	case pll_1418x:
 	case pll_1051x:
 	case pll_1052x:
