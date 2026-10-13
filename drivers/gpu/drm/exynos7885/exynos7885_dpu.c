@@ -43,8 +43,10 @@
 #define DECON_INTERRUPT_ENABLE		0x0040
 #define DECON_FRAME_START_INT_EN	BIT(12)
 #define DECON_INT_EN			BIT(0)
+#define DECON_EXTRA_INTERRUPT_ENABLE	0x0044
 #define DECON_INTERRUPT_PENDING		0x004c
 #define DECON_FRAME_START_INT_PEND	BIT(12)
+#define DECON_EXTRA_INTERRUPT_PENDING	0x0050
 #define DECON_SHADOW_REG_UPDATE_REQ	0x0060
 #define DECON_UPDATE_REQ_GLOBAL		BIT(31)
 #define DECON_UPDATE_REQ_WIN(w)		BIT(w)
@@ -84,6 +86,9 @@ struct exynos7885_dpu {
 	void __iomem *idma;
 	int irq;
 
+	/* IDMA_G0 setup the bootloader scans out, restored when disabled. */
+	u32 boot_src_size, boot_src_offset, boot_img_size, boot_addr;
+
 	/* Protects DECON read-modify-writes and the pending event. */
 	spinlock_t lock;
 	struct drm_pending_vblank_event *event;
@@ -104,18 +109,6 @@ static void dpu_request_update(struct exynos7885_dpu *dpu)
 {
 	dpu_decon_update_bits(dpu, DECON_SHADOW_REG_UPDATE_REQ,
 			      DPU_UPDATE_REQ, DPU_UPDATE_REQ);
-}
-
-static void dpu_set_window(struct exynos7885_dpu *dpu, bool enable)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&dpu->lock, flags);
-	dpu_decon_update_bits(dpu, DECON_DATA_PATH_CONTROL_0,
-			      DECON_WIN_EN(DPU_WIN),
-			      enable ? DECON_WIN_EN(DPU_WIN) : 0);
-	dpu_request_update(dpu);
-	spin_unlock_irqrestore(&dpu->lock, flags);
 }
 
 /* Wait until the hardware has latched the requested shadow registers. */
@@ -186,24 +179,31 @@ static void dpu_plane_atomic_update(struct drm_plane *plane,
 	       FIELD_PREP(IDMA_IMG_WIDTH, drm_rect_width(&src)),
 	       dpu->idma + IDMA_IMG_SIZE);
 	writel(lower_32_bits(addr), dpu->idma + IDMA_IN_BASE_ADDR_Y);
-
-	if (!(readl(dpu->decon + DECON_DATA_PATH_CONTROL_0) &
-	      DECON_WIN_EN(DPU_WIN)))
-		dpu_set_window(dpu, true);
 }
 
 static void dpu_plane_atomic_disable(struct drm_plane *plane,
 				     struct drm_atomic_state *state)
 {
 	struct exynos7885_dpu *dpu = to_dpu(plane->dev);
+	unsigned long flags;
 
 	/*
-	 * Show the black background, and wait for the window to go off so
-	 * the old framebuffer is no longer scanned out when it is released.
+	 * Turning window 3 off stops this video-mode pipeline (DECON stops
+	 * starting frames and the DSI line counter freezes). Scan out the
+	 * bootloader framebuffer again instead, and wait for that to latch so
+	 * the old framebuffer is no longer read when it is released.
 	 */
-	dpu_set_window(dpu, false);
+	writel(dpu->boot_src_size, dpu->idma + IDMA_SRC_SIZE);
+	writel(dpu->boot_src_offset, dpu->idma + IDMA_SRC_OFFSET);
+	writel(dpu->boot_img_size, dpu->idma + IDMA_IMG_SIZE);
+	writel(dpu->boot_addr, dpu->idma + IDMA_IN_BASE_ADDR_Y);
+
+	spin_lock_irqsave(&dpu->lock, flags);
+	dpu_request_update(dpu);
+	spin_unlock_irqrestore(&dpu->lock, flags);
+
 	if (dpu_wait_update(dpu))
-		drm_warn(plane->dev, "window disable did not latch\n");
+		drm_warn(plane->dev, "scanout restore did not latch\n");
 }
 
 static const struct drm_plane_helper_funcs dpu_plane_helper_funcs = {
@@ -278,8 +278,14 @@ static void dpu_crtc_atomic_flush(struct drm_crtc *crtc,
 		return;
 
 	if (event) {
-		WARN_ON(drm_crtc_vblank_get(crtc));
 		crtc->state->event = NULL;
+		if (drm_crtc_vblank_get(crtc)) {
+			/* No vblank to wait for; complete the event now. */
+			spin_lock_irqsave(&crtc->dev->event_lock, flags);
+			drm_crtc_send_vblank_event(crtc, event);
+			spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+			event = NULL;
+		}
 	}
 
 	/*
@@ -318,7 +324,7 @@ static void dpu_crtc_disable_vblank(struct drm_crtc *crtc)
 
 	spin_lock_irqsave(&dpu->lock, flags);
 	dpu_decon_update_bits(dpu, DECON_INTERRUPT_ENABLE,
-			      DECON_FRAME_START_INT_EN, 0);
+			      DECON_FRAME_START_INT_EN | DECON_INT_EN, 0);
 	spin_unlock_irqrestore(&dpu->lock, flags);
 }
 
@@ -347,9 +353,12 @@ static irqreturn_t dpu_frame_start_irq(int irq, void *data)
 	u32 pend;
 
 	pend = readl(dpu->decon + DECON_INTERRUPT_PENDING);
-	if (!(pend & DECON_FRAME_START_INT_PEND))
+	if (!pend)
 		return IRQ_NONE;
-	writel(DECON_FRAME_START_INT_PEND, dpu->decon + DECON_INTERRUPT_PENDING);
+	/* Acknowledge everything so the line cannot stay asserted. */
+	writel(pend, dpu->decon + DECON_INTERRUPT_PENDING);
+	if (!(pend & DECON_FRAME_START_INT_PEND))
+		return IRQ_HANDLED;
 
 	drm_crtc_handle_vblank(&dpu->crtc);
 
@@ -401,17 +410,18 @@ static const struct drm_connector_funcs dpu_connector_funcs = {
 };
 
 /*
- * Like drm_atomic_helper_commit_tail(), but release the old framebuffers
- * only after flip_done: the vblank event is sent once the hardware latched
- * the new address, which can be one frame after the next vblank.
+ * Enable the CRTC (and with it vblank) before committing planes, so the
+ * flush can arm its event. Release the old framebuffers only after
+ * flip_done: the vblank event is sent once the hardware latched the new
+ * address, which can be one frame after the next vblank.
  */
 static void dpu_atomic_commit_tail(struct drm_atomic_state *state)
 {
 	struct drm_device *dev = state->dev;
 
 	drm_atomic_helper_commit_modeset_disables(dev, state);
-	drm_atomic_helper_commit_planes(dev, state, 0);
 	drm_atomic_helper_commit_modeset_enables(dev, state);
+	drm_atomic_helper_commit_planes(dev, state, 0);
 	drm_atomic_helper_fake_vblank(state);
 	drm_atomic_helper_commit_hw_done(state);
 	drm_atomic_helper_wait_for_flip_done(dev, state);
@@ -515,6 +525,11 @@ static int dpu_check_handover(struct exynos7885_dpu *dpu)
 		return -ENODEV;
 	}
 
+	dpu->boot_src_size = readl(dpu->idma + IDMA_SRC_SIZE);
+	dpu->boot_src_offset = readl(dpu->idma + IDMA_SRC_OFFSET);
+	dpu->boot_img_size = readl(dpu->idma + IDMA_IMG_SIZE);
+	dpu->boot_addr = readl(dpu->idma + IDMA_IN_BASE_ADDR_Y);
+
 	return 0;
 }
 
@@ -560,10 +575,17 @@ static int dpu_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	/* The bootloader leaves this enabled; vblank enabling turns it on. */
-	dpu_decon_update_bits(dpu, DECON_INTERRUPT_ENABLE,
-			      DECON_FRAME_START_INT_EN, 0);
-	writel(DECON_FRAME_START_INT_PEND, dpu->decon + DECON_INTERRUPT_PENDING);
+	/*
+	 * The bootloader leaves frame start/done, underflow, extra and dimming
+	 * interrupts enabled with their status pending. Mask them all and
+	 * acknowledge what is pending; enabling vblank unmasks frame start.
+	 */
+	writel(0, dpu->decon + DECON_INTERRUPT_ENABLE);
+	writel(0, dpu->decon + DECON_EXTRA_INTERRUPT_ENABLE);
+	writel(readl(dpu->decon + DECON_EXTRA_INTERRUPT_PENDING),
+	       dpu->decon + DECON_EXTRA_INTERRUPT_PENDING);
+	writel(readl(dpu->decon + DECON_INTERRUPT_PENDING),
+	       dpu->decon + DECON_INTERRUPT_PENDING);
 
 	ret = devm_request_irq(dev, dpu->irq, dpu_frame_start_irq, 0,
 			       dev_name(dev), dpu);
