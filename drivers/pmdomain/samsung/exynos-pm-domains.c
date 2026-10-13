@@ -23,6 +23,8 @@ struct exynos_pm_domain_config {
 	/* Value for LOCAL_PWR_CFG and STATUS fields for each domain */
 	u32 local_pwr_cfg;
 	bool keep_on;
+	/* With keep_on: power an off domain on once at probe. */
+	bool power_on_once;
 };
 
 /*
@@ -104,6 +106,15 @@ static const struct exynos_pm_domain_config exynos7885_dispaud_cfg = {
 	.keep_on		= true,
 };
 
+/* Powering G3D off needs the vendor SYS_PWR_REG sequence and CMU_G3D state
+ * save/restore, which are not implemented, so power it on once and keep it on.
+ */
+static const struct exynos_pm_domain_config exynos7885_g3d_cfg = {
+	.local_pwr_cfg		= 0xf,
+	.keep_on		= true,
+	.power_on_once		= true,
+};
+
 static const struct of_device_id exynos_pm_domain_of_match[] = {
 	{
 		.compatible = "samsung,exynos4210-pd",
@@ -114,6 +125,9 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 	}, {
 		.compatible = "samsung,exynos7885-dispaud-pd",
 		.data = &exynos7885_dispaud_cfg,
+	}, {
+		.compatible = "samsung,exynos7885-g3d-pd",
+		.data = &exynos7885_g3d_cfg,
 	},
 	{ },
 };
@@ -157,8 +171,12 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	on = readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg;
 	if (pm_domain_cfg->keep_on) {
+		if (on != pd->local_pwr_cfg && pm_domain_cfg->power_on_once) {
+			if (!exynos_pd_power(&pd->pd, true))
+				on = pd->local_pwr_cfg;
+		}
 		if (on != pd->local_pwr_cfg) {
-			dev_err(dev, "DISPAUD is not fully powered; refusing to manage it\n");
+			dev_err(dev, "domain is not fully powered; refusing to manage it\n");
 			kfree_const(pd->pd.name);
 			iounmap(pd->base);
 			return -ENODEV;
