@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Voltage control of an S2MPU08 buck through ACPM.
+ *
+ * On Exynos7885 the S2MPU08 PMIC sits behind the APM, so its registers are
+ * reached with ACPM PMIC read/write messages. This driver only sets the
+ * output voltage of one buck (BUCK5, vdd_g3d); enabling and disabling it
+ * stay with the PMU and the bootloader.
+ */
+
+#include <linux/firmware/samsung/exynos-acpm-protocol.h>
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/of_regulator.h>
+
+#define S2MPU08_ACPM_TYPE_PMIC	1
+#define S2MPU08_B5CTRL2		0x1d	/* BUCK5 voltage select */
+#define S2MPU08_BUCK_MIN_UV	500000
+#define S2MPU08_BUCK_STEP_UV	6250
+#define S2MPU08_BUCK_RAMP_UV_US	12000
+
+struct s2mpu08_acpm_buck {
+	const struct acpm_handle *acpm;
+	unsigned int chan;
+	u8 vsel_reg;
+};
+
+static int s2mpu08_acpm_get_voltage_sel(struct regulator_dev *rdev)
+{
+	struct s2mpu08_acpm_buck *buck = rdev_get_drvdata(rdev);
+	u8 val;
+	int ret;
+
+	ret = buck->acpm->ops.pmic_ops.read_reg(buck->acpm, buck->chan,
+						S2MPU08_ACPM_TYPE_PMIC,
+						buck->vsel_reg, 0, &val);
+	if (ret)
+		return ret > 0 ? -EIO : ret;
+
+	return val;
+}
+
+static int s2mpu08_acpm_set_voltage_sel(struct regulator_dev *rdev,
+					unsigned int sel)
+{
+	struct s2mpu08_acpm_buck *buck = rdev_get_drvdata(rdev);
+	int ret;
+
+	ret = buck->acpm->ops.pmic_ops.write_reg(buck->acpm, buck->chan,
+						 S2MPU08_ACPM_TYPE_PMIC,
+						 buck->vsel_reg, 0, sel);
+	return ret > 0 ? -EIO : ret;
+}
+
+static const struct regulator_ops s2mpu08_acpm_buck_ops = {
+	.list_voltage = regulator_list_voltage_linear,
+	.map_voltage = regulator_map_voltage_linear,
+	.get_voltage_sel = s2mpu08_acpm_get_voltage_sel,
+	.set_voltage_sel = s2mpu08_acpm_set_voltage_sel,
+	.set_voltage_time_sel = regulator_set_voltage_time_sel,
+};
+
+static const struct regulator_desc s2mpu08_acpm_buck5_desc = {
+	.name = "buck5",
+	.ops = &s2mpu08_acpm_buck_ops,
+	.type = REGULATOR_VOLTAGE,
+	.owner = THIS_MODULE,
+	.min_uV = S2MPU08_BUCK_MIN_UV,
+	.uV_step = S2MPU08_BUCK_STEP_UV,
+	.n_voltages = 256,
+	.ramp_delay = S2MPU08_BUCK_RAMP_UV_US,
+};
+
+static int s2mpu08_acpm_buck_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct regulator_config config = { };
+	struct s2mpu08_acpm_buck *buck;
+	struct of_phandle_args args;
+	struct regulator_dev *rdev;
+	int ret;
+
+	buck = devm_kzalloc(dev, sizeof(*buck), GFP_KERNEL);
+	if (!buck)
+		return -ENOMEM;
+
+	ret = of_parse_phandle_with_fixed_args(dev->of_node, "samsung,acpm-ipc",
+					       1, 0, &args);
+	if (ret)
+		return dev_err_probe(dev, ret, "missing samsung,acpm-ipc\n");
+
+	buck->chan = args.args[0];
+	buck->acpm = devm_acpm_get_by_node(dev, args.np);
+	of_node_put(args.np);
+	if (IS_ERR(buck->acpm))
+		return dev_err_probe(dev, PTR_ERR(buck->acpm),
+				     "failed to get the ACPM handle\n");
+	buck->vsel_reg = S2MPU08_B5CTRL2;
+
+	config.dev = dev;
+	config.driver_data = buck;
+	config.of_node = dev->of_node;
+	config.init_data = of_get_regulator_init_data(dev, dev->of_node,
+						      &s2mpu08_acpm_buck5_desc);
+	if (!config.init_data)
+		return -ENOMEM;
+
+	rdev = devm_regulator_register(dev, &s2mpu08_acpm_buck5_desc, &config);
+	if (IS_ERR(rdev))
+		return dev_err_probe(dev, PTR_ERR(rdev),
+				     "failed to register the regulator\n");
+
+	return 0;
+}
+
+static const struct of_device_id s2mpu08_acpm_buck_of_match[] = {
+	{ .compatible = "samsung,s2mpu08-acpm-buck5" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, s2mpu08_acpm_buck_of_match);
+
+static struct platform_driver s2mpu08_acpm_buck_driver = {
+	.driver = {
+		.name = "s2mpu08-acpm-buck",
+		.of_match_table = s2mpu08_acpm_buck_of_match,
+	},
+	.probe = s2mpu08_acpm_buck_probe,
+};
+module_platform_driver(s2mpu08_acpm_buck_driver);
+
+MODULE_DESCRIPTION("Samsung S2MPU08 buck voltage control over ACPM");
+MODULE_LICENSE("GPL");
