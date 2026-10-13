@@ -104,8 +104,14 @@ static int samsung_pll_lock_wait(struct samsung_clk_pll *pll,
 		}
 		ret = -ETIMEDOUT;
 	} else {
+		/*
+		 * The atomic poll counts its timeout in delay steps, or in
+		 * single nanoseconds without a delay. Poll every microsecond
+		 * so the bound stays in real time even when the CPU doing it
+		 * runs from a slow clock while its own PLL relocks.
+		 */
 		ret = readl_relaxed_poll_timeout_atomic(pll->con_reg, val,
-					val & reg_mask, 0, PLL_TIMEOUT_US);
+					val & reg_mask, 1, PLL_TIMEOUT_US);
 	}
 
 	if (ret < 0)
