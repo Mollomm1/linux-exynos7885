@@ -716,8 +716,10 @@ static const struct clk_ops samsung_pll0822x_clk_min_ops = {
  *
  * A running PLL1417x does not always relock after its dividers change.
  * As the vendor driver does, switch its output mux to the oscillator,
- * stop the PLL and restart it with the new dividers. The output only
- * returns to the PLL once it has locked.
+ * stop the PLL and restart it with the new dividers. The PLL only runs
+ * while that mux selects it, so it is selected again together with the
+ * enable bit; consumers must be parked on another clock until it locks.
+ * A PLL that does not lock is left deselected, on the oscillator.
  */
 #define PLL1417X_MUX_SEL		BIT(4)
 #define PLL1417X_MUX_BUSY		BIT(7)
@@ -770,18 +772,17 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 		 (PLL0822X_SDIV_MASK << PLL0822X_SDIV_SHIFT));
 	con |= (rate->mdiv << PLL0822X_MDIV_SHIFT) |
 	       (rate->pdiv << PLL0822X_PDIV_SHIFT) |
-	       (rate->sdiv << PLL0822X_SDIV_SHIFT) |
-	       BIT(pll->enable_offs);
+	       (rate->sdiv << PLL0822X_SDIV_SHIFT);
 
 	writel_relaxed(rate->pdiv * PLL0822X_LOCK_FACTOR, pll->lock_reg);
-	writel_relaxed(con, pll->con_reg);
+	writel_relaxed(con | BIT(pll->enable_offs) | PLL1417X_MUX_SEL,
+		       pll->con_reg);
 
-	/* An unlocked PLL leaves its output on the oscillator. */
 	ret = samsung_pll_lock_wait(pll, BIT(pll->lock_offs));
 	if (ret)
-		return ret;
+		samsung_pll1417x_mux_write(pll, con | BIT(pll->enable_offs));
 
-	return samsung_pll1417x_mux_write(pll, con | PLL1417X_MUX_SEL);
+	return ret;
 }
 
 static const struct clk_ops samsung_pll1417x_clk_ops = {
