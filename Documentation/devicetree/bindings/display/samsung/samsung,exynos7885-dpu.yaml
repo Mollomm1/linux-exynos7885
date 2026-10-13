@@ -12,7 +12,8 @@ maintainers:
 description: |
   DECON0 and the IDMA_G0 pixel DMA channel of the Exynos7885 DPU. The
   binding describes the pipeline that the bootloader leaves running in DSI
-  video mode, with the panel timing it was programmed for.
+  video mode, with the panel timing it was programmed for. Its output goes
+  to the DSI host through the port.
 
 properties:
   compatible:
@@ -42,11 +43,9 @@ properties:
   panel-timing:
     $ref: /schemas/display/panel/panel-timing.yaml#
 
-  width-mm:
-    description: Physical width of the panel's active area.
-
-  height-mm:
-    description: Physical height of the panel's active area.
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description: Output to the DSI host.
 
 required:
   - compatible
@@ -55,6 +54,7 @@ required:
   - interrupts
   - interrupt-names
   - panel-timing
+  - port
 
 additionalProperties: false
 
@@ -68,8 +68,12 @@ examples:
         reg-names = "decon", "idma-g0";
         interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
         interrupt-names = "frame-start";
-        width-mm = <135>;
-        height-mm = <216>;
+
+        port {
+            endpoint {
+                remote-endpoint = <&dsi_in>;
+            };
+        };
 
         panel-timing {
             clock-frequency = <164976000>;
