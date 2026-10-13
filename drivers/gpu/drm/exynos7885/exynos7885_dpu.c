@@ -41,6 +41,10 @@
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_vblank.h>
 
+#include <video/display_timing.h>
+#include <video/of_display_timing.h>
+#include <video/videomode.h>
+
 /* DECON registers */
 #define DECON_GLOBAL_CONTROL		0x0000
 #define DECON_GLOBAL_RUN_STATUS		BIT(4)
@@ -514,7 +518,9 @@ static int dpu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
+	struct display_timing timing;
 	struct exynos7885_dpu *dpu;
+	struct videomode vm;
 	int ret;
 
 	dpu = devm_drm_dev_alloc(dev, &dpu_driver, struct exynos7885_dpu, drm);
@@ -533,9 +539,12 @@ static int dpu_probe(struct platform_device *pdev)
 	if (dpu->irq < 0)
 		return dpu->irq;
 
-	ret = of_get_drm_panel_display_mode(np, &dpu->mode, NULL);
+	/* The timing the bootloader programmed; the panel gives the size. */
+	ret = of_get_display_timing(np, "panel-timing", &timing);
 	if (ret)
 		return dev_err_probe(dev, ret, "invalid panel-timing\n");
+	videomode_from_timing(&timing, &vm);
+	drm_display_mode_from_videomode(&vm, &dpu->mode);
 
 	/* The DSI host bridge appears once the panel attached to it. */
 	dpu->bridge = devm_drm_of_get_bridge(dev, np, 0, 0);
