@@ -15,6 +15,9 @@ description: |+
   The Exynos7885 DISPAUD domain is exposed only when already powered. Its
   driver keeps it on because power cycling requires secure state handoff
   and an orderly ABOX firmware shutdown.
+  The Exynos7885 G3D domain is powered on once if needed and then kept on,
+  because powering it off needs a vendor PMU sequence and clock state
+  save/restore.
 
 allOf:
   - $ref: power-domain.yaml#
@@ -25,6 +28,7 @@ properties:
       - samsung,exynos4210-pd
       - samsung,exynos5433-pd
       - samsung,exynos7885-dispaud-pd
+      - samsung,exynos7885-g3d-pd
 
   reg:
     maxItems: 1
