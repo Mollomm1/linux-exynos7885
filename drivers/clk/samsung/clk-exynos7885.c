@@ -1150,8 +1150,9 @@ static int exynos7885_g3d_register_notifier(struct device *dev)
 
 /*
  * Only PLL, mux and divider registers are listed, so probing writes
- * nothing. The ACLK/ATCLK/PCLK dividers keep the bootloader's ratios: the
- * vendor DVFS tables change only the PLL between levels.
+ * nothing. The CPU divider is read-only and the ACLK/ATCLK/PCLK dividers
+ * keep the bootloader's ratios: the vendor DVFS tables change only the PLL
+ * between levels.
  */
 static const unsigned long cpucl0_clk_regs[] __initconst = {
 	PLL_LOCKTIME_PLL_CPUCL,
@@ -1212,7 +1213,8 @@ static const struct samsung_mux_clock cpucl##n##_mux_clks[] __initconst = { \
 static const struct samsung_div_clock cpucl##n##_div_clks[] __initconst = { \
 	DIV_F(CLK_DOUT_CPUCL_CPU, "dout_cpucl" #n "_cpu",		\
 	      "mout_cpucl" #n "_cpu", CLK_CON_DIV_DIV_CLK_CPUCL_CPU, 0, 3, \
-	      CLK_SET_RATE_PARENT | CLK_IS_CRITICAL, 0),		\
+	      CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED,			\
+	      CLK_DIVIDER_READ_ONLY),					\
 }
 
 CPUCL_CLKS(0, PLL_CON0_PLL_CPUCL0, PLL_CON0_MUX_CLKCMU_CPUCL0_SWITCH_USER,
