@@ -2,9 +2,12 @@
 config DRM_EXYNOS7885_DPU
 	tristate "DRM support for the Samsung Exynos7885 display processing unit"
 	depends on DRM && OF && (ARCH_EXYNOS || COMPILE_TEST)
+	select DRM_BRIDGE_CONNECTOR
 	select DRM_CLIENT_SELECTION
+	select DRM_DISPLAY_HELPER
 	select DRM_KMS_HELPER
 	select DRM_GEM_DMA_HELPER
+	select DRM_PANEL_BRIDGE
 	select VIDEOMODE_HELPERS
 	help
 	  Choose this option to drive the display of Exynos7885/7904 devices
@@ -12,3 +15,15 @@ config DRM_EXYNOS7885_DPU
 	  bootloader left running in DSI video mode.
 
 	  If M is selected, the module will be called exynos7885-dpu.
+
+config DRM_EXYNOS7885_DSIM
+	tristate "Samsung Exynos7885 MIPI DSI host"
+	depends on DRM && OF && (ARCH_EXYNOS || COMPILE_TEST)
+	select DRM_MIPI_DSI
+	select DRM_PANEL_BRIDGE
+	help
+	  Choose this option for the Exynos7885 DSIM: a MIPI DSI host for
+	  sending panel commands over the video-mode link the bootloader left
+	  running, and the DRM bridge between the DPU and the panel.
+
+	  If M is selected, the module will be called exynos7885-dsim.
