@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_EXYNOS7885_DPU
+	tristate "DRM support for the Samsung Exynos7885 display processing unit"
+	depends on DRM && OF && (ARCH_EXYNOS || COMPILE_TEST)
+	select DRM_CLIENT_SELECTION
+	select DRM_KMS_HELPER
+	select DRM_GEM_DMA_HELPER
+	select VIDEOMODE_HELPERS
+	help
+	  Choose this option to drive the display of Exynos7885/7904 devices
+	  through DECON0 and IDMA_G0, taking over the pipeline that the
+	  bootloader left running in DSI video mode.
+
+	  If M is selected, the module will be called exynos7885-dpu.
