@@ -4,8 +4,9 @@
  *
  * On Exynos7885 the S2MPU08 PMIC sits behind the APM, so its registers are
  * reached with ACPM PMIC read/write messages. This driver only sets the
- * output voltage of one buck (BUCK5, vdd_g3d); enabling and disabling it
- * stay with the PMU and the bootloader.
+ * output voltage of a buck: BUCK2 (A73 cluster), BUCK3 (A53 clusters) or
+ * BUCK5 (GPU). Enabling and disabling it stay with the PMU and the
+ * bootloader.
  */
 
 #include <linux/firmware/samsung/exynos-acpm-protocol.h>
@@ -16,7 +17,10 @@
 #include <linux/regulator/of_regulator.h>
 
 #define S2MPU08_ACPM_TYPE_PMIC	1
-#define S2MPU08_B5CTRL2		0x1d	/* BUCK5 voltage select */
+/* voltage select registers */
+#define S2MPU08_B2CTRL2		0x17
+#define S2MPU08_B3CTRL2		0x19
+#define S2MPU08_B5CTRL2		0x1d
 /* As in the vendor driver; it matches the boot voltages to the ECT tables. */
 #define S2MPU08_BUCK_MIN_UV	300000
 #define S2MPU08_BUCK_STEP_UV	6250
@@ -63,25 +67,44 @@ static const struct regulator_ops s2mpu08_acpm_buck_ops = {
 	.set_voltage_time_sel = regulator_set_voltage_time_sel,
 };
 
-static const struct regulator_desc s2mpu08_acpm_buck5_desc = {
-	.name = "buck5",
-	.ops = &s2mpu08_acpm_buck_ops,
-	.type = REGULATOR_VOLTAGE,
-	.owner = THIS_MODULE,
-	.min_uV = S2MPU08_BUCK_MIN_UV,
-	.uV_step = S2MPU08_BUCK_STEP_UV,
-	.n_voltages = 256,
-	.ramp_delay = S2MPU08_BUCK_RAMP_UV_US,
+struct s2mpu08_acpm_buck_data {
+	struct regulator_desc desc;
+	u8 vsel_reg;
 };
+
+#define S2MPU08_ACPM_BUCK(_name, _reg)					\
+	{								\
+		.desc = {						\
+			.name = _name,					\
+			.ops = &s2mpu08_acpm_buck_ops,			\
+			.type = REGULATOR_VOLTAGE,			\
+			.owner = THIS_MODULE,				\
+			.min_uV = S2MPU08_BUCK_MIN_UV,			\
+			.uV_step = S2MPU08_BUCK_STEP_UV,		\
+			.n_voltages = 256,				\
+			.ramp_delay = S2MPU08_BUCK_RAMP_UV_US,		\
+		},							\
+		.vsel_reg = _reg,					\
+	}
+
+static const struct s2mpu08_acpm_buck_data s2mpu08_acpm_buck2 =
+	S2MPU08_ACPM_BUCK("buck2", S2MPU08_B2CTRL2);
+static const struct s2mpu08_acpm_buck_data s2mpu08_acpm_buck3 =
+	S2MPU08_ACPM_BUCK("buck3", S2MPU08_B3CTRL2);
+static const struct s2mpu08_acpm_buck_data s2mpu08_acpm_buck5 =
+	S2MPU08_ACPM_BUCK("buck5", S2MPU08_B5CTRL2);
 
 static int s2mpu08_acpm_buck_probe(struct platform_device *pdev)
 {
+	const struct s2mpu08_acpm_buck_data *data;
 	struct device *dev = &pdev->dev;
 	struct regulator_config config = { };
 	struct s2mpu08_acpm_buck *buck;
 	struct of_phandle_args args;
 	struct regulator_dev *rdev;
 	int ret;
+
+	data = of_device_get_match_data(dev);
 
 	buck = devm_kzalloc(dev, sizeof(*buck), GFP_KERNEL);
 	if (!buck)
@@ -98,17 +121,17 @@ static int s2mpu08_acpm_buck_probe(struct platform_device *pdev)
 	if (IS_ERR(buck->acpm))
 		return dev_err_probe(dev, PTR_ERR(buck->acpm),
 				     "failed to get the ACPM handle\n");
-	buck->vsel_reg = S2MPU08_B5CTRL2;
+	buck->vsel_reg = data->vsel_reg;
 
 	config.dev = dev;
 	config.driver_data = buck;
 	config.of_node = dev->of_node;
 	config.init_data = of_get_regulator_init_data(dev, dev->of_node,
-						      &s2mpu08_acpm_buck5_desc);
+						      &data->desc);
 	if (!config.init_data)
 		return -ENOMEM;
 
-	rdev = devm_regulator_register(dev, &s2mpu08_acpm_buck5_desc, &config);
+	rdev = devm_regulator_register(dev, &data->desc, &config);
 	if (IS_ERR(rdev))
 		return dev_err_probe(dev, PTR_ERR(rdev),
 				     "failed to register the regulator\n");
@@ -117,7 +140,9 @@ static int s2mpu08_acpm_buck_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id s2mpu08_acpm_buck_of_match[] = {
-	{ .compatible = "samsung,s2mpu08-acpm-buck5" },
+	{ .compatible = "samsung,s2mpu08-acpm-buck2", .data = &s2mpu08_acpm_buck2 },
+	{ .compatible = "samsung,s2mpu08-acpm-buck3", .data = &s2mpu08_acpm_buck3 },
+	{ .compatible = "samsung,s2mpu08-acpm-buck5", .data = &s2mpu08_acpm_buck5 },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, s2mpu08_acpm_buck_of_match);

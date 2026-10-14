@@ -1350,9 +1350,10 @@ config REGULATOR_S2MPU08_ACPM_BUCK
 	depends on EXYNOS_ACPM_PROTOCOL
 	depends on OF
 	help
-	  Voltage control of the S2MPU08 BUCK5 (vdd_g3d, the Mali GPU supply)
-	  on Exynos7885 boards, where the PMIC is reached through ACPM. Lets
-	  the GPU driver scale its voltage with its clock.
+	  Voltage control of the S2MPU08 BUCK2, BUCK3 and BUCK5 (the A73, A53
+	  and Mali GPU supplies) on Exynos7885 boards, where the PMIC is
+	  reached through ACPM. Lets cpufreq and the GPU driver scale their
+	  voltage with their clock.
 
 config REGULATOR_S5M8767
 	tristate "Samsung S5M8767A voltage regulator"
