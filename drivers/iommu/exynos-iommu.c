@@ -20,6 +20,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/ratelimit.h>
 #include <linux/slab.h>
 
 #include "dma-iommu.h"
@@ -310,7 +311,17 @@ struct sysmmu_drvdata {
 	/* v7 fields */
 	bool has_vcr;			/* virtual machine control register */
 	bool has_pt1;			/* second page table (Exynos7885 ABOX) */
+
+	/* fault interrupt rate limiting */
+	int irq;			/* fault interrupt */
+	bool irq_stopped;		/* disabled after a fault storm */
+	unsigned long fault_window;	/* jiffies when the count restarted */
+	unsigned int fault_count;	/* faults since fault_window */
+	struct ratelimit_state fault_rs; /* fault report rate limit */
 };
+
+/* More faults than this within a second stop the fault interrupt. */
+#define SYSMMU_FAULT_STORM	20000
 
 #define SYSMMU_REG(data, reg) ((data)->sfrbase + (data)->variant->reg)
 
@@ -592,20 +603,45 @@ static irqreturn_t exynos_sysmmu_irq(int irq, void *dev_id)
 	spin_lock(&data->lock);
 	clk_enable(data->clk_master);
 
+	/*
+	 * Each fault leaves the System MMU blocked until it is unblocked
+	 * below. If the master keeps faulting, leave it blocked and stop the
+	 * interrupt instead of spending all CPU time here; the master stalls
+	 * until the System MMU is enabled again.
+	 */
+	if (time_after(jiffies, data->fault_window + HZ)) {
+		data->fault_window = jiffies;
+		data->fault_count = 0;
+	}
+	if (++data->fault_count > SYSMMU_FAULT_STORM) {
+		dev_err(data->sysmmu, "%s: fault storm, master stalled\n",
+			dev_name(data->master));
+		data->irq_stopped = true;
+		disable_irq_nosync(irq);
+		clk_disable(data->clk_master);
+		spin_unlock(&data->lock);
+		return IRQ_HANDLED;
+	}
+
 	itype = __ffs(readl(SYSMMU_REG(data, int_status)));
 	ret = data->variant->get_fault_info(data, itype, &fault);
 	if (ret) {
-		dev_err(data->sysmmu, "Unhandled interrupt bit %u\n", itype);
+		dev_err_ratelimited(data->sysmmu, "Unhandled interrupt bit %u\n",
+				    itype);
 		goto out;
 	}
-	show_fault_information(data, &fault);
 
 	if (data->domain) {
 		ret = report_iommu_fault(&data->domain->domain, data->master,
 					 fault.addr, fault.type);
 	}
-	if (ret)
-		panic("Unrecoverable System MMU Fault!");
+	/*
+	 * A fault the master does not handle is reported and the transaction
+	 * dropped, rather than panicking: for a display controller, a fault
+	 * costs a frame, a panic the system.
+	 */
+	if (ret && __ratelimit(&data->fault_rs))
+		show_fault_information(data, &fault);
 
 out:
 	writel(1 << itype, SYSMMU_REG(data, int_clear));
@@ -674,6 +710,12 @@ static void __sysmmu_enable(struct sysmmu_drvdata *data)
 	__sysmmu_enable_vid(data);
 	writel(CTRL_ENABLE, data->sfrbase + REG_MMU_CTRL);
 	data->active = true;
+	if (data->irq_stopped) {
+		writel(readl(SYSMMU_REG(data, int_status)),
+		       SYSMMU_REG(data, int_clear));
+		data->irq_stopped = false;
+		enable_irq(data->irq);
+	}
 	spin_unlock_irqrestore(&data->lock, flags);
 
 	/*
@@ -760,6 +802,8 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 	if (irq <= 0)
 		return irq;
 
+	data->irq = irq;
+	ratelimit_state_init(&data->fault_rs, 5 * HZ, 10);
 	ret = devm_request_irq(dev, irq, exynos_sysmmu_irq, 0,
 				dev_name(dev), data);
 	if (ret) {
