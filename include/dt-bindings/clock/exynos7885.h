@@ -186,6 +186,7 @@
 #define CLK_MOUT_AUD_UAIF0			19
 #define CLK_GOUT_UAIF0_BCLK			20
 #define CLK_GOUT_UAIF0_SYNC			21
+#define CLK_GOUT_SMMU_DPU_CLK			22
 
 /* CMU_G3D */
 #define CLK_FOUT_G3D_PLL			1
