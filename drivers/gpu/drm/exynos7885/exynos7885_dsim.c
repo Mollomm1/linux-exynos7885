@@ -5,8 +5,10 @@
  * The bootloader leaves the DSIM link running in video mode. This driver
  * keeps it as is and provides the DSI host, so a panel driver can send
  * commands while video streams, and a DRM bridge between the DPU and the
- * panel. Commands are queued with packet-go held, released, and the packet
- * header FIFO is polled until it drains, as the vendor driver does.
+ * panel. As in the vendor driver, commands are queued with packet-go held
+ * and released, without waiting for each to be sent: in video mode the
+ * link sends queued packets in the vertical front porch, so a frame takes
+ * as many as fit there.
  */
 
 #include <linux/bitfield.h>
@@ -27,6 +29,7 @@
 #define DSIM_PKTHDR			0x58
 #define DSIM_PAYLOAD			0x5c
 #define DSIM_FIFOCTRL			0x68
+#define DSIM_FIFOCTRL_NUM_PH_SFR	GENMASK(21, 16)
 #define DSIM_FIFOCTRL_EMPTY_PH_SFR	BIT(10)
 #define DSIM_FIFOCTRL_EMPTY_PL_SFR	BIT(8)
 #define DSIM_CMD_CONFIG			0x80
@@ -35,6 +38,11 @@
 /* The payload FIFO holds 2 KiB; panel commands are far smaller. */
 #define DSIM_MAX_PAYLOAD		256
 #define DSIM_TIMEOUT_US			50000
+/*
+ * Packets the vendor queues at most in video mode: the front porch lines
+ * that may carry commands, VFP (22) - 2 stable lines - 3.
+ */
+#define DSIM_VIDEO_MAX_PH		17
 
 struct exynos7885_dsim {
 	struct device *dev;
@@ -88,8 +96,12 @@ static ssize_t dsim_host_transfer(struct mipi_dsi_host *host,
 	if (!(readl(dsim->regs + DSIM_LINK_STATUS0) & DSIM_VIDEO_MODE_STATUS))
 		return -EIO;
 
-	ret = dsim_wait_fifo_empty(dsim, DSIM_FIFOCTRL_EMPTY_PH_SFR |
-				   DSIM_FIFOCTRL_EMPTY_PL_SFR);
+	/* Wait for room in the header FIFO, and an empty payload FIFO. */
+	ret = readl_poll_timeout(dsim->regs + DSIM_FIFOCTRL, val,
+				 FIELD_GET(DSIM_FIFOCTRL_NUM_PH_SFR, val) <
+				 DSIM_VIDEO_MAX_PH, 10, DSIM_TIMEOUT_US);
+	if (!ret && packet.payload_length)
+		ret = dsim_wait_fifo_empty(dsim, DSIM_FIFOCTRL_EMPTY_PL_SFR);
 	if (ret)
 		return ret;
 
@@ -115,12 +127,6 @@ static ssize_t dsim_host_transfer(struct mipi_dsi_host *host,
 	writel(packet.header[0] | packet.header[1] << 8 |
 	       packet.header[2] << 16, dsim->regs + DSIM_PKTHDR);
 	writel(cfg & ~DSIM_CMD_CONFIG_PKT_GO_EN, dsim->regs + DSIM_CMD_CONFIG);
-
-	ret = dsim_wait_fifo_empty(dsim, DSIM_FIFOCTRL_EMPTY_PH_SFR);
-	if (ret) {
-		dev_err(dsim->dev, "command %#x not sent\n", msg->type);
-		return ret;
-	}
 
 	return msg->tx_len;
 }
