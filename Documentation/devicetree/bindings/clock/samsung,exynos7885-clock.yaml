@@ -116,10 +116,15 @@ allOf:
         clocks:
           items:
             - description: External reference clock (26 MHz)
+            - description: CPU cluster switching clock (from CMU_TOP)
 
         clock-names:
           items:
             - const: oscclk
+            - enum:
+                - dout_cpucl0_switch
+                - dout_cpucl1_switch
+                - dout_cpucl2_switch
 
   - if:
       properties:
