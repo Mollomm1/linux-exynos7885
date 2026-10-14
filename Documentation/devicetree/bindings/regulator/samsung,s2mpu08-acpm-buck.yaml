@@ -1,25 +1,30 @@
 # SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 %YAML 1.2
 ---
-$id: http://devicetree.org/schemas/regulator/samsung,s2mpu08-acpm-buck5.yaml#
+$id: http://devicetree.org/schemas/regulator/samsung,s2mpu08-acpm-buck.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Samsung S2MPU08 BUCK5 voltage control over ACPM
+title: Samsung S2MPU08 buck voltage control over ACPM
 
 maintainers:
   - Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
 
 description:
   On Exynos7885 boards the S2MPU08 PMIC is reached through ACPM. This
-  describes the output voltage control of BUCK5 (vdd_g3d, the Mali GPU
-  supply); switching the buck on and off stays with the PMU.
+  describes the output voltage control of one buck, BUCK2 (vdd_cpucl0,
+  the A73 cluster), BUCK3 (vdd_cpucl12, the A53 clusters) or BUCK5
+  (vdd_g3d, the Mali GPU). Switching the buck on and off stays with the
+  PMU.
 
 allOf:
   - $ref: regulator.yaml#
 
 properties:
   compatible:
-    const: samsung,s2mpu08-acpm-buck5
+    enum:
+      - samsung,s2mpu08-acpm-buck2
+      - samsung,s2mpu08-acpm-buck3
+      - samsung,s2mpu08-acpm-buck5
 
   samsung,acpm-ipc:
     $ref: /schemas/types.yaml#/definitions/phandle-array
