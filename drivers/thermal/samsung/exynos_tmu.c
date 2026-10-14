@@ -133,6 +133,7 @@ enum soc_type {
 	SOC_ARCH_EXYNOS5420_TRIMINFO,
 	SOC_ARCH_EXYNOS5433,
 	SOC_ARCH_EXYNOS7,
+	SOC_ARCH_EXYNOS7885,
 };
 
 /**
@@ -199,6 +200,13 @@ struct exynos_tmu_data {
 	void (*tmu_clear_irqs)(struct exynos_tmu_data *data);
 };
 
+/* Exynos7885 uses the Exynos7 register layout and 9-bit codes. */
+static bool exynos_tmu_is_exynos7(struct exynos_tmu_data *data)
+{
+	return data->soc == SOC_ARCH_EXYNOS7 ||
+	       data->soc == SOC_ARCH_EXYNOS7885;
+}
+
 /*
  * TMU treats temperature as a mapped temperature code.
  * The temperature is converted differently depending on the calibration type.
@@ -232,8 +240,8 @@ static int code_to_temp(struct exynos_tmu_data *data, u16 temp_code)
 static void sanitize_temp_error(struct exynos_tmu_data *data, u32 trim_info)
 {
 	u16 tmu_temp_mask =
-		(data->soc == SOC_ARCH_EXYNOS7) ? EXYNOS7_TMU_TEMP_MASK
-						: EXYNOS_TMU_TEMP_MASK;
+		exynos_tmu_is_exynos7(data) ? EXYNOS7_TMU_TEMP_MASK
+					    : EXYNOS_TMU_TEMP_MASK;
 
 	data->temp_error1 = trim_info & tmu_temp_mask;
 	data->temp_error2 = ((trim_info >> EXYNOS_TRIMINFO_85_SHIFT) &
@@ -355,8 +363,8 @@ static void exynos_tmu_update_temp(struct exynos_tmu_data *data, int reg_off,
 	u32 th;
 
 	tmu_temp_mask =
-		(data->soc == SOC_ARCH_EXYNOS7) ? EXYNOS7_TMU_TEMP_MASK
-						: EXYNOS_TMU_TEMP_MASK;
+		exynos_tmu_is_exynos7(data) ? EXYNOS7_TMU_TEMP_MASK
+					    : EXYNOS_TMU_TEMP_MASK;
 
 	th = readl(data->base + reg_off);
 	th &= ~(tmu_temp_mask << bit_off);
@@ -633,6 +641,22 @@ static void exynos7_tmu_control(struct platform_device *pdev, bool on)
 	writel(con, data->base + EXYNOS_TMU_REG_CONTROL);
 }
 
+static void exynos7885_tmu_control(struct platform_device *pdev, bool on)
+{
+	struct exynos_tmu_data *data = platform_get_drvdata(pdev);
+	unsigned int con;
+
+	/* The sensor select and trimming stay as the bootloader sets them. */
+	con = get_con_reg(data, readl(data->base + EXYNOS_TMU_REG_CONTROL));
+
+	if (on)
+		con |= BIT(EXYNOS_TMU_CORE_EN_SHIFT);
+	else
+		con &= ~BIT(EXYNOS_TMU_CORE_EN_SHIFT);
+
+	writel(con, data->base + EXYNOS_TMU_REG_CONTROL);
+}
+
 static int exynos_get_temp(struct thermal_zone_device *tz, int *temp)
 {
 	struct exynos_tmu_data *data = thermal_zone_device_priv(tz);
@@ -671,7 +695,7 @@ static u32 get_emul_con_reg(struct exynos_tmu_data *data, unsigned int val,
 
 		val &= ~(EXYNOS_EMUL_TIME_MASK << EXYNOS_EMUL_TIME_SHIFT);
 		val |= (EXYNOS_EMUL_TIME << EXYNOS_EMUL_TIME_SHIFT);
-		if (data->soc == SOC_ARCH_EXYNOS7) {
+		if (exynos_tmu_is_exynos7(data)) {
 			val &= ~(EXYNOS7_EMUL_DATA_MASK <<
 				EXYNOS7_EMUL_DATA_SHIFT);
 			val |= (temp_to_code(data, temp) <<
@@ -701,7 +725,7 @@ static void exynos4412_tmu_set_emulation(struct exynos_tmu_data *data,
 		emul_con = EXYNOS5260_EMUL_CON;
 	else if (data->soc == SOC_ARCH_EXYNOS5433)
 		emul_con = EXYNOS5433_TMU_EMUL_CON;
-	else if (data->soc == SOC_ARCH_EXYNOS7)
+	else if (exynos_tmu_is_exynos7(data))
 		emul_con = EXYNOS7_TMU_REG_EMUL_CON;
 	else
 		emul_con = EXYNOS_EMUL_CON;
@@ -782,7 +806,7 @@ static void exynos4210_tmu_clear_irqs(struct exynos_tmu_data *data)
 	if (data->soc == SOC_ARCH_EXYNOS5260) {
 		tmu_intstat = EXYNOS5260_TMU_REG_INTSTAT;
 		tmu_intclear = EXYNOS5260_TMU_REG_INTCLEAR;
-	} else if (data->soc == SOC_ARCH_EXYNOS7) {
+	} else if (exynos_tmu_is_exynos7(data)) {
 		tmu_intstat = EXYNOS7_TMU_REG_INTPEND;
 		tmu_intclear = EXYNOS7_TMU_REG_INTPEND;
 	} else if (data->soc == SOC_ARCH_EXYNOS5433) {
@@ -833,6 +857,9 @@ static const struct of_device_id exynos_tmu_match[] = {
 	}, {
 		.compatible = "samsung,exynos7-tmu",
 		.data = (const void *)SOC_ARCH_EXYNOS7,
+	}, {
+		.compatible = "samsung,exynos7885-tmu",
+		.data = (const void *)SOC_ARCH_EXYNOS7885,
 	},
 	{ },
 };
@@ -944,6 +971,24 @@ static int exynos_map_dt_data(struct platform_device *pdev)
 		data->efuse_value = 75;
 		data->min_efuse_value = 15;
 		data->max_efuse_value = 100;
+		break;
+	case SOC_ARCH_EXYNOS7885:
+		data->tmu_set_low_temp = exynos7_tmu_set_low_temp;
+		data->tmu_set_high_temp = exynos7_tmu_set_high_temp;
+		data->tmu_disable_low = exynos7_tmu_disable_low;
+		data->tmu_disable_high = exynos7_tmu_disable_high;
+		data->tmu_set_crit_temp = exynos7_tmu_set_crit_temp;
+		data->tmu_initialize = exynos7_tmu_initialize;
+		data->tmu_control = exynos7885_tmu_control;
+		data->tmu_read = exynos7_tmu_read;
+		data->tmu_set_emulation = exynos4412_tmu_set_emulation;
+		data->tmu_clear_irqs = exynos4210_tmu_clear_irqs;
+		data->gain = 8;
+		data->reference_voltage = 16;
+		/* 9-bit codes at 25 C; the fused ones are around 310 */
+		data->efuse_value = 314;
+		data->min_efuse_value = 256;
+		data->max_efuse_value = 511;
 		break;
 	default:
 		dev_err(&pdev->dev, "Platform not supported\n");
@@ -1072,6 +1117,15 @@ static int exynos_tmu_probe(struct platform_device *pdev)
 				dev_err(dev, "Failed to enable sclk\n");
 				goto err_clk;
 			}
+		}
+		break;
+	case SOC_ARCH_EXYNOS7885:
+		/* The bus clock is the only TMU clock: keep it running. */
+		data->sclk = data->clk;
+		ret = clk_prepare_enable(data->sclk);
+		if (ret) {
+			dev_err(dev, "Failed to enable clock\n");
+			goto err_clk;
 		}
 		break;
 	default:
