@@ -24,16 +24,20 @@ properties:
     maxItems: 1
 
   port: true
+  reset-gpios: true
 
 required:
   - compatible
   - reg
   - port
+  - reset-gpios
 
 additionalProperties: false
 
 examples:
   - |
+    #include <dt-bindings/gpio/gpio.h>
+
     dsi {
         #address-cells = <1>;
         #size-cells = <0>;
@@ -41,6 +45,7 @@ examples:
         panel@0 {
             compatible = "samsung,gta3xl-hx8279d";
             reg = <0>;
+            reset-gpios = <&gpg1 7 GPIO_ACTIVE_LOW>;
 
             port {
                 endpoint {
