@@ -17,7 +17,8 @@
 
 #define S2MPU08_ACPM_TYPE_PMIC	1
 #define S2MPU08_B5CTRL2		0x1d	/* BUCK5 voltage select */
-#define S2MPU08_BUCK_MIN_UV	500000
+/* As in the vendor driver; it matches the boot voltages to the ECT tables. */
+#define S2MPU08_BUCK_MIN_UV	300000
 #define S2MPU08_BUCK_STEP_UV	6250
 #define S2MPU08_BUCK_RAMP_UV_US	12000
 
