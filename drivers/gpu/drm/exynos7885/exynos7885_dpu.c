@@ -24,6 +24,7 @@
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_modeset_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_connector.h>
@@ -679,10 +680,28 @@ static const struct of_device_id dpu_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, dpu_of_match);
 
+/* System sleep switches the display path off and on like DPMS. */
+static int dpu_suspend(struct device *dev)
+{
+	struct exynos7885_dpu *dpu = dev_get_drvdata(dev);
+
+	return drm_mode_config_helper_suspend(&dpu->drm);
+}
+
+static int dpu_resume(struct device *dev)
+{
+	struct exynos7885_dpu *dpu = dev_get_drvdata(dev);
+
+	return drm_mode_config_helper_resume(&dpu->drm);
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(dpu_pm_ops, dpu_suspend, dpu_resume);
+
 static struct platform_driver dpu_platform_driver = {
 	.driver = {
 		.name = "exynos7885-dpu",
 		.of_match_table = dpu_of_match,
+		.pm = pm_sleep_ptr(&dpu_pm_ops),
 	},
 	.probe = dpu_probe,
 	.remove = dpu_remove,
