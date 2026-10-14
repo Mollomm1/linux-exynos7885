@@ -10,6 +10,7 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/string.h>
 #include <linux/regulator/driver.h>
 #include <linux/workqueue.h>
 
@@ -49,11 +50,14 @@ struct s2mu005_charger {
 	bool boost;
 	bool charging;
 	bool online;
+	bool full;
 	bool thermal_block;
 	bool suspended;
 	bool stopping;
 	int health;
 	int input_ua;
+	/* online, status, health and input limit as last reported */
+	int reported[4];
 	atomic_t gadget_ua;
 	int charge_code;
 };
@@ -284,12 +288,39 @@ out:
 	return ua;
 }
 
+static int s2mu005_status(struct s2mu005_charger *chg)
+{
+	if (chg->boost || !chg->online)
+		return POWER_SUPPLY_STATUS_DISCHARGING;
+	if (!chg->charging)
+		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+	return chg->full ? POWER_SUPPLY_STATUS_FULL :
+			   POWER_SUPPLY_STATUS_CHARGING;
+}
+
+/* Caller holds lock. Returns true if a reported property changed. */
+static bool s2mu005_update_reported(struct s2mu005_charger *chg)
+{
+	int cur[4] = {
+		chg->online && !chg->boost,
+		s2mu005_status(chg),
+		chg->health,
+		chg->boost ? 0 : chg->input_ua,
+	};
+
+	if (!memcmp(cur, chg->reported, sizeof(cur)))
+		return false;
+	memcpy(chg->reported, cur, sizeof(cur));
+	return true;
+}
+
 static void s2mu005_charge_work(struct work_struct *work)
 {
 	struct s2mu005_charger *chg = container_of(to_delayed_work(work),
 						struct s2mu005_charger, work);
 	unsigned int status = 0, event = 0, input_status = 0;
 	int adc = 0, ua, ret;
+	bool changed;
 
 	mutex_lock(&chg->lock);
 	if (chg->stopping || chg->suspended)
@@ -314,6 +345,7 @@ static void s2mu005_charge_work(struct work_struct *work)
 	ret = regmap_read(chg->map, SC_STATUS0, &status);
 	if (ret)
 		goto disable;
+	chg->full = (status & 0xf) == 8;
 	ret = regmap_read(chg->map, SC_STATUS3, &event);
 	if (ret)
 		goto disable;
@@ -359,8 +391,15 @@ disable:
 requeue:
 	schedule_delayed_work(&chg->work, HZ);
 out:
+	/*
+	 * The work polls every second while a source is attached; only tell
+	 * user space about it when a reported property changed. Each uevent
+	 * wakes udev, UPower and the desktop's battery monitors.
+	 */
+	changed = s2mu005_update_reported(chg);
 	mutex_unlock(&chg->lock);
-	power_supply_changed(chg->psy);
+	if (changed)
+		power_supply_changed(chg->psy);
 }
 
 static irqreturn_t s2mu005_charger_irq(int irq, void *data)
@@ -396,12 +435,8 @@ static int s2mu005_get_property(struct power_supply *psy,
 		ret = regmap_read(chg->map, SC_STATUS0, &status);
 		if (ret)
 			break;
-		val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
-		if (chg->boost || !chg->online)
-			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		else if (chg->charging)
-			val->intval = (status & 0xf) == 8 ? POWER_SUPPLY_STATUS_FULL :
-							 POWER_SUPPLY_STATUS_CHARGING;
+		chg->full = (status & 0xf) == 8;
+		val->intval = s2mu005_status(chg);
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
 		val->intval = chg->health;
