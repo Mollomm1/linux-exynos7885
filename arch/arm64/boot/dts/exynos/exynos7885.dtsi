@@ -356,24 +356,27 @@
 			compatible = "samsung,exynos7885-cmu-cpucl1";
 			reg = <0x10800000 0x8000>;
 			#clock-cells = <1>;
-			clocks = <&oscclk>;
-			clock-names = "oscclk";
+			clocks = <&oscclk>,
+				 <&cmu_top CLK_DOUT_CPUCL1_SWITCH>;
+			clock-names = "oscclk", "dout_cpucl1_switch";
 		};
 
 		cmu_cpucl0: clock-controller@10900000 {
 			compatible = "samsung,exynos7885-cmu-cpucl0";
 			reg = <0x10900000 0x8000>;
 			#clock-cells = <1>;
-			clocks = <&oscclk>;
-			clock-names = "oscclk";
+			clocks = <&oscclk>,
+				 <&cmu_top CLK_DOUT_CPUCL0_SWITCH>;
+			clock-names = "oscclk", "dout_cpucl0_switch";
 		};
 
 		cmu_cpucl2: clock-controller@10a00000 {
 			compatible = "samsung,exynos7885-cmu-cpucl2";
 			reg = <0x10a00000 0x8000>;
 			#clock-cells = <1>;
-			clocks = <&oscclk>;
-			clock-names = "oscclk";
+			clocks = <&oscclk>,
+				 <&cmu_top CLK_DOUT_CPUCL2_SWITCH>;
+			clock-names = "oscclk", "dout_cpucl2_switch";
 		};
 
 		cmu_g3d: clock-controller@11400000 {
