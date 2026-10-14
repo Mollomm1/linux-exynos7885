@@ -290,8 +290,11 @@ static int hx8279d_bl_update_status(struct backlight_device *bl)
 	return ctx.accum_err;
 }
 
+/*
+ * The DRM panel helpers switch the backlight off before the panel and on
+ * after it, also for system sleep, while the DSI link is up.
+ */
 static const struct backlight_ops hx8279d_bl_ops = {
-	.options = BL_CORE_SUSPENDRESUME,
 	.update_status = hx8279d_bl_update_status,
 };
 
