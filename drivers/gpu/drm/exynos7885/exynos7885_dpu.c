@@ -4,9 +4,11 @@
  *
  * The bootloader leaves DECON0, the DSI host and the panel running in video
  * mode, scanning out its framebuffer through window 3 and IDMA_G0. This
- * driver takes that pipeline over: it moves the IDMA_G0 fetch address to
- * DRM framebuffers and latches each change at frame start through the DECON
- * shadow registers, so page flips are tear-free. The DSI host and the panel
+ * driver takes that pipeline over: it moves the scanout to window 0, the
+ * bottom one, so IDMA_G1 and IDMA_GF can be shown above it as overlay and
+ * cursor planes in windows 1 and 2. It moves the IDMA fetch addresses to
+ * DRM framebuffers and latches each change at frame start through the
+ * DECON shadow registers, so page flips are tear-free. The DSI host and the panel
  * are reached through the DRM bridge chain. While the display is off the
  * DECON is stopped; clocks and power are left as the bootloader set them.
  */
@@ -24,6 +26,7 @@
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_blend.h>
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
@@ -65,8 +68,41 @@
 #define DECON_WIN_EN(w)			BIT(4 * (w))
 #define DECON_DATA_PATH_CONTROL_1	0x0218
 #define DECON_WIN_CHMAP(w)		(0x3 << (4 * (w)))
+#define DECON_WIN_BASE(w)		(0x1000 + 0x30 * (w))
+#define DECON_WIN_CONTROL_0(w)		(DECON_WIN_BASE(w) + 0x00)
+#define DECON_WIN_ALPHA0		GENMASK(23, 16)
+#define DECON_WIN_FUNC_USER		(0xd << 8)
+#define DECON_WIN_ALPHA_MULT_AF		0x2
+#define DECON_WIN_CONTROL_1(w)		(DECON_WIN_BASE(w) + 0x04)
+#define DECON_WIN_START_POSITION(w)	(DECON_WIN_BASE(w) + 0x08)
+#define DECON_WIN_END_POSITION(w)	(DECON_WIN_BASE(w) + 0x0c)
+#define DECON_WIN_POS_Y			GENMASK(29, 16)
+#define DECON_WIN_POS_X			GENMASK(13, 0)
+#define DECON_WIN_COLORMAP_0(w)		(DECON_WIN_BASE(w) + 0x10)
+#define DECON_WIN_PIXEL_COUNT(w)	(DECON_WIN_BASE(w) + 0x1c)
+#define DECON_WIN_NUM_REGS		8
+
+/*
+ * Blend coefficients (vendor decon_reg_set_win_sub_coeff()): FG and BG
+ * factors for the colour, then for the alpha. ALPHA_MULT is the pixel
+ * alpha times the plane alpha.
+ */
+#define DECON_COEF_PLANE_ALPHA0		0x6
+#define DECON_COEF_1_M_PLANE_ALPHA0	0x7
+#define DECON_COEF_ALPHA_MULT		0xa
+#define DECON_COEF_1_M_ALPHA_MULT	0xb
+#define DECON_WIN_COEF(fg, bg)		((fg) << 24 | (bg) << 16 | (fg) << 8 | (bg))
 
 /* IDMA registers */
+#define IDMA_ENABLE			0x0000
+#define IDMA_CLOCK_GATE_EN		(BIT(10) | BIT(9))
+#define IDMA_IN_CON			0x0008
+#define IDMA_IN_IC_MAX			(0x20 << 19)
+#define IDMA_IMG_FORMAT			GENMASK(15, 11)
+#define IDMA_FORMAT_ARGB8888		0
+#define IDMA_FORMAT_XRGB8888		4
+#define IDMA_OUT_CON			0x000c
+#define IDMA_OUT_FRAME_ALPHA_MAX	(0xff << 24)
 #define IDMA_SRC_SIZE			0x0010
 #define IDMA_SRC_HEIGHT			GENMASK(29, 16)
 #define IDMA_SRC_WIDTH			GENMASK(15, 0)
@@ -77,16 +113,46 @@
 #define IDMA_IMG_HEIGHT			GENMASK(28, 16)
 #define IDMA_IMG_WIDTH			GENMASK(12, 0)
 #define IDMA_IN_BASE_ADDR_Y		0x0040
+#define IDMA_DYNAMIC_GATING_EN		0x0058
+#define IDMA_DYNAMIC_GATING_ALL		0xff
 
-/* The bootloader scans out through window 3, which is wired to IDMA_G0. */
-#define DPU_WIN				3
+/*
+ * The bootloader scans out through window 3, the top one, whose channel is
+ * IDMA_G0. Windows with a higher number are shown above the lower ones.
+ */
+#define DPU_BOOT_WIN			3
 #define DPU_CH_IDMA_G0			3
+#define DPU_CH_IDMA_G1			1
+#define DPU_CH_IDMA_GF			2
+#define DPU_PRIMARY_WIN			0
 
-#define DPU_UPDATE_REQ	(DECON_UPDATE_REQ_GLOBAL | DECON_UPDATE_REQ_WIN(DPU_WIN))
+/* The IDMA channels take 16 to 4096 pixels per side. */
+#define DPU_PLANE_MIN			16
+
+/* all windows: the scanout stays in window 3 without the other channels */
+#define DPU_UPDATE_REQ	(DECON_UPDATE_REQ_GLOBAL | DECON_UPDATE_REQ_WIN(0) | \
+			 DECON_UPDATE_REQ_WIN(1) | DECON_UPDATE_REQ_WIN(2) | \
+			 DECON_UPDATE_REQ_WIN(3))
+
+enum dpu_plane_id {
+	DPU_PLANE_PRIMARY,
+	DPU_PLANE_OVERLAY,
+	DPU_PLANE_CURSOR,
+	DPU_NUM_PLANES,
+};
+
+struct dpu_plane {
+	struct drm_plane base;
+	void __iomem *idma;
+	unsigned int win;
+	unsigned int ch;
+};
+
+#define to_dpu_plane(x) container_of(x, struct dpu_plane, base)
 
 struct exynos7885_dpu {
 	struct drm_device drm;
-	struct drm_plane plane;
+	struct dpu_plane planes[DPU_NUM_PLANES];
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
 	struct drm_bridge *bridge;
@@ -94,6 +160,7 @@ struct exynos7885_dpu {
 
 	void __iomem *decon;
 	void __iomem *idma;
+	unsigned int num_planes;
 	int irq;
 
 	/* IDMA_G0 setup the bootloader scans out, restored when disabled. */
@@ -152,7 +219,7 @@ static int dpu_plane_atomic_check(struct drm_plane *plane,
 	if (ret || !new_state->visible)
 		return ret;
 
-	/* Window 3 always covers the whole panel. */
+	/* The scanout window always covers the whole panel. */
 	if (drm_rect_width(&new_state->dst) != crtc_state->mode.hdisplay ||
 	    drm_rect_height(&new_state->dst) != crtc_state->mode.vdisplay)
 		return -EINVAL;
@@ -200,10 +267,10 @@ static void dpu_plane_atomic_disable(struct drm_plane *plane,
 	unsigned long flags;
 
 	/*
-	 * Turning window 3 off stops this video-mode pipeline (DECON stops
-	 * starting frames and the DSI line counter freezes). Scan out the
-	 * bootloader framebuffer again instead, and wait for that to latch so
-	 * the old framebuffer is no longer read when it is released.
+	 * Running the DECON without any window stops this video-mode pipeline
+	 * (the DSI line counter freezes). Scan out the bootloader framebuffer
+	 * again instead, and wait for that to latch so the old framebuffer is
+	 * no longer read when it is released.
 	 */
 	writel(dpu->boot_src_size, dpu->idma + IDMA_SRC_SIZE);
 	writel(dpu->boot_src_offset, dpu->idma + IDMA_SRC_OFFSET);
@@ -225,6 +292,138 @@ static const struct drm_plane_helper_funcs dpu_plane_helper_funcs = {
 	.atomic_disable = dpu_plane_atomic_disable,
 };
 
+static int dpu_overlay_atomic_check(struct drm_plane *plane,
+				    struct drm_atomic_state *state)
+{
+	struct drm_plane_state *new_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	struct drm_crtc_state *crtc_state;
+	int ret;
+
+	if (!new_state->crtc)
+		return 0;
+
+	crtc_state = drm_atomic_get_new_crtc_state(state, new_state->crtc);
+	ret = drm_atomic_helper_check_plane_state(new_state, crtc_state,
+						  DRM_PLANE_NO_SCALING,
+						  DRM_PLANE_NO_SCALING,
+						  true, true);
+	if (ret || !new_state->visible)
+		return ret;
+
+	if (new_state->fb->pitches[0] % 4)
+		return -EINVAL;
+
+	return 0;
+}
+
+static void dpu_window_enable(struct exynos7885_dpu *dpu, unsigned int win,
+			      unsigned int ch, bool enable)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dpu->lock, flags);
+	if (enable)
+		dpu_decon_update_bits(dpu, DECON_DATA_PATH_CONTROL_1,
+				      DECON_WIN_CHMAP(win), ch << (4 * win));
+	dpu_decon_update_bits(dpu, DECON_DATA_PATH_CONTROL_0, DECON_WIN_EN(win),
+			      enable ? DECON_WIN_EN(win) : 0);
+	spin_unlock_irqrestore(&dpu->lock, flags);
+}
+
+static void dpu_overlay_atomic_update(struct drm_plane *plane,
+				      struct drm_atomic_state *state)
+{
+	struct exynos7885_dpu *dpu = to_dpu(plane->dev);
+	struct dpu_plane *dp = to_dpu_plane(plane);
+	struct drm_plane_state *new_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	struct drm_framebuffer *fb = new_state->fb;
+	struct drm_gem_dma_object *gem;
+	struct drm_rect src, *dst = &new_state->dst;
+	u32 alpha = new_state->alpha >> 8;
+	u32 fmt, coef;
+
+	drm_rect_fp_to_int(&src, &new_state->src);
+
+	/* A window too small for the IDMA is left out. */
+	if (!new_state->visible ||
+	    drm_rect_width(dst) < DPU_PLANE_MIN ||
+	    drm_rect_height(dst) < DPU_PLANE_MIN) {
+		dpu_window_enable(dpu, dp->win, dp->ch, false);
+		return;
+	}
+
+	gem = drm_fb_dma_get_gem_obj(fb, 0);
+
+	if (fb->format->format == DRM_FORMAT_XRGB8888 ||
+	    new_state->pixel_blend_mode == DRM_MODE_BLEND_PIXEL_NONE) {
+		fmt = IDMA_FORMAT_XRGB8888;
+		coef = DECON_WIN_COEF(DECON_COEF_PLANE_ALPHA0,
+				      DECON_COEF_1_M_PLANE_ALPHA0);
+	} else if (new_state->pixel_blend_mode == DRM_MODE_BLEND_COVERAGE) {
+		fmt = IDMA_FORMAT_ARGB8888;
+		coef = DECON_WIN_COEF(DECON_COEF_ALPHA_MULT,
+				      DECON_COEF_1_M_ALPHA_MULT);
+	} else {
+		fmt = IDMA_FORMAT_ARGB8888;
+		coef = DECON_WIN_COEF(DECON_COEF_PLANE_ALPHA0,
+				      DECON_COEF_1_M_ALPHA_MULT);
+	}
+
+	writel(IDMA_CLOCK_GATE_EN, dp->idma + IDMA_ENABLE);
+	writel(IDMA_IN_IC_MAX | FIELD_PREP(IDMA_IMG_FORMAT, fmt),
+	       dp->idma + IDMA_IN_CON);
+	writel(IDMA_OUT_FRAME_ALPHA_MAX, dp->idma + IDMA_OUT_CON);
+	writel(FIELD_PREP(IDMA_SRC_HEIGHT, fb->height) |
+	       FIELD_PREP(IDMA_SRC_WIDTH, fb->pitches[0] / 4),
+	       dp->idma + IDMA_SRC_SIZE);
+	writel(FIELD_PREP(IDMA_SRC_OFFSET_Y, src.y1) |
+	       FIELD_PREP(IDMA_SRC_OFFSET_X, src.x1),
+	       dp->idma + IDMA_SRC_OFFSET);
+	writel(FIELD_PREP(IDMA_IMG_HEIGHT, drm_rect_height(&src)) |
+	       FIELD_PREP(IDMA_IMG_WIDTH, drm_rect_width(&src)),
+	       dp->idma + IDMA_IMG_SIZE);
+	writel(lower_32_bits(gem->dma_addr + fb->offsets[0]),
+	       dp->idma + IDMA_IN_BASE_ADDR_Y);
+	writel(IDMA_DYNAMIC_GATING_ALL, dp->idma + IDMA_DYNAMIC_GATING_EN);
+
+	writel(FIELD_PREP(DECON_WIN_ALPHA0, alpha) | DECON_WIN_FUNC_USER |
+	       DECON_WIN_ALPHA_MULT_AF, dpu->decon + DECON_WIN_CONTROL_0(dp->win));
+	writel(coef, dpu->decon + DECON_WIN_CONTROL_1(dp->win));
+	writel(FIELD_PREP(DECON_WIN_POS_Y, dst->y1) |
+	       FIELD_PREP(DECON_WIN_POS_X, dst->x1),
+	       dpu->decon + DECON_WIN_START_POSITION(dp->win));
+	writel(FIELD_PREP(DECON_WIN_POS_Y, dst->y2 - 1) |
+	       FIELD_PREP(DECON_WIN_POS_X, dst->x2 - 1),
+	       dpu->decon + DECON_WIN_END_POSITION(dp->win));
+
+	dpu_window_enable(dpu, dp->win, dp->ch, true);
+}
+
+static void dpu_overlay_atomic_disable(struct drm_plane *plane,
+				       struct drm_atomic_state *state)
+{
+	struct exynos7885_dpu *dpu = to_dpu(plane->dev);
+	struct dpu_plane *dp = to_dpu_plane(plane);
+	unsigned long flags;
+
+	dpu_window_enable(dpu, dp->win, dp->ch, false);
+
+	/* The window stops reading its framebuffer once this latched. */
+	spin_lock_irqsave(&dpu->lock, flags);
+	dpu_request_update(dpu);
+	spin_unlock_irqrestore(&dpu->lock, flags);
+	if (!dpu->stopped && dpu_wait_update(dpu))
+		drm_warn(plane->dev, "window %u did not switch off\n", dp->win);
+}
+
+static const struct drm_plane_helper_funcs dpu_overlay_helper_funcs = {
+	.atomic_check = dpu_overlay_atomic_check,
+	.atomic_update = dpu_overlay_atomic_update,
+	.atomic_disable = dpu_overlay_atomic_disable,
+};
+
 static const struct drm_plane_funcs dpu_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
@@ -235,12 +434,18 @@ static const struct drm_plane_funcs dpu_plane_funcs = {
 };
 
 /*
- * IDMA_G0 stays in the bootloader's ARGB8888 input format. DECON ignores the
- * alpha byte for this bottom window, so XRGB8888 buffers display unchanged.
+ * IDMA_G0 stays in the bootloader's ARGB8888 input format. The scanout
+ * window copies its pixels without blending, so XRGB8888 buffers display
+ * unchanged.
  */
 static const u32 dpu_plane_formats[] = {
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_ARGB8888,
+};
+
+static const u32 dpu_overlay_formats[] = {
+	DRM_FORMAT_ARGB8888,
+	DRM_FORMAT_XRGB8888,
 };
 
 static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
@@ -438,9 +643,9 @@ static const struct drm_driver dpu_driver = {
 /*
  * Stop and restart the DECON while the display is off, between the panel
  * being switched off and the DSI link being stopped, as the vendor driver
- * does. Window 3 stays enabled: turning it off instead stops the video
- * pipeline in a way that only a reboot recovers. The DECON registers keep
- * their values meanwhile.
+ * does. The scanout window stays enabled: running the DECON without a
+ * window instead stops the video pipeline in a way that only a reboot
+ * recovers. The DECON registers keep their values meanwhile.
  */
 static void dpu_encoder_atomic_disable(struct drm_encoder *encoder,
 				       struct drm_atomic_state *state)
@@ -496,6 +701,7 @@ static int dpu_kms_init(struct exynos7885_dpu *dpu)
 {
 	struct drm_device *drm = &dpu->drm;
 	struct drm_connector *connector;
+	unsigned int i;
 	int ret;
 
 	ret = drmm_mode_config_init(drm);
@@ -507,18 +713,46 @@ static int dpu_kms_init(struct exynos7885_dpu *dpu)
 	drm->mode_config.min_height = dpu->mode.vdisplay;
 	drm->mode_config.max_height = dpu->mode.vdisplay;
 	drm->mode_config.preferred_depth = 24;
+	drm->mode_config.cursor_width = 64;
+	drm->mode_config.cursor_height = 64;
 	drm->mode_config.funcs = &dpu_mode_config_funcs;
 	drm->mode_config.helper_private = &dpu_mode_config_helpers;
 
-	ret = drm_universal_plane_init(drm, &dpu->plane, 0, &dpu_plane_funcs,
-				       dpu_plane_formats,
+	ret = drm_universal_plane_init(drm, &dpu->planes[DPU_PLANE_PRIMARY].base,
+				       0, &dpu_plane_funcs, dpu_plane_formats,
 				       ARRAY_SIZE(dpu_plane_formats), NULL,
 				       DRM_PLANE_TYPE_PRIMARY, NULL);
 	if (ret)
 		return ret;
-	drm_plane_helper_add(&dpu->plane, &dpu_plane_helper_funcs);
+	drm_plane_helper_add(&dpu->planes[DPU_PLANE_PRIMARY].base,
+			     &dpu_plane_helper_funcs);
+	drm_plane_create_zpos_immutable_property(&dpu->planes[DPU_PLANE_PRIMARY].base,
+						 0);
 
-	ret = drm_crtc_init_with_planes(drm, &dpu->crtc, &dpu->plane, NULL,
+	for (i = DPU_PLANE_OVERLAY; i < dpu->num_planes; i++) {
+		struct drm_plane *plane = &dpu->planes[i].base;
+
+		ret = drm_universal_plane_init(drm, plane, 0, &dpu_plane_funcs,
+					       dpu_overlay_formats,
+					       ARRAY_SIZE(dpu_overlay_formats),
+					       NULL, i == DPU_PLANE_CURSOR ?
+					       DRM_PLANE_TYPE_CURSOR :
+					       DRM_PLANE_TYPE_OVERLAY, NULL);
+		if (ret)
+			return ret;
+		drm_plane_helper_add(plane, &dpu_overlay_helper_funcs);
+		drm_plane_create_zpos_immutable_property(plane, i);
+		drm_plane_create_alpha_property(plane);
+		drm_plane_create_blend_mode_property(plane,
+					BIT(DRM_MODE_BLEND_PIXEL_NONE) |
+					BIT(DRM_MODE_BLEND_PREMULTI) |
+					BIT(DRM_MODE_BLEND_COVERAGE));
+	}
+
+	ret = drm_crtc_init_with_planes(drm, &dpu->crtc,
+					&dpu->planes[DPU_PLANE_PRIMARY].base,
+					dpu->num_planes > DPU_PLANE_CURSOR ?
+					&dpu->planes[DPU_PLANE_CURSOR].base : NULL,
 					&dpu_crtc_funcs, NULL);
 	if (ret)
 		return ret;
@@ -561,10 +795,12 @@ static int dpu_check_handover(struct exynos7885_dpu *dpu)
 	path0 = readl(dpu->decon + DECON_DATA_PATH_CONTROL_0);
 	path1 = readl(dpu->decon + DECON_DATA_PATH_CONTROL_1);
 
+	/* This driver may have moved the scanout to window 0 already. */
 	if (!(ctrl & DECON_GLOBAL_RUN_STATUS) ||
-	    !(path0 & DECON_WIN_EN(DPU_WIN)) ||
-	    (path1 & DECON_WIN_CHMAP(DPU_WIN)) !=
-	    (DPU_CH_IDMA_G0 << (4 * DPU_WIN))) {
+	    !((path0 & DECON_WIN_EN(DPU_BOOT_WIN)) ||
+	      ((path0 & DECON_WIN_EN(DPU_PRIMARY_WIN)) &&
+	       (path1 & DECON_WIN_CHMAP(DPU_PRIMARY_WIN)) ==
+	       (DPU_CH_IDMA_G0 << (4 * DPU_PRIMARY_WIN))))) {
 		dev_err(dev, "bootloader display not running (ctrl %#x path %#x/%#x)\n",
 			ctrl, path0, path1);
 		return -ENODEV;
@@ -576,6 +812,37 @@ static int dpu_check_handover(struct exynos7885_dpu *dpu)
 	dpu->boot_addr = readl(dpu->idma + IDMA_IN_BASE_ADDR_Y);
 
 	return 0;
+}
+
+/*
+ * Move the scanout from window 3, the top one, to window 0, the bottom
+ * one, so the other channels can be shown above it. Window 0 takes window
+ * 3's setup, and both change in one shadow update, so the DECON never
+ * starts a frame without a window. Window 3's channel stays IDMA_G0.
+ */
+static int dpu_move_to_bottom(struct exynos7885_dpu *dpu)
+{
+	u32 path0 = readl(dpu->decon + DECON_DATA_PATH_CONTROL_0);
+	u32 req = DECON_UPDATE_REQ_GLOBAL | DECON_UPDATE_REQ_WIN(DPU_BOOT_WIN) |
+		  DECON_UPDATE_REQ_WIN(DPU_PRIMARY_WIN);
+	unsigned int i;
+	u32 val;
+
+	if (!(path0 & DECON_WIN_EN(DPU_BOOT_WIN)))
+		return 0;
+
+	for (i = 0; i < DECON_WIN_NUM_REGS; i++)
+		writel(readl(dpu->decon + DECON_WIN_BASE(DPU_BOOT_WIN) + 4 * i),
+		       dpu->decon + DECON_WIN_BASE(DPU_PRIMARY_WIN) + 4 * i);
+	dpu_decon_update_bits(dpu, DECON_DATA_PATH_CONTROL_1,
+			      DECON_WIN_CHMAP(DPU_PRIMARY_WIN),
+			      DPU_CH_IDMA_G0 << (4 * DPU_PRIMARY_WIN));
+	writel(DECON_WIN_EN(DPU_PRIMARY_WIN),
+	       dpu->decon + DECON_DATA_PATH_CONTROL_0);
+	dpu_decon_update_bits(dpu, DECON_SHADOW_REG_UPDATE_REQ, req, req);
+
+	return readl_poll_timeout(dpu->decon + DECON_SHADOW_REG_UPDATE_REQ, val,
+				  !(val & req), 1000, 100000);
 }
 
 static int dpu_probe(struct platform_device *pdev)
@@ -599,6 +866,29 @@ static int dpu_probe(struct platform_device *pdev)
 	dpu->idma = devm_platform_ioremap_resource_byname(pdev, "idma-g0");
 	if (IS_ERR(dpu->idma))
 		return PTR_ERR(dpu->idma);
+	dpu->planes[DPU_PLANE_PRIMARY].idma = dpu->idma;
+	dpu->planes[DPU_PLANE_PRIMARY].win = DPU_PRIMARY_WIN;
+	dpu->planes[DPU_PLANE_PRIMARY].ch = DPU_CH_IDMA_G0;
+	dpu->num_planes = 1;
+
+	/* Overlay and cursor planes, if their channels are described. */
+	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "idma-g1") &&
+	    platform_get_resource_byname(pdev, IORESOURCE_MEM, "idma-gf")) {
+		dpu->planes[DPU_PLANE_OVERLAY].idma =
+			devm_platform_ioremap_resource_byname(pdev, "idma-g1");
+		if (IS_ERR(dpu->planes[DPU_PLANE_OVERLAY].idma))
+			return PTR_ERR(dpu->planes[DPU_PLANE_OVERLAY].idma);
+		dpu->planes[DPU_PLANE_OVERLAY].win = 1;
+		dpu->planes[DPU_PLANE_OVERLAY].ch = DPU_CH_IDMA_G1;
+
+		dpu->planes[DPU_PLANE_CURSOR].idma =
+			devm_platform_ioremap_resource_byname(pdev, "idma-gf");
+		if (IS_ERR(dpu->planes[DPU_PLANE_CURSOR].idma))
+			return PTR_ERR(dpu->planes[DPU_PLANE_CURSOR].idma);
+		dpu->planes[DPU_PLANE_CURSOR].win = 2;
+		dpu->planes[DPU_PLANE_CURSOR].ch = DPU_CH_IDMA_GF;
+		dpu->num_planes = DPU_NUM_PLANES;
+	}
 	dpu->irq = platform_get_irq_byname(pdev, "frame-start");
 	if (dpu->irq < 0)
 		return dpu->irq;
@@ -624,6 +914,13 @@ static int dpu_probe(struct platform_device *pdev)
 	ret = dpu_check_handover(dpu);
 	if (ret)
 		return ret;
+
+	if (dpu->num_planes > 1) {
+		ret = dpu_move_to_bottom(dpu);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "scanout did not move to window 0\n");
+	}
 
 	ret = dpu_kms_init(dpu);
 	if (ret)
