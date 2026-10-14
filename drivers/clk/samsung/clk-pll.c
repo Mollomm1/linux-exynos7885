@@ -735,8 +735,8 @@ static const struct clk_ops samsung_pll0822x_clk_min_ops = {
 #define PLL1417X_MUX_TIMEOUT_US		100
 #define PLL1417X_PARK_SEL		BIT(0)
 #define PLL1417X_PARK_BUSY		BIT(16)
-#define PLL1417X_LOCK_TIMEOUT_US	1000
-#define PLL1417X_LOCK_ATTEMPTS		3
+#define PLL1417X_LOCK_TIMEOUT_US	200
+#define PLL1417X_LOCK_ATTEMPTS		5
 
 static int samsung_pll1417x_mux_write(struct samsung_clk_pll *pll, u32 con)
 {
