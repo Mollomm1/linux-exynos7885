@@ -24,7 +24,7 @@
 /* NOTE: Must be equal to the last clock ID increased by one */
 #define CLKS_NR_TOP			(CLK_DOUT_G3D_SWITCH + 1)
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
-#define CLKS_NR_PERI			(CLK_GOUT_WDT1_PCLK + 1)
+#define CLKS_NR_PERI			(CLK_GOUT_TMU_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
 #define CLKS_NR_DISPAUD			(CLK_GOUT_UAIF0_SYNC + 1)
 #define CLKS_NR_G3D			(CLK_DOUT_G3D_BUSP + 1)
@@ -420,6 +420,7 @@ CLK_OF_DECLARE(exynos7885_cmu_top, "samsung,exynos7885-cmu-top",
 #define PLL_CON0_MUX_CLKCMU_PERI_USI0_USER	0x01c0
 #define PLL_CON0_MUX_CLKCMU_PERI_USI1_USER	0x01e0
 #define PLL_CON0_MUX_CLKCMU_PERI_USI2_USER	0x0200
+#define CLK_CON_GAT_GOUT_PERI_TMU_PCLK		0x2010
 #define CLK_CON_GAT_GOUT_PERI_GPIO_TOP_PCLK	0x2024
 #define CLK_CON_GAT_GOUT_PERI_HSI2C_0_PCLK	0x2028
 #define CLK_CON_GAT_GOUT_PERI_HSI2C_1_PCLK	0x202c
@@ -465,6 +466,7 @@ static const unsigned long peri_clk_regs[] __initconst = {
 	PLL_CON0_MUX_CLKCMU_PERI_USI0_USER,
 	PLL_CON0_MUX_CLKCMU_PERI_USI1_USER,
 	PLL_CON0_MUX_CLKCMU_PERI_USI2_USER,
+	CLK_CON_GAT_GOUT_PERI_TMU_PCLK,
 	CLK_CON_GAT_GOUT_PERI_GPIO_TOP_PCLK,
 	CLK_CON_GAT_GOUT_PERI_HSI2C_0_PCLK,
 	CLK_CON_GAT_GOUT_PERI_HSI2C_1_PCLK,
@@ -606,6 +608,8 @@ static const struct samsung_gate_clock peri_gate_clks[] __initconst = {
 	     CLK_CON_GAT_GOUT_PERI_WDT_CLUSTER0_PCLK, 21, 0, 0),
 	GATE(CLK_GOUT_WDT1_PCLK, "gout_wdt1_pclk", "mout_peri_bus_user",
 	     CLK_CON_GAT_GOUT_PERI_WDT_CLUSTER1_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_TMU_PCLK, "gout_tmu_pclk", "mout_peri_bus_user",
+	     CLK_CON_GAT_GOUT_PERI_TMU_PCLK, 21, 0, 0),
 };
 
 static const struct samsung_cmu_info peri_cmu_info __initconst = {
