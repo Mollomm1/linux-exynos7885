@@ -26,11 +26,21 @@ properties:
   port: true
   reset-gpios: true
 
+  ldo-gpios:
+    maxItems: 1
+    description: Enable of the panel LDO supply, switched on first.
+
+  buck-gpios:
+    maxItems: 1
+    description: Enable of the panel buck supply, switched on second.
+
 required:
   - compatible
   - reg
   - port
   - reset-gpios
+  - ldo-gpios
+  - buck-gpios
 
 additionalProperties: false
 
@@ -46,6 +56,8 @@ examples:
             compatible = "samsung,gta3xl-hx8279d";
             reg = <0>;
             reset-gpios = <&gpg1 7 GPIO_ACTIVE_LOW>;
+            ldo-gpios = <&gpg2 6 GPIO_ACTIVE_HIGH>;
+            buck-gpios = <&gpg2 7 GPIO_ACTIVE_HIGH>;
 
             port {
                 endpoint {
