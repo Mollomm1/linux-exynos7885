@@ -26,7 +26,7 @@
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_TMU_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
-#define CLKS_NR_DISPAUD			(CLK_GOUT_UAIF0_SYNC + 1)
+#define CLKS_NR_DISPAUD			(CLK_GOUT_SMMU_DPU_CLK + 1)
 #define CLKS_NR_G3D			(CLK_DOUT_G3D_BUSP + 1)
 #define CLKS_NR_CPUCL			(CLK_DOUT_CPUCL_CPU + 1)
 
@@ -888,6 +888,7 @@ static const struct samsung_cmu_info fsys_cmu_info __initconst = {
 #define CLK_CON_GAT_UAIF0_SYNC		0x20bc
 #define CLK_CON_GAT_UAIF3_SYNC		0x20c4
 #define CLK_CON_GAT_SMMU_ABOX_CLK	0x20d0
+#define CLK_CON_GAT_SMMU_DPU_CLK	0x20d4
 
 static const unsigned long dispaud_clk_regs[] __initconst = {
 	PLL_CON0_PLL_AUD,
@@ -977,6 +978,16 @@ static const struct samsung_gate_clock dispaud_gate_clks[] __initconst = {
 	     CLK_CON_GAT_UAIF3_SYNC, 21, 0, 0),
 	GATE(CLK_GOUT_ABOX_CA7, "gout_abox_ca7", "mout_aud_cpu_hch",
 	     CLK_CON_GAT_ABOX_CA7, 21, 0, 0),
+	/*
+	 * The DPU System MMU clock comes from the DISPAUD bus clock, which is
+	 * not modelled. The display runs from the bootloader on that bus, so
+	 * this gate is left out of dispaud_clk_regs: it stays in the hardware
+	 * mode the bootloader set (manual bit clear). The System MMU driver
+	 * requires a clock; it only turns this one off while the display is
+	 * stopped for system sleep.
+	 */
+	GATE(CLK_GOUT_SMMU_DPU_CLK, "gout_smmu_dpu_clk", "oscclk",
+	     CLK_CON_GAT_SMMU_DPU_CLK, 21, CLK_IGNORE_UNUSED, 0),
 };
 
 static const struct samsung_cmu_info dispaud_cmu_info __initconst = {
