@@ -7,8 +7,8 @@
  * driver takes that pipeline over: it moves the IDMA_G0 fetch address to
  * DRM framebuffers and latches each change at frame start through the DECON
  * shadow registers, so page flips are tear-free. The DSI host and the panel
- * are reached through the DRM bridge chain; clocks and power are left as the
- * bootloader set them.
+ * are reached through the DRM bridge chain. While the display is off the
+ * DECON is stopped; clocks and power are left as the bootloader set them.
  */
 
 #include <linux/aperture.h>
@@ -47,6 +47,8 @@
 
 /* DECON registers */
 #define DECON_GLOBAL_CONTROL		0x0000
+#define DECON_GLOBAL_EN_F		BIT(0)
+#define DECON_GLOBAL_EN			BIT(1)
 #define DECON_GLOBAL_RUN_STATUS		BIT(4)
 #define DECON_INTERRUPT_ENABLE		0x0040
 #define DECON_FRAME_START_INT_EN	BIT(12)
@@ -99,6 +101,8 @@ struct exynos7885_dpu {
 	/* Protects DECON read-modify-writes and the pending event. */
 	spinlock_t lock;
 	struct drm_pending_vblank_event *event;
+	/* DECON stopped while the display is off */
+	bool stopped;
 };
 
 #define to_dpu(x) container_of(x, struct exynos7885_dpu, drm)
@@ -209,7 +213,8 @@ static void dpu_plane_atomic_disable(struct drm_plane *plane,
 	dpu_request_update(dpu);
 	spin_unlock_irqrestore(&dpu->lock, flags);
 
-	if (dpu_wait_update(dpu))
+	/* A stopped DECON reads nothing; it latches this when restarted. */
+	if (!dpu->stopped && dpu_wait_update(dpu))
 		drm_warn(plane->dev, "scanout restore did not latch\n");
 }
 
@@ -429,6 +434,63 @@ static const struct drm_driver dpu_driver = {
 	.minor = 0,
 };
 
+/*
+ * Stop and restart the DECON while the display is off, between the panel
+ * being switched off and the DSI link being stopped, as the vendor driver
+ * does. Window 3 stays enabled: turning it off instead stops the video
+ * pipeline in a way that only a reboot recovers. The DECON registers keep
+ * their values meanwhile.
+ */
+static void dpu_encoder_atomic_disable(struct drm_encoder *encoder,
+				       struct drm_atomic_state *state)
+{
+	struct exynos7885_dpu *dpu = to_dpu(encoder->dev);
+	unsigned long flags;
+	u32 val;
+
+	spin_lock_irqsave(&dpu->lock, flags);
+	dpu_decon_update_bits(dpu, DECON_GLOBAL_CONTROL, DECON_GLOBAL_EN_F, 0);
+	dpu_decon_update_bits(dpu, DECON_SHADOW_REG_UPDATE_REQ,
+			      DECON_UPDATE_REQ_GLOBAL, DECON_UPDATE_REQ_GLOBAL);
+	spin_unlock_irqrestore(&dpu->lock, flags);
+
+	/* It stops at the end of the current frame. */
+	if (readl_poll_timeout(dpu->decon + DECON_GLOBAL_CONTROL, val,
+			       !(val & DECON_GLOBAL_RUN_STATUS), 100, 50000))
+		drm_warn(encoder->dev, "DECON did not stop\n");
+	dpu->stopped = true;
+}
+
+static void dpu_encoder_atomic_enable(struct drm_encoder *encoder,
+				      struct drm_atomic_state *state)
+{
+	struct exynos7885_dpu *dpu = to_dpu(encoder->dev);
+	unsigned long flags;
+	u32 val;
+
+	/* The bootloader leaves the DECON running. */
+	if (!dpu->stopped)
+		return;
+
+	spin_lock_irqsave(&dpu->lock, flags);
+	dpu_decon_update_bits(dpu, DECON_GLOBAL_CONTROL,
+			      DECON_GLOBAL_EN | DECON_GLOBAL_EN_F,
+			      DECON_GLOBAL_EN | DECON_GLOBAL_EN_F);
+	dpu_decon_update_bits(dpu, DECON_SHADOW_REG_UPDATE_REQ,
+			      DECON_UPDATE_REQ_GLOBAL, DECON_UPDATE_REQ_GLOBAL);
+	spin_unlock_irqrestore(&dpu->lock, flags);
+
+	if (readl_poll_timeout(dpu->decon + DECON_GLOBAL_CONTROL, val,
+			       val & DECON_GLOBAL_RUN_STATUS, 100, 50000))
+		drm_warn(encoder->dev, "DECON did not start\n");
+	dpu->stopped = false;
+}
+
+static const struct drm_encoder_helper_funcs dpu_encoder_helper_funcs = {
+	.atomic_enable = dpu_encoder_atomic_enable,
+	.atomic_disable = dpu_encoder_atomic_disable,
+};
+
 static int dpu_kms_init(struct exynos7885_dpu *dpu)
 {
 	struct drm_device *drm = &dpu->drm;
@@ -465,6 +527,7 @@ static int dpu_kms_init(struct exynos7885_dpu *dpu)
 	if (ret)
 		return ret;
 	dpu->encoder.possible_crtcs = drm_crtc_mask(&dpu->crtc);
+	drm_encoder_helper_add(&dpu->encoder, &dpu_encoder_helper_funcs);
 
 	ret = drm_bridge_attach(&dpu->encoder, dpu->bridge, NULL,
 				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
