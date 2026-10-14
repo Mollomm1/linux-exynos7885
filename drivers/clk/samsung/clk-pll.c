@@ -32,6 +32,8 @@ struct samsung_clk_pll {
 	enum samsung_pll_type	type;
 	unsigned int		rate_count;
 	const struct samsung_pll_rate_table *rate_table;
+	/* optional mux parking the consumer of a pll_1417x, see below */
+	void __iomem		*park_reg;
 };
 
 #define to_clk_pll(_hw) container_of(_hw, struct samsung_clk_pll, hw)
@@ -718,17 +720,23 @@ static const struct clk_ops samsung_pll0822x_clk_min_ops = {
  * As the vendor driver does, switch its output mux to the oscillator,
  * stop the PLL and restart it with the new dividers. The PLL only runs
  * while that mux selects it, so it is selected again together with the
- * enable bit; consumers must be parked on another clock until it locks.
- * Keep it off for a while before the restart: a PLL restarted right away
- * sometimes never locks, and then keeps failing until it has been off for
- * longer. A PLL that does not lock is left deselected, on the oscillator.
+ * enable bit; its consumer is parked on another clock until it locks.
+ *
+ * On the Exynos7885 CPU clusters the restart has to follow the parking
+ * at once: a PLL restarted 100 us or more after its consumer was parked
+ * never locks, until the consumer has been unparked again. So the PLL
+ * parks its consumer itself, through the optional park mux, with
+ * interrupts off until the restart. A restart that does not lock is
+ * retried after unparking the consumer on the oscillator. A PLL that
+ * never locks is left deselected, on the oscillator.
  */
 #define PLL1417X_MUX_SEL		BIT(4)
 #define PLL1417X_MUX_BUSY		BIT(7)
 #define PLL1417X_MUX_TIMEOUT_US		100
+#define PLL1417X_PARK_SEL		BIT(0)
+#define PLL1417X_PARK_BUSY		BIT(16)
 #define PLL1417X_LOCK_TIMEOUT_US	1000
-#define PLL1417X_OFF_US			10
-#define PLL1417X_LOCK_ATTEMPTS		4
+#define PLL1417X_LOCK_ATTEMPTS		3
 
 static int samsung_pll1417x_mux_write(struct samsung_clk_pll *pll, u32 con)
 {
@@ -745,14 +753,66 @@ static int samsung_pll1417x_mux_write(struct samsung_clk_pll *pll, u32 con)
 	return ret;
 }
 
+static int samsung_pll1417x_park(struct samsung_clk_pll *pll, bool park)
+{
+	u32 val;
+	int ret;
+
+	if (!pll->park_reg)
+		return 0;
+
+	val = readl_relaxed(pll->park_reg);
+	if (park)
+		val |= PLL1417X_PARK_SEL;
+	else
+		val &= ~PLL1417X_PARK_SEL;
+	writel_relaxed(val, pll->park_reg);
+
+	ret = readl_relaxed_poll_timeout_atomic(pll->park_reg, val,
+					!(val & PLL1417X_PARK_BUSY), 1,
+					PLL1417X_MUX_TIMEOUT_US);
+	if (ret)
+		pr_err("%s: park mux stays busy\n", clk_hw_get_name(&pll->hw));
+
+	return ret;
+}
+
+static int samsung_pll1417x_restart(struct samsung_clk_pll *pll, u32 con,
+				    u32 lock)
+{
+	unsigned long flags;
+	u32 cur;
+	int ret;
+
+	local_irq_save(flags);
+
+	ret = samsung_pll1417x_park(pll, true);
+	if (ret)
+		goto out;
+
+	writel_relaxed(lock, pll->lock_reg);
+	cur = readl_relaxed(pll->con_reg) & ~PLL1417X_MUX_SEL;
+	ret = samsung_pll1417x_mux_write(pll, cur);
+	if (ret)
+		goto out;
+
+	writel_relaxed(cur & ~BIT(pll->enable_offs), pll->con_reg);
+	readl_relaxed(pll->con_reg);
+	writel_relaxed(con | BIT(pll->enable_offs) | PLL1417X_MUX_SEL,
+		       pll->con_reg);
+out:
+	local_irq_restore(flags);
+
+	return ret;
+}
+
 static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 				     unsigned long prate)
 {
 	const struct samsung_pll_rate_table *rate;
 	struct samsung_clk_pll *pll = to_clk_pll(hw);
-	unsigned long off_us = PLL1417X_OFF_US;
 	unsigned int attempt;
-	u32 con, cur, val;
+	u32 con, val;
 	int ret;
 
 	con = readl_relaxed(pll->con_reg);
@@ -774,41 +834,32 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 	       (rate->pdiv << PLL0822X_PDIV_SHIFT) |
 	       (rate->sdiv << PLL0822X_SDIV_SHIFT);
 
-	writel_relaxed(rate->pdiv * PLL0822X_LOCK_FACTOR, pll->lock_reg);
-
-	/*
-	 * A failed restart is retried with ten times the off time, from
-	 * 10 us up to 10 ms.
-	 */
 	for (attempt = 1; attempt <= PLL1417X_LOCK_ATTEMPTS; attempt++) {
-		cur = readl_relaxed(pll->con_reg) & ~PLL1417X_MUX_SEL;
-		ret = samsung_pll1417x_mux_write(pll, cur);
+		ret = samsung_pll1417x_restart(pll, con,
+					rate->pdiv * PLL0822X_LOCK_FACTOR);
 		if (ret)
-			return ret;
-
-		writel_relaxed(cur & ~BIT(pll->enable_offs), pll->con_reg);
-		readl_relaxed(pll->con_reg);
-		fsleep(off_us);
-		off_us *= 10;
-
-		writel_relaxed(con | BIT(pll->enable_offs) | PLL1417X_MUX_SEL,
-			       pll->con_reg);
+			break;
 
 		ret = readl_relaxed_poll_timeout_atomic(pll->con_reg, val,
 					val & BIT(pll->lock_offs), 1,
 					PLL1417X_LOCK_TIMEOUT_US);
-		if (!ret) {
-			if (attempt > 1)
-				pr_info_ratelimited("%s: locked on attempt %u\n",
-						    clk_hw_get_name(hw),
-						    attempt);
-			return 0;
-		}
+		if (!ret)
+			break;
+
+		/* Unpark the consumer, on the oscillator, before retrying. */
+		samsung_pll1417x_mux_write(pll, con | BIT(pll->enable_offs));
+		samsung_pll1417x_park(pll, false);
 	}
 
-	pr_err("Could not lock PLL %s (con %#010x)\n", clk_hw_get_name(hw),
-	       val);
-	samsung_pll1417x_mux_write(pll, con | BIT(pll->enable_offs));
+	if (!ret && attempt > 1)
+		pr_info_ratelimited("%s: locked on attempt %u\n",
+				    clk_hw_get_name(hw), attempt);
+	if (ret) {
+		pr_err("Could not lock PLL %s (con %#010x)\n",
+		       clk_hw_get_name(hw), readl_relaxed(pll->con_reg));
+		samsung_pll1417x_mux_write(pll, con | BIT(pll->enable_offs));
+	}
+	samsung_pll1417x_park(pll, false);
 
 	return ret;
 }
@@ -1786,6 +1837,8 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 	pll->type = pll_clk->type;
 	pll->lock_reg = ctx->reg_base + pll_clk->lock_offset;
 	pll->con_reg = ctx->reg_base + pll_clk->con_offset;
+	if (pll_clk->park_offset)
+		pll->park_reg = ctx->reg_base + pll_clk->park_offset;
 
 	ret = clk_hw_register(ctx->dev, &pll->hw);
 	if (ret) {

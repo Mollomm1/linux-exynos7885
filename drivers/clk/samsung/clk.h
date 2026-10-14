@@ -266,6 +266,7 @@ struct samsung_pll_clock {
 	int			lock_offset;
 	enum samsung_pll_type	type;
 	const struct samsung_pll_rate_table *rate_table;
+	int			park_offset;
 };
 
 #define __PLL(_typ, _id, _name, _pname, _flags, _lock, _con, _rtable)	\
@@ -283,6 +284,24 @@ struct samsung_pll_clock {
 #define PLL(_typ, _id, _name, _pname, _lock, _con, _rtable)	\
 	__PLL(_typ, _id, _name, _pname, CLK_GET_RATE_NOCACHE, _lock,	\
 	      _con, _rtable)
+
+/*
+ * A pll_1417x that parks its consumer while it relocks: @_park is the
+ * offset of the consumer's mux, which selects the other parent with bit 0
+ * and is busy while bit 16 is set.
+ */
+#define PLL_PARK(_typ, _id, _name, _pname, _lock, _con, _rtable, _park) \
+	{								\
+		.id		= _id,					\
+		.type		= _typ,					\
+		.name		= _name,				\
+		.parent_name	= _pname,				\
+		.flags		= CLK_GET_RATE_NOCACHE,			\
+		.con_offset	= _con,					\
+		.lock_offset	= _lock,				\
+		.rate_table	= _rtable,				\
+		.park_offset	= _park,				\
+	}
 
 struct samsung_cpu_clock {
 	unsigned int	id;

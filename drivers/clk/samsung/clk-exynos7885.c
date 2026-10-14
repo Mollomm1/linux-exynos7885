@@ -1190,10 +1190,15 @@ static const struct samsung_pll_rate_table cpucl12_pll_rates[] __initconst = {
 	PLL_35XX_RATE(26 * MHZ, 546000000U, 126, 3, 1),
 };
 
+/*
+ * While its PLL relocks, a cluster runs from its switch-user clock, the
+ * 26 MHz oscillator as the bootloader sets that mux.
+ */
 #define CPUCL_CLKS(n, pll_con0, switch_user, rates)			\
 static const struct samsung_pll_clock cpucl##n##_pll_clks[] __initconst = { \
-	PLL(pll_1417x, CLK_FOUT_CPUCL_PLL, "fout_cpucl" #n "_pll", "oscclk", \
-	    PLL_LOCKTIME_PLL_CPUCL, pll_con0, rates),			\
+	PLL_PARK(pll_1417x, CLK_FOUT_CPUCL_PLL, "fout_cpucl" #n "_pll",	\
+		 "oscclk", PLL_LOCKTIME_PLL_CPUCL, pll_con0, rates,	\
+		 CLK_CON_MUX_MUX_CLK_CPUCL_PLL),			\
 };									\
 PNAME(mout_cpucl##n##_pll_p) = { "oscclk", "fout_cpucl" #n "_pll" };	\
 PNAME(mout_cpucl##n##_switch_user_p) = { "oscclk",			\
@@ -1241,84 +1246,6 @@ CPUCL_CMU_INFO(0, cpucl0_clk_regs);
 CPUCL_CMU_INFO(1, cpucl12_clk_regs);
 CPUCL_CMU_INFO(2, cpucl12_clk_regs);
 
-#define CPUCL_MUX_SEL_SWITCH	BIT(0)
-#define CPUCL_MUX_BUSY		BIT(16)
-
-struct exynos7885_cpucl_park {
-	struct notifier_block nb;
-	void __iomem *mux_reg;
-	bool parked;
-};
-
-static struct exynos7885_cpucl_park exynos7885_cpucl_park[3];
-
-static void exynos7885_cpucl_mux_select(void __iomem *reg, bool use_switch)
-{
-	u32 val = readl(reg);
-
-	if (use_switch)
-		val |= CPUCL_MUX_SEL_SWITCH;
-	else
-		val &= ~CPUCL_MUX_SEL_SWITCH;
-	writel(val, reg);
-
-	if (readl_poll_timeout_atomic(reg, val, !(val & CPUCL_MUX_BUSY), 1, 100))
-		pr_warn("exynos7885: CPU cluster mux stays busy\n");
-}
-
-/*
- * A cluster PLL's output is unstable until it relocks, so run the cluster
- * from its switch-user clock (the 26 MHz oscillator as the bootloader sets
- * that mux) while the PLL is retuned.
- */
-static int exynos7885_cpucl_pll_notifier(struct notifier_block *nb,
-					 unsigned long event, void *data)
-{
-	struct exynos7885_cpucl_park *park =
-		container_of(nb, struct exynos7885_cpucl_park, nb);
-
-	switch (event) {
-	case PRE_RATE_CHANGE:
-		park->parked = !(readl(park->mux_reg) & CPUCL_MUX_SEL_SWITCH);
-		if (park->parked)
-			exynos7885_cpucl_mux_select(park->mux_reg, true);
-		break;
-	case POST_RATE_CHANGE:
-	case ABORT_RATE_CHANGE:
-		if (park->parked)
-			exynos7885_cpucl_mux_select(park->mux_reg, false);
-		park->parked = false;
-		break;
-	}
-
-	return NOTIFY_OK;
-}
-
-static int exynos7885_cpucl_register_notifier(struct device *dev,
-					      unsigned int cluster)
-{
-	struct exynos7885_cpucl_park *park = &exynos7885_cpucl_park[cluster];
-	struct of_phandle_args args = {
-		.np = dev->of_node,
-		.args_count = 1,
-		.args = { CLK_FOUT_CPUCL_PLL },
-	};
-	void __iomem *base;
-	struct clk *pll;
-
-	base = of_iomap(dev->of_node, 0);
-	if (!base)
-		return -ENOMEM;
-	park->mux_reg = base + CLK_CON_MUX_MUX_CLK_CPUCL_PLL;
-	park->nb.notifier_call = exynos7885_cpucl_pll_notifier;
-
-	pll = of_clk_get_from_provider(&args);
-	if (IS_ERR(pll))
-		return PTR_ERR(pll);
-
-	return clk_notifier_register(pll, &park->nb);
-}
-
 static int __init exynos7885_dispaud_setup(char *str)
 {
 	if (!str || strcmp(str, "1"))
@@ -1345,12 +1272,6 @@ static int __init exynos7885_cmu_probe(struct platform_device *pdev)
 
 	if (info == &g3d_cmu_info)
 		return exynos7885_g3d_register_notifier(dev);
-	if (info == &cpucl0_cmu_info)
-		return exynos7885_cpucl_register_notifier(dev, 0);
-	if (info == &cpucl1_cmu_info)
-		return exynos7885_cpucl_register_notifier(dev, 1);
-	if (info == &cpucl2_cmu_info)
-		return exynos7885_cpucl_register_notifier(dev, 2);
 
 	return 0;
 }
