@@ -46,6 +46,16 @@ properties:
   power-domains:
     maxItems: 1
 
+  iommus:
+    maxItems: 1
+
+  memory-region:
+    maxItems: 1
+    description:
+      The framebuffer the bootloader scans out. With an IOMMU, the region
+      needs an identity mapping (iommu-addresses) for this device, since
+      the scanout continues from it while the IOMMU is enabled.
+
   panel-timing:
     $ref: /schemas/display/panel/panel-timing.yaml#
 
