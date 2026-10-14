@@ -128,6 +128,7 @@
 
 /* The IDMA channels take 16 to 4096 pixels per side. */
 #define DPU_PLANE_MIN			16
+#define DPU_PLANE_MAX			4096
 
 /* all windows: the scanout stays in window 3 without the other channels */
 #define DPU_UPDATE_REQ	(DECON_UPDATE_REQ_GLOBAL | DECON_UPDATE_REQ_WIN(0) | \
@@ -708,10 +709,14 @@ static int dpu_kms_init(struct exynos7885_dpu *dpu)
 	if (ret)
 		return ret;
 
-	drm->mode_config.min_width = dpu->mode.hdisplay;
-	drm->mode_config.max_width = dpu->mode.hdisplay;
-	drm->mode_config.min_height = dpu->mode.vdisplay;
-	drm->mode_config.max_height = dpu->mode.vdisplay;
+	/*
+	 * Framebuffer sizes the IDMA channels take; the primary plane checks
+	 * that it covers the whole panel.
+	 */
+	drm->mode_config.min_width = DPU_PLANE_MIN;
+	drm->mode_config.max_width = DPU_PLANE_MAX;
+	drm->mode_config.min_height = DPU_PLANE_MIN;
+	drm->mode_config.max_height = DPU_PLANE_MAX;
 	drm->mode_config.preferred_depth = 24;
 	drm->mode_config.cursor_width = 64;
 	drm->mode_config.cursor_height = 64;
@@ -757,6 +762,8 @@ static int dpu_kms_init(struct exynos7885_dpu *dpu)
 	if (ret)
 		return ret;
 	drm_crtc_helper_add(&dpu->crtc, &dpu_crtc_helper_funcs);
+	for (i = DPU_PLANE_OVERLAY; i < dpu->num_planes; i++)
+		dpu->planes[i].base.possible_crtcs = drm_crtc_mask(&dpu->crtc);
 
 	ret = drm_simple_encoder_init(drm, &dpu->encoder, DRM_MODE_ENCODER_DSI);
 	if (ret)
