@@ -20,14 +20,20 @@ properties:
     const: samsung,exynos7885-dpu
 
   reg:
+    minItems: 2
     items:
       - description: DECON0 registers
-      - description: IDMA_G0 registers
+      - description: IDMA_G0 registers, the scanout channel
+      - description: IDMA_G1 registers, for an overlay plane
+      - description: IDMA_GF registers, for a cursor plane
 
   reg-names:
+    minItems: 2
     items:
       - const: decon
       - const: idma-g0
+      - const: idma-g1
+      - const: idma-gf
 
   interrupts:
     items:
@@ -64,8 +70,9 @@ examples:
 
     display-controller@14860000 {
         compatible = "samsung,exynos7885-dpu";
-        reg = <0x14860000 0x10000>, <0x148b1000 0x1000>;
-        reg-names = "decon", "idma-g0";
+        reg = <0x14860000 0x10000>, <0x148b1000 0x1000>,
+              <0x148b2000 0x1000>, <0x148b3000 0x1000>;
+        reg-names = "decon", "idma-g0", "idma-g1", "idma-gf";
         interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
         interrupt-names = "frame-start";
 
