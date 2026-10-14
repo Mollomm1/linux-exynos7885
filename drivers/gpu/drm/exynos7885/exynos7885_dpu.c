@@ -11,16 +11,20 @@
  * DECON shadow registers, so page flips are tear-free. The DSI host and the panel
  * are reached through the DRM bridge chain. While the display is off the
  * DECON is stopped; clocks and power are left as the bootloader set them.
+ * With a System MMU, the IDMA addresses are IOVAs, and the bootloader
+ * framebuffer is identity-mapped so its scanout continues.
  */
 
 #include <linux/aperture.h>
 #include <linux/bitfield.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
+#include <linux/iommu.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/spinlock.h>
 
 #include <drm/clients/drm_client_setup.h>
@@ -821,6 +825,48 @@ static int dpu_check_handover(struct exynos7885_dpu *dpu)
 	return 0;
 }
 
+static void dpu_pm_put(void *data)
+{
+	pm_runtime_put_sync(data);
+}
+
+/*
+ * A System MMU in front of the DPU is enabled while the DPU is runtime
+ * active, which it stays from here on. The bootloader framebuffer is still
+ * scanned out then and is restored on plane disable, so its address must
+ * translate to itself; otherwise the System MMU is left disabled.
+ */
+static int dpu_iommu_enable(struct exynos7885_dpu *dpu)
+{
+	struct device *dev = dpu->drm.dev;
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	/* ARGB8888, the source width is the pitch in pixels */
+	dma_addr_t last = dpu->boot_addr - 1 + 4ULL *
+		FIELD_GET(IDMA_SRC_WIDTH, dpu->boot_src_size) *
+		FIELD_GET(IDMA_SRC_HEIGHT, dpu->boot_src_size);
+	int ret;
+
+	if (domain && domain->type & __IOMMU_DOMAIN_PAGING) {
+		if (last < dpu->boot_addr ||
+		    iommu_iova_to_phys(domain, dpu->boot_addr) !=
+			    dpu->boot_addr ||
+		    iommu_iova_to_phys(domain, last) != last)
+			return dev_err_probe(dev, -EINVAL,
+					     "framebuffer %#x not identity-mapped\n",
+					     dpu->boot_addr);
+		dev_info(dev, "scanout through the System MMU\n");
+	}
+
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return ret;
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret)
+		return ret;
+
+	return devm_add_action_or_reset(dev, dpu_pm_put, dev);
+}
+
 /*
  * Move the scanout from window 3, the top one, to window 0, the bottom
  * one, so the other channels can be shown above it. Window 0 takes window
@@ -919,6 +965,10 @@ static int dpu_probe(struct platform_device *pdev)
 		return ret;
 
 	ret = dpu_check_handover(dpu);
+	if (ret)
+		return ret;
+
+	ret = dpu_iommu_enable(dpu);
 	if (ret)
 		return ret;
 
