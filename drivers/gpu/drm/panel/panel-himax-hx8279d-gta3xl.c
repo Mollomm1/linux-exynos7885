@@ -4,11 +4,13 @@
  * 10.1 (2019, SM-T510, "gta3xl").
  *
  * The bootloader powers and initializes the panel. This driver switches
- * the display on and off, puts the controller to sleep while the display
- * is off, and drives the backlight, which the controller sets through a
- * DSI register. The controller only leaves its sleep through a reset, and
- * then needs its register setup again. Commands, the setup table and the
- * brightness curve follow the vendor driver (hx8279d_gta3xllte).
+ * the display on and off, puts the controller to sleep and switches the
+ * panel supplies off while the display is off, and drives the backlight,
+ * which the controller sets through a DSI register. The controller only
+ * leaves its sleep through a reset, and then needs its register setup
+ * again; it is sent once the video link runs. Commands, the power
+ * sequence, the setup table and the brightness curve follow the vendor
+ * driver (hx8279d_gta3xllte).
  */
 
 #include <linux/backlight.h>
@@ -38,8 +40,11 @@ struct hx8279d {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct gpio_desc *reset_gpio;
+	struct gpio_desc *ldo_gpio;
+	struct gpio_desc *buck_gpio;
 	/* the controller sleeps and needs a reset and its setup */
 	bool asleep;
+	bool powered_off;
 };
 
 /*
@@ -151,15 +156,43 @@ static const struct drm_display_mode hx8279d_mode = {
 	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
 };
 
+/* vendor dsim_set_panel_power(1), before the DSI link starts */
 static int hx8279d_prepare(struct drm_panel *panel)
 {
 	struct hx8279d *ctx = to_hx8279d(panel);
+
+	if (!ctx->powered_off)
+		return 0;
+
+	gpiod_direction_output(ctx->ldo_gpio, 1);
+	usleep_range(10000, 11000);
+	gpiod_direction_output(ctx->buck_gpio, 1);
+	usleep_range(15000, 16000);
+	ctx->powered_off = false;
+
+	return 0;
+}
+
+/* vendor dsim_set_panel_power(0), after the DSI link stopped */
+static int hx8279d_unprepare(struct drm_panel *panel)
+{
+	struct hx8279d *ctx = to_hx8279d(panel);
+
+	gpiod_direction_output(ctx->reset_gpio, 1);
+	gpiod_direction_output(ctx->buck_gpio, 0);
+	usleep_range(10000, 11000);
+	gpiod_direction_output(ctx->ldo_gpio, 0);
+	ctx->powered_off = true;
+	ctx->asleep = true;
+
+	return 0;
+}
+
+/* reset and set up the controller, with video running */
+static int hx8279d_wake(struct hx8279d *ctx)
+{
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 	unsigned int i;
-
-	/* The bootloader leaves the controller set up. */
-	if (!ctx->asleep)
-		return 0;
 
 	gpiod_direction_output(ctx->reset_gpio, 0);
 	usleep_range(10000, 11000);
@@ -188,12 +221,37 @@ static int hx8279d_prepare(struct drm_panel *panel)
 	return dsi_ctx.accum_err;
 }
 
-static int hx8279d_unprepare(struct drm_panel *panel)
+static int hx8279d_enable(struct drm_panel *panel)
+{
+	struct hx8279d *ctx = to_hx8279d(panel);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+	int ret;
+
+	/* The bootloader leaves the controller set up. */
+	if (ctx->asleep) {
+		ret = hx8279d_wake(ctx);
+		if (ret)
+			return ret;
+	}
+
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, HX8279D_PAGE, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, HX8279D_DISPLAY_CTRL,
+				     HX8279D_DISPLAY_ON);
+	mipi_dsi_msleep(&dsi_ctx, 40);
+
+	return dsi_ctx.accum_err;
+}
+
+/* vendor hx8279d_exit(): display and backlight off, then sleep */
+static int hx8279d_disable(struct drm_panel *panel)
 {
 	struct hx8279d *ctx = to_hx8279d(panel);
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, HX8279D_PAGE, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, HX8279D_DISPLAY_CTRL,
+				     HX8279D_DISPLAY_BL_OFF);
+	mipi_dsi_msleep(&dsi_ctx, 50);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, HX8279D_SLEEP_CTRL,
 				     HX8279D_SLEEP_IN);
 	mipi_dsi_msleep(&dsi_ctx, 120);
@@ -202,30 +260,6 @@ static int hx8279d_unprepare(struct drm_panel *panel)
 	ctx->asleep = true;
 
 	return dsi_ctx.accum_err;
-}
-
-static int hx8279d_enable(struct drm_panel *panel)
-{
-	struct mipi_dsi_multi_context ctx = { .dsi = to_hx8279d(panel)->dsi };
-
-	mipi_dsi_dcs_write_seq_multi(&ctx, HX8279D_PAGE, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&ctx, HX8279D_DISPLAY_CTRL,
-				     HX8279D_DISPLAY_ON);
-	mipi_dsi_msleep(&ctx, 40);
-
-	return ctx.accum_err;
-}
-
-static int hx8279d_disable(struct drm_panel *panel)
-{
-	struct mipi_dsi_multi_context ctx = { .dsi = to_hx8279d(panel)->dsi };
-
-	mipi_dsi_dcs_write_seq_multi(&ctx, HX8279D_PAGE, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&ctx, HX8279D_DISPLAY_CTRL,
-				     HX8279D_DISPLAY_BL_OFF);
-	mipi_dsi_msleep(&ctx, 50);
-
-	return ctx.accum_err;
 }
 
 static int hx8279d_get_modes(struct drm_panel *panel,
@@ -282,17 +316,24 @@ static int hx8279d_probe(struct mipi_dsi_device *dsi)
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
 
-	/* Keep the line as the bootloader left it, out of reset. */
+	/* Keep the lines as the bootloader left them: powered, out of reset. */
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "failed to get the reset GPIO\n");
+	ctx->ldo_gpio = devm_gpiod_get(dev, "ldo", GPIOD_ASIS);
+	if (IS_ERR(ctx->ldo_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->ldo_gpio),
+				     "failed to get the LDO enable GPIO\n");
+	ctx->buck_gpio = devm_gpiod_get(dev, "buck", GPIOD_ASIS);
+	if (IS_ERR(ctx->buck_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->buck_gpio),
+				     "failed to get the buck enable GPIO\n");
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST;
 
-	ctx->panel.prepare_prev_first = true;
 	ctx->panel.backlight = devm_backlight_device_register(dev,
 					dev_name(dev), dev, dsi,
 					&hx8279d_bl_ops, &props);
