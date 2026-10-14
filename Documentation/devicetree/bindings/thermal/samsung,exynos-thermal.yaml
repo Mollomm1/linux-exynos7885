@@ -27,6 +27,7 @@ properties:
       - samsung,exynos5420-tmu-ext-triminfo
       - samsung,exynos5433-tmu
       - samsung,exynos7-tmu
+      - samsung,exynos7885-tmu
 
   clocks:
     minItems: 1
@@ -44,6 +45,7 @@ properties:
        - most of SoC: 4
        - samsung,exynos5433-tmu: 8
        - samsung,exynos7-tmu: 8
+       - samsung,exynos7885-tmu: 8
     maxItems: 1
 
   reg:
@@ -136,6 +138,24 @@ allOf:
         clocks:
           minItems: 1
           maxItems: 1
+        reg:
+          minItems: 1
+          maxItems: 1
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,exynos7885-tmu
+    then:
+      properties:
+        clocks:
+          items:
+            - description:
+                Operational clock for TMU channel, which also runs the sensor.
+        clock-names:
+          items:
+            - const: tmu_apbif
         reg:
           minItems: 1
           maxItems: 1
