@@ -719,13 +719,16 @@ static const struct clk_ops samsung_pll0822x_clk_min_ops = {
  * stop the PLL and restart it with the new dividers. The PLL only runs
  * while that mux selects it, so it is selected again together with the
  * enable bit; consumers must be parked on another clock until it locks.
- * A PLL that does not lock is left deselected, on the oscillator.
+ * Keep it off for a while before the restart: a PLL restarted right away
+ * sometimes never locks, and then keeps failing until it has been off for
+ * longer. A PLL that does not lock is left deselected, on the oscillator.
  */
 #define PLL1417X_MUX_SEL		BIT(4)
 #define PLL1417X_MUX_BUSY		BIT(7)
 #define PLL1417X_MUX_TIMEOUT_US		100
 #define PLL1417X_LOCK_TIMEOUT_US	1000
-#define PLL1417X_LOCK_ATTEMPTS		5
+#define PLL1417X_OFF_US			10
+#define PLL1417X_LOCK_ATTEMPTS		4
 
 static int samsung_pll1417x_mux_write(struct samsung_clk_pll *pll, u32 con)
 {
@@ -747,6 +750,7 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 {
 	const struct samsung_pll_rate_table *rate;
 	struct samsung_clk_pll *pll = to_clk_pll(hw);
+	unsigned long off_us = PLL1417X_OFF_US;
 	unsigned int attempt;
 	u32 con, cur, val;
 	int ret;
@@ -773,8 +777,8 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 	writel_relaxed(rate->pdiv * PLL0822X_LOCK_FACTOR, pll->lock_reg);
 
 	/*
-	 * About one restart in a hundred never locks, while the next one
-	 * normally does: retry instead of waiting out a long timeout.
+	 * A failed restart is retried with ten times the off time, from
+	 * 10 us up to 10 ms.
 	 */
 	for (attempt = 1; attempt <= PLL1417X_LOCK_ATTEMPTS; attempt++) {
 		cur = readl_relaxed(pll->con_reg) & ~PLL1417X_MUX_SEL;
@@ -783,6 +787,10 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 			return ret;
 
 		writel_relaxed(cur & ~BIT(pll->enable_offs), pll->con_reg);
+		readl_relaxed(pll->con_reg);
+		fsleep(off_us);
+		off_us *= 10;
+
 		writel_relaxed(con | BIT(pll->enable_offs) | PLL1417X_MUX_SEL,
 			       pll->con_reg);
 
@@ -798,7 +806,8 @@ static int samsung_pll1417x_set_rate(struct clk_hw *hw, unsigned long drate,
 		}
 	}
 
-	pr_err("Could not lock PLL %s\n", clk_hw_get_name(hw));
+	pr_err("Could not lock PLL %s (con %#010x)\n", clk_hw_get_name(hw),
+	       val);
 	samsung_pll1417x_mux_write(pll, con | BIT(pll->enable_offs));
 
 	return ret;
