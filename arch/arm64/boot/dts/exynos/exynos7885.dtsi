@@ -8,6 +8,7 @@
 
 #include <dt-bindings/clock/exynos7885.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/thermal/thermal.h>
 
 / {
 	compatible = "samsung,exynos7885";
@@ -89,6 +90,7 @@
 			reg = <0x100>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl1 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 
 		cpu1: cpu@101 {
@@ -97,6 +99,7 @@
 			reg = <0x101>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl1 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 
 		cpu2: cpu@102 {
@@ -105,6 +108,7 @@
 			reg = <0x102>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl1 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 
 		cpu3: cpu@103 {
@@ -113,6 +117,7 @@
 			reg = <0x103>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl1 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 
 		cpu4: cpu@200 {
@@ -121,6 +126,7 @@
 			reg = <0x200>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl2 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 
 		cpu5: cpu@201 {
@@ -129,6 +135,7 @@
 			reg = <0x201>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl2 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 
 		cpu6: cpu@0 {
@@ -137,6 +144,7 @@
 			reg = <0x0>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl0 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 
 		cpu7: cpu@1 {
@@ -145,6 +153,7 @@
 			reg = <0x1>;
 			enable-method = "psci";
 			clocks = <&cmu_cpucl0 CLK_DOUT_CPUCL_CPU>;
+			#cooling-cells = <2>;
 		};
 	};
 
@@ -188,6 +197,82 @@
 			#size-cells = <0>;
 			mboxes = <&ap2apm_mailbox>;
 			shmem = <&apm_sram>;
+		};
+	};
+
+	/* Trip points follow the vendor: throttling from 76 C, 115 C hot */
+	thermal-zones {
+		cpu-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tmu_cpu>;
+
+			trips {
+				cpu_alert0: cpu-alert0 {
+					temperature = <76000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu_alert1: cpu-alert1 {
+					temperature = <86000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu-crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				/* the A73 cores first */
+				map0 {
+					trip = <&cpu_alert0>;
+					cooling-device = <&cpu6 THERMAL_NO_LIMIT
+							  THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu_alert1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT
+							  THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT
+							  THERMAL_NO_LIMIT>,
+							 <&cpu6 THERMAL_NO_LIMIT
+							  THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		gpu-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tmu_g3d>;
+
+			trips {
+				gpu_alert0: gpu-alert0 {
+					temperature = <76000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				gpu-crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&gpu_alert0>;
+					cooling-device = <&gpu THERMAL_NO_LIMIT
+							  THERMAL_NO_LIMIT>;
+				};
+			};
 		};
 	};
 
@@ -249,6 +334,24 @@
 				      "dout_peri_usi2";
 		};
 
+		tmu_cpu: thermal-sensor@10070000 {
+			compatible = "samsung,exynos7885-tmu";
+			reg = <0x10070000 0x400>;
+			interrupts = <GIC_SPI 231 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cmu_peri CLK_GOUT_TMU_PCLK>;
+			clock-names = "tmu_apbif";
+			#thermal-sensor-cells = <0>;
+		};
+
+		tmu_g3d: thermal-sensor@10074000 {
+			compatible = "samsung,exynos7885-tmu";
+			reg = <0x10074000 0x400>;
+			interrupts = <GIC_SPI 280 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cmu_peri CLK_GOUT_TMU_PCLK>;
+			clock-names = "tmu_apbif";
+			#thermal-sensor-cells = <0>;
+		};
+
 		cmu_cpucl1: clock-controller@10800000 {
 			compatible = "samsung,exynos7885-cmu-cpucl1";
 			reg = <0x10800000 0x8000>;
@@ -294,6 +397,7 @@
 			clocks = <&cmu_g3d CLK_MOUT_G3D_BUSD>;
 			clock-names = "core";
 			power-domains = <&pd_g3d>;
+			#cooling-cells = <2>;
 			status = "disabled";
 		};
 
