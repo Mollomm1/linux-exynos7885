@@ -536,6 +536,7 @@
 			reg = <0x14870000 0x100>;
 			interrupts = <GIC_SPI 125 IRQ_TYPE_LEVEL_HIGH>;
 			power-domains = <&pd_dispaud>;
+			samsung,pmu-syscon = <&pmu_system_controller>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";
