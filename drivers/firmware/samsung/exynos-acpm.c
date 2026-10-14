@@ -47,6 +47,8 @@
 #define ACPM_DVFS_SET_FLAG		6
 #define ACPM_EXYNOS7885_INTSR0		0x14
 #define ACPM_EXYNOS7885_IDLE_TIMEOUT_US	2000
+/* busy channel checks in a row before a channel is treated as stale */
+#define ACPM_EXYNOS7885_BUSY_LIMIT	8
 #define ACPM_EXYNOS7885_INTCR1		0x20
 #define ACPM_EXYNOS7885_INTMR1		0x24
 #define ACPM_EXYNOS7885_PLUGIN_TABLE	0x4b80
@@ -172,6 +174,7 @@ struct acpm_chan {
 	u8 type;
 	bool poll_completion;
 	bool failed;
+	unsigned int busy_count;
 
 	DECLARE_BITMAP(bitmap_seqnum, ACPM_SEQNUM_MAX - 1);
 	struct acpm_rx_data rx_data[ACPM_SEQNUM_MAX];
@@ -426,6 +429,13 @@ static int acpm_dequeue_by_polling(struct acpm_chan *achan,
 		udelay(20);
 	} while (ktime_before(ktime_get(), timeout));
 
+	/* This thread may have been held off past the deadline: look again. */
+	ret = acpm_get_rx(achan, xfer);
+	if (ret)
+		return ret;
+	if (!test_bit(seqnum - 1, achan->bitmap_seqnum))
+		return 0;
+
 	dev_err(dev, "Timeout! ch:%u s:%u bitmap:%lx.\n",
 		achan->id, seqnum, achan->bitmap_seqnum[0]);
 
@@ -557,9 +567,17 @@ int acpm_do_xfer(const struct acpm_handle *handle, const struct acpm_xfer *xfer)
 	    read_poll_timeout(acpm_exynos7885_chan_idle, idle, idle, 10,
 			      ACPM_EXYNOS7885_IDLE_TIMEOUT_US, false, acpm,
 			      achan)) {
-		achan->failed = true;
+		/*
+		 * Refuse this request. Only a channel that stays busy is
+		 * treated as stale: it may have lost a request.
+		 */
+		if (++achan->busy_count >= ACPM_EXYNOS7885_BUSY_LIMIT)
+			achan->failed = true;
+		dev_err_ratelimited(acpm->dev, "channel %u busy (%u)\n",
+				    achan->id, achan->busy_count);
 		return -EBUSY;
 	}
+	achan->busy_count = 0;
 
 	scoped_guard(mutex, &achan->tx_lock) {
 		tx_front = readl(achan->tx.front);
