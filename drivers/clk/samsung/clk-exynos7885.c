@@ -22,7 +22,7 @@
 #include "clk-exynos-arm64.h"
 
 /* NOTE: Must be equal to the last clock ID increased by one */
-#define CLKS_NR_TOP			(CLK_DOUT_G3D_SWITCH + 1)
+#define CLKS_NR_TOP			(CLK_DOUT_CPUCL2_SWITCH + 1)
 #define CLKS_NR_CORE			(CLK_GOUT_ADC_S1 + 1)
 #define CLKS_NR_PERI			(CLK_GOUT_TMU_PCLK + 1)
 #define CLKS_NR_FSYS			(CLK_FSYS_USB30DRD_REF_CLK + 1)
@@ -60,6 +60,9 @@ static bool exynos7885_enable_dispaud;
 #define CLK_CON_DIV_CLKCMU_CORE_BUS		0x181c
 #define CLK_CON_DIV_CLKCMU_CORE_CCI		0x1820
 #define CLK_CON_DIV_CLKCMU_CORE_G3D		0x1824
+#define CLK_CON_DIV_CLKCMU_CPUCL0_SWITCH	0x182c
+#define CLK_CON_DIV_CLKCMU_CPUCL1_SWITCH	0x1830
+#define CLK_CON_DIV_CLKCMU_CPUCL2_SWITCH	0x1834
 #define CLK_CON_DIV_CLKCMU_DISPAUD_CPU		0x1840
 #define CLK_CON_DIV_CLKCMU_FSYS_BUS		0x1844
 #define CLK_CON_DIV_CLKCMU_FSYS_MMC_CARD	0x1848
@@ -87,6 +90,9 @@ static bool exynos7885_enable_dispaud;
 #define CLK_CON_GAT_GATE_CLKCMU_CORE_BUS	0x201c
 #define CLK_CON_GAT_GATE_CLKCMU_CORE_CCI	0x2020
 #define CLK_CON_GAT_GATE_CLKCMU_CORE_G3D	0x2024
+#define CLK_CON_GAT_GATE_CLKCMU_CPUCL0_SWITCH	0x202c
+#define CLK_CON_GAT_GATE_CLKCMU_CPUCL1_SWITCH	0x2030
+#define CLK_CON_GAT_GATE_CLKCMU_CPUCL2_SWITCH	0x2034
 #define CLK_CON_GAT_GATE_CLKCMU_DISPAUD_VCLK	0x2040
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_BUS	0x2044
 #define CLK_CON_GAT_GATE_CLKCMU_FSYS_MMC_CARD	0x2048
@@ -129,6 +135,9 @@ static const unsigned long top_clk_regs[] __initconst = {
 	CLK_CON_DIV_CLKCMU_CORE_BUS,
 	CLK_CON_DIV_CLKCMU_CORE_CCI,
 	CLK_CON_DIV_CLKCMU_CORE_G3D,
+	CLK_CON_DIV_CLKCMU_CPUCL0_SWITCH,
+	CLK_CON_DIV_CLKCMU_CPUCL1_SWITCH,
+	CLK_CON_DIV_CLKCMU_CPUCL2_SWITCH,
 	CLK_CON_DIV_CLKCMU_DISPAUD_CPU,
 	CLK_CON_DIV_CLKCMU_FSYS_BUS,
 	CLK_CON_DIV_CLKCMU_FSYS_MMC_CARD,
@@ -281,6 +290,12 @@ static const struct samsung_div_clock top_div_clks[] __initconst = {
 	    CLK_CON_DIV_CLKCMU_DISPAUD_CPU, 0, 3),
 	DIV(CLK_DOUT_G3D_SWITCH, "dout_g3d_switch", "gout_g3d_switch",
 	    CLK_CON_DIV_CLKCMU_G3D_SWITCH, 0, 3),
+	DIV(CLK_DOUT_CPUCL0_SWITCH, "dout_cpucl0_switch", "gout_cpucl0_switch",
+	    CLK_CON_DIV_CLKCMU_CPUCL0_SWITCH, 0, 4),
+	DIV(CLK_DOUT_CPUCL1_SWITCH, "dout_cpucl1_switch", "gout_cpucl1_switch",
+	    CLK_CON_DIV_CLKCMU_CPUCL1_SWITCH, 0, 3),
+	DIV(CLK_DOUT_CPUCL2_SWITCH, "dout_cpucl2_switch", "gout_cpucl2_switch",
+	    CLK_CON_DIV_CLKCMU_CPUCL2_SWITCH, 0, 3),
 
 	/* CORE */
 	DIV(CLK_DOUT_CORE_BUS, "dout_core_bus", "gout_core_bus",
@@ -333,6 +348,17 @@ static const struct samsung_gate_clock top_gate_clks[] __initconst = {
 	 */
 	GATE(CLK_GOUT_G3D_SWITCH, "gout_g3d_switch", "dout_shared0_div2",
 	     CLK_CON_GAT_GATE_CLKCMU_G3D_SWITCH, 21, 0, 0),
+	/*
+	 * CPU cluster switching clocks, likewise left in hardware mode. A
+	 * cluster runs from one while its PLL relocks; its CMU keeps it
+	 * enabled.
+	 */
+	GATE(CLK_GOUT_CPUCL0_SWITCH, "gout_cpucl0_switch", "mout_shared0_pll",
+	     CLK_CON_GAT_GATE_CLKCMU_CPUCL0_SWITCH, 21, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_CPUCL1_SWITCH, "gout_cpucl1_switch", "dout_shared0_div2",
+	     CLK_CON_GAT_GATE_CLKCMU_CPUCL1_SWITCH, 21, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_CPUCL2_SWITCH, "gout_cpucl2_switch", "dout_shared0_div2",
+	     CLK_CON_GAT_GATE_CLKCMU_CPUCL2_SWITCH, 21, CLK_IGNORE_UNUSED, 0),
 	/* CORE */
 	GATE(CLK_GOUT_CORE_BUS, "gout_core_bus", "mout_core_bus",
 	     CLK_CON_GAT_GATE_CLKCMU_CORE_BUS, 21, 0, 0),
@@ -1206,8 +1232,10 @@ static const struct samsung_pll_rate_table cpucl12_pll_rates[] __initconst = {
 };
 
 /*
- * While its PLL relocks, a cluster runs from its switch-user clock, the
- * 26 MHz oscillator as the bootloader sets that mux.
+ * While its PLL relocks, a cluster runs from its switch-user clock. The
+ * bootloader leaves that mux on the 26 MHz oscillator; the board DT can
+ * select the CMU_TOP switching clock instead, at a rate no higher than the
+ * cluster's lowest OPP, so the cluster keeps running at a useful speed.
  */
 #define CPUCL_CLKS(n, pll_con0, switch_user, rates)			\
 static const struct samsung_pll_clock cpucl##n##_pll_clks[] __initconst = { \
@@ -1255,6 +1283,8 @@ static const struct samsung_cmu_info cpucl##n##_cmu_info __initconst = { \
 	.nr_clk_ids		= CLKS_NR_CPUCL,			\
 	.clk_regs		= regs,					\
 	.nr_clk_regs		= ARRAY_SIZE(regs),			\
+	/* Keep the switching clock running for the PLL park. */	\
+	.clk_name		= "dout_cpucl" #n "_switch",		\
 }
 
 CPUCL_CMU_INFO(0, cpucl0_clk_regs);
