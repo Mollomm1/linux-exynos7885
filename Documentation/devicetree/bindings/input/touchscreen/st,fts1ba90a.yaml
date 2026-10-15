@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/touchscreen/st,fts1ba90a.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: STMicroelectronics FTS1BA90A touchscreen controller
+
+maintainers:
+  - Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+
+description:
+  The FTS1BA90A is an I2C capacitive touchscreen controller, used in the
+  Samsung Galaxy Tab A 10.1 (2019). It has no reset line; it is reset by
+  switching its supplies off and on.
+
+allOf:
+  - $ref: touchscreen.yaml#
+
+properties:
+  compatible:
+    const: st,fts1ba90a
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  avdd-supply:
+    description: 3.3 V analog supply.
+
+  vdd-supply:
+    description: 1.8 V digital supply.
+
+  panel:
+    description:
+      The panel over which the touchscreen lies. The controller stops
+      sensing while the panel is off.
+
+  pinctrl-0: true
+  pinctrl-1: true
+
+  pinctrl-names:
+    items:
+      - const: default
+      - const: sleep
+
+  wakeup-source: true
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - avdd-supply
+  - vdd-supply
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        touchscreen@49 {
+            compatible = "st,fts1ba90a";
+            reg = <0x49>;
+            interrupt-parent = <&gpa0>;
+            interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
+            avdd-supply = <&tsp_avdd>;
+            vdd-supply = <&tsp_dvdd>;
+            panel = <&panel>;
+            touchscreen-size-x = <1200>;
+            touchscreen-size-y = <1920>;
+            wakeup-source;
+        };
+    };
