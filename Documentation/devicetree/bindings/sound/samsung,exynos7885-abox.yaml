@@ -108,8 +108,9 @@ patternProperties:
 
       "#sound-dai-cells":
         description:
-          With one cell, DAI 0 is UAIF3 (speaker amplifiers) and DAI 1 is
-          UAIF0 (headphone codec).
+          With one cell, DAI 0 is UAIF3 (speaker amplifiers), DAI 1 is
+          UAIF0 (headphone codec) and DAI 2 is the UAIF0 input (codec
+          microphones).
         enum: [0, 1]
 
       status: true

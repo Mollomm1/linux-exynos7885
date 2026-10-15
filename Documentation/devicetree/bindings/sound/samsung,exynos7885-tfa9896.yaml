@@ -14,7 +14,8 @@ description:
   ABOX UAIF3 playback DAI feeds the two TFA9896 amplifiers over a shared TDM
   bus. The amplifier slot assignments are supplied by their firmware data.
   An optional headphone link feeds the COD3035X codec from ABOX UAIF0 with
-  the same playback stream.
+  the same playback stream. An optional microphone link records the codec
+  inputs through the ABOX UAIF0 input as a separate capture stream.
 
 allOf:
   - $ref: sound-card-common.yaml#
@@ -57,6 +58,33 @@ properties:
           sound-dai:
             maxItems: 1
             description: Phandle to the ABOX UAIF0 playback DAI.
+        required:
+          - sound-dai
+
+      codec:
+        type: object
+        additionalProperties: false
+        properties:
+          sound-dai:
+            maxItems: 1
+            description: Phandle to the COD3035X codec DAI.
+        required:
+          - sound-dai
+    required:
+      - cpu
+      - codec
+
+  microphone:
+    type: object
+    additionalProperties: false
+    properties:
+      cpu:
+        type: object
+        additionalProperties: false
+        properties:
+          sound-dai:
+            maxItems: 1
+            description: Phandle to the ABOX UAIF0 capture DAI.
         required:
           - sound-dai
 
