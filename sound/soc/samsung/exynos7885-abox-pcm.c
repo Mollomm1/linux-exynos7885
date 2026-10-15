@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Exynos7885 ABOX RDMA0 playback PCM component. */
+/* Exynos7885 ABOX RDMA0 playback and WDMA1 capture PCM component. */
 
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -14,8 +14,8 @@
 #include <sound/soc.h>
 
 /*
- * Half of the 128 KiB mapped ring. Only buffers up to 64 KiB have been
- * tested; larger ones faulted at the end of the mapping, though that was
+ * Each direction has a 64 KiB ring, half of the PCM region. Larger
+ * playback buffers faulted at the end of the mapping, though that was
  * before the SIFS1 rate was configured and RDMA0 ran unpaced.
  */
 #define ABOX_PCM_BUFFER_BYTES	SZ_64K
@@ -23,11 +23,21 @@
 #define ABOX_PCM_PERIOD_MAX	SZ_64K
 #define ABOX_PCM_PERIODS_MIN	2
 #define ABOX_PCM_PERIODS_MAX	32
-#define ABOX_PCM_CHANNEL	0
+/* PCM task and DMA numbers: RDMA0 plays, WDMA1 records SIFM0. */
+#define ABOX_PCM_PLAYBACK_DMA	0
+#define ABOX_PCM_CAPTURE_DMA	1
 #define ABOX_PCM_POINTER	4
+/* Ring addresses in the ABOX IOVA space, as the firmware reports them. */
+#define ABOX_PCM_PLAYBACK_IOVA	0x81000000
+#define ABOX_PCM_CAPTURE_IOVA	0x82100000
 
-/* DAI 0 drives UAIF3 (speaker amplifiers), DAI 1 UAIF0 (headphone codec). */
-#define ABOX_PCM_NUM_DAIS	2
+/*
+ * DAI 0 drives UAIF3 (speaker amplifiers), DAI 1 UAIF0 (headphone codec);
+ * DAI 2 records from the UAIF0 input (codec microphones).
+ */
+#define ABOX_PCM_NUM_PLAYBACK_DAIS	2
+#define ABOX_PCM_MIC_DAI		2
+#define ABOX_PCM_NUM_DAIS		3
 
 struct exynos7885_abox_pcm_uaif {
 	unsigned int format;
@@ -39,14 +49,18 @@ struct exynos7885_abox_pcm_uaif {
 	bool enabled;
 };
 
-struct exynos7885_abox_pcm {
-	struct device *abox_dev;
+struct exynos7885_abox_pcm_stream {
+	bool capture;
+	unsigned int dma;
 	void *area;
-	phys_addr_t phys;
 	size_t size;
 	struct snd_pcm_substream *substream;
 	/* The link is nonatomic: period_elapsed takes a mutex, not IRQ-safe. */
 	struct work_struct period_work;
+	/* Ring geometry for the IPC handler, which must not use the runtime. */
+	size_t dma_bytes;
+	size_t period_bytes;
+	size_t frame_bytes;
 	snd_pcm_uframes_t hw_ptr;
 	snd_pcm_uframes_t appl_ptr;
 	bool booted;
@@ -54,8 +68,17 @@ struct exynos7885_abox_pcm {
 	bool mapped;
 	bool configured;
 	bool running;
-	/* Serializes UAIF start/stop with output changes from the control. */
+};
+
+struct exynos7885_abox_pcm {
+	struct device *abox_dev;
+	struct exynos7885_abox_pcm_stream stream[2];
+	/*
+	 * Serializes UAIF start/stop with output changes from the control,
+	 * and the shared IPC handler registration.
+	 */
 	struct mutex lock;
+	unsigned int ipc_users;
 	struct exynos7885_abox_pcm_uaif uaif[ABOX_PCM_NUM_DAIS];
 	/* DAI index of the UAIF that plays; both UAIFs share SIFS1. */
 	unsigned int output;
@@ -80,68 +103,126 @@ static const struct snd_pcm_hardware exynos7885_abox_pcm_hardware = {
 	.periods_max = ABOX_PCM_PERIODS_MAX,
 };
 
+static struct exynos7885_abox_pcm_stream *
+exynos7885_abox_pcm_stream(struct exynos7885_abox_pcm *pcm,
+			   struct snd_pcm_substream *substream)
+{
+	return &pcm->stream[substream->stream == SNDRV_PCM_STREAM_CAPTURE];
+}
+
+static int exynos7885_abox_pcm_send(struct exynos7885_abox_pcm *pcm,
+				    struct exynos7885_abox_pcm_stream *st,
+				    u32 type, u32 param0, u32 param1,
+				    u32 param2)
+{
+	return exynos7885_abox_send_pcm_stream(pcm->abox_dev, st->capture,
+					       st->dma, type, param0, param1,
+					       param2);
+}
+
 static void exynos7885_abox_pcm_ipc(struct device *dev, const u32 *message,
-					    void *data)
+				    void *data)
 {
 	struct exynos7885_abox_pcm *pcm = data;
-	struct snd_pcm_substream *substream = READ_ONCE(pcm->substream);
-	u32 pointer;
+	struct exynos7885_abox_pcm_stream *st;
+	u32 pointer, base;
+	ssize_t pos;
 
-	if (!substream || !READ_ONCE(pcm->configured) ||
-	    !READ_ONCE(pcm->running) ||
-	    message[0] != EXYNOS7885_ABOX_IPC_PCM_PLAYBACK ||
+	if (message[0] == EXYNOS7885_ABOX_IPC_PCM_PLAYBACK)
+		st = &pcm->stream[SNDRV_PCM_STREAM_PLAYBACK];
+	else if (message[0] == EXYNOS7885_ABOX_IPC_PCM_CAPTURE)
+		st = &pcm->stream[SNDRV_PCM_STREAM_CAPTURE];
+	else
+		return;
+
+	if (!READ_ONCE(st->substream) || !READ_ONCE(st->configured) ||
+	    !READ_ONCE(st->running) ||
 	    message[2] != EXYNOS7885_ABOX_PCM_POINTER ||
-	    message[3] != ABOX_PCM_CHANNEL)
+	    message[3] != st->dma)
 		return;
 
 	pointer = message[ABOX_PCM_POINTER];
+	base = st->capture ? ABOX_PCM_CAPTURE_IOVA : ABOX_PCM_PLAYBACK_IOVA;
 	if (!pointer) {
-		/* Buffer-empty interrupt: read the position from RDMA0. */
-		struct snd_pcm_runtime *runtime = substream->runtime;
-		ssize_t pos = exynos7885_abox_rdma_pointer(pcm->abox_dev,
-				ABOX_PCM_CHANNEL, runtime->dma_bytes,
-				frames_to_bytes(runtime, runtime->period_size));
-
+		/* Buffer interrupt: read the position from the DMA itself. */
+		if (st->capture)
+			pos = exynos7885_abox_wdma_pointer(pcm->abox_dev,
+							   st->dma,
+							   st->dma_bytes,
+							   st->period_bytes);
+		else
+			pos = exynos7885_abox_rdma_pointer(pcm->abox_dev,
+							   st->dma,
+							   st->dma_bytes,
+							   st->period_bytes);
 		if (pos < 0)
 			return;
-		pointer = pos % runtime->dma_bytes;
-	} else if (pointer >= 0x81000000) {
-		pointer -= 0x81000000;
+		pointer = pos % st->dma_bytes;
+	} else if (pointer >= base) {
+		pointer -= base;
 	}
-	if (pointer >= substream->runtime->dma_bytes)
+	if (pointer >= st->dma_bytes)
 		return;
 
-	WRITE_ONCE(pcm->hw_ptr,
-		   bytes_to_frames(substream->runtime, pointer));
-	schedule_work(&pcm->period_work);
+	WRITE_ONCE(st->hw_ptr, pointer / st->frame_bytes);
+	schedule_work(&st->period_work);
 }
 
 static void exynos7885_abox_pcm_period_work(struct work_struct *work)
 {
-	struct exynos7885_abox_pcm *pcm =
-		container_of(work, struct exynos7885_abox_pcm, period_work);
-	struct snd_pcm_substream *substream = READ_ONCE(pcm->substream);
+	struct exynos7885_abox_pcm_stream *st =
+		container_of(work, struct exynos7885_abox_pcm_stream,
+			     period_work);
+	struct snd_pcm_substream *substream = READ_ONCE(st->substream);
 
-	if (substream && READ_ONCE(pcm->running))
+	if (substream && READ_ONCE(st->running))
 		snd_pcm_period_elapsed(substream);
+}
+
+/* One IPC handler serves both directions while either is open. */
+static int exynos7885_abox_pcm_get_ipc(struct exynos7885_abox_pcm *pcm)
+{
+	int ret;
+
+	guard(mutex)(&pcm->lock);
+	if (!pcm->ipc_users) {
+		ret = exynos7885_abox_register_ipc_handler(pcm->abox_dev,
+						exynos7885_abox_pcm_ipc, pcm);
+		if (ret)
+			return ret;
+	}
+	pcm->ipc_users++;
+	return 0;
+}
+
+static void exynos7885_abox_pcm_put_ipc(struct exynos7885_abox_pcm *pcm)
+{
+	guard(mutex)(&pcm->lock);
+	if (!--pcm->ipc_users)
+		exynos7885_abox_unregister_ipc_handler(pcm->abox_dev,
+						       exynos7885_abox_pcm_ipc);
 }
 
 static int exynos7885_abox_pcm_open(struct snd_soc_component *component,
 				    struct snd_pcm_substream *substream)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
+	phys_addr_t phys;
 	int ret;
-
-	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
-		return -ENODEV;
 
 	ret = exynos7885_abox_boot(pcm->abox_dev);
 	if (ret)
 		return ret;
-	pcm->booted = true;
+	st->booted = true;
 
-	ret = exynos7885_abox_get_pcm_buffer(pcm->abox_dev, &pcm->area,
-					    &pcm->phys, &pcm->size);
+	if (st->capture)
+		ret = exynos7885_abox_get_capture_buffer(pcm->abox_dev,
+							 &st->area, &st->size);
+	else
+		ret = exynos7885_abox_get_pcm_buffer(pcm->abox_dev, &st->area,
+						     &phys, &st->size);
 	if (ret)
 		goto shutdown;
 
@@ -164,26 +245,24 @@ static int exynos7885_abox_pcm_open(struct snd_soc_component *component,
 	if (ret < 0)
 		goto shutdown;
 
-	ret = exynos7885_abox_register_ipc_handler(pcm->abox_dev,
-						   exynos7885_abox_pcm_ipc, pcm);
+	ret = exynos7885_abox_pcm_get_ipc(pcm);
 	if (ret)
 		goto shutdown;
-	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
-				       EXYNOS7885_ABOX_PCM_OPEN, 0, 0, 0);
+	ret = exynos7885_abox_pcm_send(pcm, st, EXYNOS7885_ABOX_PCM_OPEN,
+				       0, 0, 0);
 	if (ret) {
-		exynos7885_abox_unregister_ipc_handler(pcm->abox_dev,
-						       exynos7885_abox_pcm_ipc);
+		exynos7885_abox_pcm_put_ipc(pcm);
 		goto shutdown;
 	}
-	pcm->opened = true;
+	st->opened = true;
 
-	WRITE_ONCE(pcm->substream, substream);
-	pcm->hw_ptr = 0;
+	st->hw_ptr = 0;
+	WRITE_ONCE(st->substream, substream);
 	return 0;
 
 shutdown:
 	if (!exynos7885_abox_shutdown(pcm->abox_dev))
-		pcm->booted = false;
+		st->booted = false;
 	return ret;
 }
 
@@ -191,36 +270,44 @@ static int exynos7885_abox_pcm_close(struct snd_soc_component *component,
 				     struct snd_pcm_substream *substream)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
 	int ret = 0;
 
-	WRITE_ONCE(pcm->substream, NULL);
-	exynos7885_abox_unregister_ipc_handler(pcm->abox_dev,
-					       exynos7885_abox_pcm_ipc);
-	cancel_work_sync(&pcm->period_work);
-	if (READ_ONCE(pcm->running))
+	if (READ_ONCE(st->substream)) {
+		WRITE_ONCE(st->substream, NULL);
+		exynos7885_abox_pcm_put_ipc(pcm);
+	}
+	/* A late IPC may queue the work again; it then finds no substream. */
+	cancel_work_sync(&st->period_work);
+	if (READ_ONCE(st->running))
 		return -EBUSY;
-	if (pcm->configured) {
+	if (st->configured) {
 		ret = exynos7885_abox_pcm_hw_free(component, substream);
 		if (ret)
 			return ret;
 	}
-	if (pcm->opened) {
-		ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
-					       EXYNOS7885_ABOX_PCM_CLOSE, 0, 0, 0);
+	if (st->opened) {
+		ret = exynos7885_abox_pcm_send(pcm, st,
+					       EXYNOS7885_ABOX_PCM_CLOSE,
+					       0, 0, 0);
 		if (ret)
 			return ret;
-		pcm->opened = false;
+		st->opened = false;
 	}
-	if (pcm->mapped) {
-		ret = exynos7885_abox_unmap_pcm_buffer(pcm->abox_dev);
+	if (st->mapped) {
+		if (st->capture)
+			ret = exynos7885_abox_unmap_capture_buffer(pcm->abox_dev);
+		else
+			ret = exynos7885_abox_unmap_pcm_buffer(pcm->abox_dev);
 		if (ret)
 			return ret;
-		pcm->mapped = false;
+		st->mapped = false;
 	}
-	if (pcm->booted) {
+	if (st->booted) {
 		ret = exynos7885_abox_shutdown(pcm->abox_dev);
 		if (!ret)
-			pcm->booted = false;
+			st->booted = false;
 	}
 	return ret;
 }
@@ -231,6 +318,8 @@ static int exynos7885_abox_pcm_copy(struct snd_soc_component *component,
 				    struct iov_iter *iter, unsigned long bytes)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	size_t ring_bytes = runtime->dma_bytes;
 	size_t first, second;
@@ -239,10 +328,21 @@ static int exynos7885_abox_pcm_copy(struct snd_soc_component *component,
 		return -EINVAL;
 
 	first = min_t(size_t, bytes, ring_bytes - pos);
-	if (!copy_from_iter_full((u8 *)pcm->area + pos, first, iter))
-		return -EFAULT;
 	second = bytes - first;
-	if (second && !copy_from_iter_full(pcm->area, second, iter))
+
+	if (st->capture) {
+		/* Read the samples only after the position that covers them. */
+		rmb();
+		if (copy_to_iter((u8 *)st->area + pos, first, iter) != first)
+			return -EFAULT;
+		if (second && copy_to_iter(st->area, second, iter) != second)
+			return -EFAULT;
+		return 0;
+	}
+
+	if (!copy_from_iter_full((u8 *)st->area + pos, first, iter))
+		return -EFAULT;
+	if (second && !copy_from_iter_full(st->area, second, iter))
 		return -EFAULT;
 
 	if (first) {
@@ -261,18 +361,21 @@ static int exynos7885_abox_pcm_ack(struct snd_soc_component *component,
 				   struct snd_pcm_substream *substream)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	snd_pcm_uframes_t appl_ptr = READ_ONCE(runtime->control->appl_ptr);
 	snd_pcm_uframes_t frames;
 	size_t offset, bytes, first;
 	int ret;
 
-	if (!pcm->mapped || !runtime->buffer_size)
+	/* WDMA1 overwrites its ring freely; only playback data needs a sync. */
+	if (st->capture || !st->mapped || !runtime->buffer_size)
 		return 0;
-	frames = appl_ptr - pcm->appl_ptr;
+	frames = appl_ptr - st->appl_ptr;
 	if (frames > runtime->buffer_size)
 		frames = runtime->buffer_size;
-	pcm->appl_ptr = appl_ptr;
+	st->appl_ptr = appl_ptr;
 	bytes = frames_to_bytes(runtime, frames);
 	if (!bytes)
 		return 0;
@@ -294,32 +397,44 @@ static int exynos7885_abox_pcm_hw_params(struct snd_soc_component *component,
 					 struct snd_pcm_hw_params *params)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	u32 iova = st->capture ? ABOX_PCM_CAPTURE_IOVA : ABOX_PCM_PLAYBACK_IOVA;
 	int ret, cleanup_ret;
 
-	if (params_buffer_bytes(params) > pcm->size ||
+	if (params_buffer_bytes(params) > st->size ||
 	    params_periods(params) < ABOX_PCM_PERIODS_MIN)
 		return -EINVAL;
-
-	ret = exynos7885_abox_map_pcm_buffer(pcm->abox_dev);
+	/* A second hw_params replaces the first configuration. */
+	ret = exynos7885_abox_pcm_hw_free(component, substream);
 	if (ret)
 		return ret;
-	pcm->mapped = true;
 
-	memset(pcm->area, 0, pcm->size);
-	runtime->dma_area = pcm->area;
-	runtime->dma_addr = 0x81000000;
+	if (st->capture)
+		ret = exynos7885_abox_map_capture_buffer(pcm->abox_dev);
+	else
+		ret = exynos7885_abox_map_pcm_buffer(pcm->abox_dev);
+	if (ret)
+		return ret;
+	st->mapped = true;
+
+	memset(st->area, 0, st->size);
+	runtime->dma_area = st->area;
+	runtime->dma_addr = iova;
 	runtime->dma_bytes = params_buffer_bytes(params);
+	st->dma_bytes = runtime->dma_bytes;
+	st->period_bytes = params_period_bytes(params);
+	st->frame_bytes = params_channels(params) *
+			  params_physical_width(params) / 8;
 
-	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
-				       EXYNOS7885_ABOX_PCM_SET_BUFFER,
-				       0x81000000, params_period_bytes(params),
+	ret = exynos7885_abox_pcm_send(pcm, st, EXYNOS7885_ABOX_PCM_SET_BUFFER,
+				       iova, params_period_bytes(params),
 				       params_periods(params));
 	if (ret)
 		goto free_fw;
 
-	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
-				       EXYNOS7885_ABOX_PCM_HW_PARAMS,
+	ret = exynos7885_abox_pcm_send(pcm, st, EXYNOS7885_ABOX_PCM_HW_PARAMS,
 				       params_rate(params),
 				       params_width(params),
 				       params_channels(params));
@@ -327,25 +442,29 @@ static int exynos7885_abox_pcm_hw_params(struct snd_soc_component *component,
 		goto free_fw;
 
 	dev_dbg(component->dev,
-		"buffer %zu bytes, period %u bytes x %u, rate %u, width %u, channels %u\n",
+		"%s buffer %zu bytes, period %u bytes x %u, rate %u, width %u, channels %u\n",
+		st->capture ? "capture" : "playback",
 		runtime->dma_bytes, params_period_bytes(params),
 		params_periods(params), params_rate(params),
 		params_width(params), params_channels(params));
-	WRITE_ONCE(pcm->configured, true);
-	pcm->hw_ptr = 0;
-	pcm->appl_ptr = 0;
+	WRITE_ONCE(st->configured, true);
+	st->hw_ptr = 0;
+	st->appl_ptr = 0;
 	return 0;
 
 free_fw:
-	cleanup_ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
+	cleanup_ret = exynos7885_abox_pcm_send(pcm, st,
 					       EXYNOS7885_ABOX_PCM_HW_FREE,
 					       0, 0, 0);
 	if (cleanup_ret)
 		return ret;
-	cleanup_ret = exynos7885_abox_unmap_pcm_buffer(pcm->abox_dev);
+	if (st->capture)
+		cleanup_ret = exynos7885_abox_unmap_capture_buffer(pcm->abox_dev);
+	else
+		cleanup_ret = exynos7885_abox_unmap_pcm_buffer(pcm->abox_dev);
 	if (cleanup_ret)
 		return cleanup_ret;
-	pcm->mapped = false;
+	st->mapped = false;
 	runtime->dma_area = NULL;
 	runtime->dma_bytes = 0;
 	return ret;
@@ -355,23 +474,28 @@ static int exynos7885_abox_pcm_hw_free(struct snd_soc_component *component,
 				       struct snd_pcm_substream *substream)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
 	int ret;
 
-	if (!pcm->configured)
+	if (!st->configured)
 		return 0;
-	if (READ_ONCE(pcm->running))
+	if (READ_ONCE(st->running))
 		return -EBUSY;
 
-	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
-				       EXYNOS7885_ABOX_PCM_HW_FREE, 0, 0, 0);
+	ret = exynos7885_abox_pcm_send(pcm, st, EXYNOS7885_ABOX_PCM_HW_FREE,
+				       0, 0, 0);
 	if (ret)
 		return ret;
-	ret = exynos7885_abox_unmap_pcm_buffer(pcm->abox_dev);
+	if (st->capture)
+		ret = exynos7885_abox_unmap_capture_buffer(pcm->abox_dev);
+	else
+		ret = exynos7885_abox_unmap_pcm_buffer(pcm->abox_dev);
 	if (ret)
 		return ret;
 
-	pcm->mapped = false;
-	WRITE_ONCE(pcm->configured, false);
+	st->mapped = false;
+	WRITE_ONCE(st->configured, false);
 	return 0;
 }
 
@@ -379,22 +503,24 @@ static int exynos7885_abox_pcm_prepare(struct snd_soc_component *component,
 				       struct snd_pcm_substream *substream)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
 	int ret;
 
-	if (!pcm->configured)
+	if (!st->configured)
 		return -EINVAL;
-	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
-				       EXYNOS7885_ABOX_PCM_PREPARE, 0, 0, 0);
-	if (!ret)
-		pcm->hw_ptr = 0;
-	if (!ret)
-		pcm->appl_ptr = READ_ONCE(substream->runtime->control->appl_ptr);
-	return ret;
+	ret = exynos7885_abox_pcm_send(pcm, st, EXYNOS7885_ABOX_PCM_PREPARE,
+				       0, 0, 0);
+	if (ret)
+		return ret;
+	st->hw_ptr = 0;
+	st->appl_ptr = READ_ONCE(substream->runtime->control->appl_ptr);
+	return 0;
 }
 
-/* Each UAIF's number is its CPU DAI's id. */
+/* Each UAIF's number, by its CPU DAI's id. */
 static const unsigned int exynos7885_abox_pcm_uaif_id[ABOX_PCM_NUM_DAIS] = {
-	3, 0,
+	3, 0, 0,
 };
 
 /*
@@ -415,7 +541,7 @@ static int exynos7885_abox_pcm_set_uaifs(struct exynos7885_abox_pcm *pcm,
 	if (!pcm->uaif[output].configured)
 		output = 0;
 
-	for (i = 0; i < ABOX_PCM_NUM_DAIS; i++) {
+	for (i = 0; i < ABOX_PCM_NUM_PLAYBACK_DAIS; i++) {
 		uaif = &pcm->uaif[i];
 		if (!uaif->configured || uaif->enabled == enable)
 			continue;
@@ -442,11 +568,72 @@ static int exynos7885_abox_pcm_set_uaifs(struct exynos7885_abox_pcm *pcm,
 	return first_err;
 }
 
+static int exynos7885_abox_pcm_set_mic(struct exynos7885_abox_pcm *pcm,
+				       bool enable)
+{
+	struct exynos7885_abox_pcm_uaif *mic = &pcm->uaif[ABOX_PCM_MIC_DAI];
+	int ret;
+
+	lockdep_assert_held(&pcm->lock);
+
+	if (mic->enabled == enable)
+		return 0;
+	if (enable && !mic->configured)
+		return -EINVAL;
+	ret = exynos7885_abox_uaif_set_mic_enabled(pcm->abox_dev,
+			exynos7885_abox_pcm_uaif_id[ABOX_PCM_MIC_DAI], enable);
+	if (!ret)
+		mic->enabled = enable;
+	return ret;
+}
+
+/*
+ * The opposite order to playback, as the vendor capture links trigger
+ * WDMA before the UAIF on start and after it on stop.
+ */
+static int exynos7885_abox_pcm_capture_trigger(struct exynos7885_abox_pcm *pcm,
+					       struct exynos7885_abox_pcm_stream *st,
+					       bool start)
+{
+	int ret, stop_ret;
+
+	lockdep_assert_held(&pcm->lock);
+
+	if (start) {
+		WRITE_ONCE(st->running, true);
+		ret = exynos7885_abox_pcm_send(pcm, st,
+					       EXYNOS7885_ABOX_PCM_TRIGGER,
+					       1, 0, 0);
+		if (ret) {
+			WRITE_ONCE(st->running, false);
+			return ret;
+		}
+		ret = exynos7885_abox_pcm_set_mic(pcm, true);
+		if (!ret)
+			return 0;
+	} else {
+		ret = exynos7885_abox_pcm_set_mic(pcm, false);
+	}
+
+	/* Stop WDMA1 even if the input failed to stop. */
+	stop_ret = exynos7885_abox_pcm_send(pcm, st,
+					    EXYNOS7885_ABOX_PCM_TRIGGER,
+					    0, 0, 0);
+	if (!stop_ret)
+		stop_ret = exynos7885_abox_wait_wdma_idle(pcm->abox_dev, st->dma,
+							  20000);
+	if (!stop_ret)
+		WRITE_ONCE(st->running, false);
+	return ret ?: stop_ret;
+}
+
 static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 				       struct snd_pcm_substream *substream,
 				       int cmd)
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
+	struct exynos7885_abox_pcm_stream *st =
+		exynos7885_abox_pcm_stream(pcm, substream);
 	bool start;
 	int ret;
 
@@ -466,28 +653,30 @@ static int exynos7885_abox_pcm_trigger(struct snd_soc_component *component,
 	}
 
 	guard(mutex)(&pcm->lock);
+	if (st->capture)
+		return exynos7885_abox_pcm_capture_trigger(pcm, st, start);
+
+	/* The UAIF runs before RDMA0 starts and stops after it is idle. */
 	if (start) {
 		ret = exynos7885_abox_pcm_set_uaifs(pcm, true);
 		if (ret)
 			return ret;
-		WRITE_ONCE(pcm->running, true);
+		WRITE_ONCE(st->running, true);
 	}
-	ret = exynos7885_abox_send_pcm(pcm->abox_dev, ABOX_PCM_CHANNEL,
-				       EXYNOS7885_ABOX_PCM_TRIGGER, start, 0, 0);
+	ret = exynos7885_abox_pcm_send(pcm, st, EXYNOS7885_ABOX_PCM_TRIGGER,
+				       start, 0, 0);
 	if (ret) {
 		if (start && !exynos7885_abox_pcm_set_uaifs(pcm, false))
-			WRITE_ONCE(pcm->running, false);
+			WRITE_ONCE(st->running, false);
 		return ret;
 	}
 	if (start)
 		return 0;
-	ret = exynos7885_abox_wait_rdma_idle(pcm->abox_dev, ABOX_PCM_CHANNEL,
-					     20000);
-	if (ret)
-		return ret;
-	ret = exynos7885_abox_pcm_set_uaifs(pcm, false);
+	ret = exynos7885_abox_wait_rdma_idle(pcm->abox_dev, st->dma, 20000);
 	if (!ret)
-		WRITE_ONCE(pcm->running, false);
+		ret = exynos7885_abox_pcm_set_uaifs(pcm, false);
+	if (!ret)
+		WRITE_ONCE(st->running, false);
 	return ret;
 }
 
@@ -497,7 +686,7 @@ exynos7885_abox_pcm_pointer(struct snd_soc_component *component,
 {
 	struct exynos7885_abox_pcm *pcm = snd_soc_component_get_drvdata(component);
 
-	return READ_ONCE(pcm->hw_ptr);
+	return READ_ONCE(exynos7885_abox_pcm_stream(pcm, substream)->hw_ptr);
 }
 
 static const char * const exynos7885_abox_output_texts[] = {
@@ -532,7 +721,7 @@ static int exynos7885_abox_output_put(struct snd_kcontrol *kcontrol,
 	if (output == pcm->output)
 		return 0;
 	/* Move a running stream now; otherwise it applies at the next start. */
-	for (i = 0; i < ABOX_PCM_NUM_DAIS; i++) {
+	for (i = 0; i < ABOX_PCM_NUM_PLAYBACK_DAIS; i++) {
 		if (!pcm->uaif[i].enabled || i == output ||
 		    !pcm->uaif[output].configured)
 			continue;
@@ -641,6 +830,7 @@ static int exynos7885_abox_dai_hw_params(struct snd_pcm_substream *substream,
 	if (!uaif->fmt_valid)
 		return -EINVAL;
 
+	/* With the other direction of this UAIF running, the format must match. */
 	ret = exynos7885_abox_uaif_set_fmt(pcm->abox_dev, n, uaif->format,
 					   uaif->invert_bclk,
 					   uaif->invert_frame,
@@ -648,10 +838,16 @@ static int exynos7885_abox_dai_hw_params(struct snd_pcm_substream *substream,
 	if (ret)
 		return ret;
 
-	ret = exynos7885_abox_uaif_hw_params(pcm->abox_dev, n,
-					     params_rate(params),
-					     params_width(params),
-					     params_channels(params));
+	if (dai->id == ABOX_PCM_MIC_DAI)
+		ret = exynos7885_abox_uaif_mic_hw_params(pcm->abox_dev, n,
+							 params_rate(params),
+							 params_width(params),
+							 params_channels(params));
+	else
+		ret = exynos7885_abox_uaif_hw_params(pcm->abox_dev, n,
+						     params_rate(params),
+						     params_width(params),
+						     params_channels(params));
 	if (ret)
 		return ret;
 	scoped_guard(mutex, &pcm->lock)
@@ -679,31 +875,42 @@ static const struct snd_soc_dai_ops exynos7885_abox_dai_ops = {
 	.hw_free = exynos7885_abox_dai_hw_free,
 };
 
-#define EXYNOS7885_ABOX_UAIF_DAI(_id, _name, _stream)			\
+#define EXYNOS7885_ABOX_UAIF_STREAM(_stream)				\
 	{								\
-		.id = _id,						\
-		.name = _name,						\
-		.playback = {						\
-			.stream_name = _stream,				\
-			.channels_min = 2,				\
-			.channels_max = 2,				\
-			.rates = SNDRV_PCM_RATE_8000_192000,		\
-			.formats = SNDRV_PCM_FMTBIT_S16_LE |		\
-				   SNDRV_PCM_FMTBIT_S24_LE |		\
-				   SNDRV_PCM_FMTBIT_S32_LE,		\
-		},							\
-		.ops = &exynos7885_abox_dai_ops,			\
+		.stream_name = _stream,					\
+		.channels_min = 2,					\
+		.channels_max = 2,					\
+		.rates = SNDRV_PCM_RATE_8000_192000,			\
+		.formats = SNDRV_PCM_FMTBIT_S16_LE |			\
+			   SNDRV_PCM_FMTBIT_S24_LE |			\
+			   SNDRV_PCM_FMTBIT_S32_LE,			\
 	}
 
 static struct snd_soc_dai_driver exynos7885_abox_dais[ABOX_PCM_NUM_DAIS] = {
-	EXYNOS7885_ABOX_UAIF_DAI(0, "exynos7885-abox-uaif3", "UAIF3 Playback"),
-	EXYNOS7885_ABOX_UAIF_DAI(1, "exynos7885-abox-uaif0", "UAIF0 Playback"),
+	{
+		.id = 0,
+		.name = "exynos7885-abox-uaif3",
+		.playback = EXYNOS7885_ABOX_UAIF_STREAM("UAIF3 Playback"),
+		.ops = &exynos7885_abox_dai_ops,
+	},
+	{
+		.id = 1,
+		.name = "exynos7885-abox-uaif0",
+		.playback = EXYNOS7885_ABOX_UAIF_STREAM("UAIF0 Playback"),
+		.ops = &exynos7885_abox_dai_ops,
+	},
+	{
+		.id = ABOX_PCM_MIC_DAI,
+		.name = "exynos7885-abox-uaif0-mic",
+		.capture = EXYNOS7885_ABOX_UAIF_STREAM("UAIF0 Capture"),
+		.ops = &exynos7885_abox_dai_ops,
+	},
 };
 
 static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 {
 	struct exynos7885_abox_pcm *pcm;
-	int ret;
+	int i, ret;
 
 	if (!pdev->dev.parent)
 		return -ENODEV;
@@ -715,7 +922,14 @@ static int exynos7885_abox_pcm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	pcm->abox_dev = pdev->dev.parent;
-	INIT_WORK(&pcm->period_work, exynos7885_abox_pcm_period_work);
+	for (i = 0; i < ARRAY_SIZE(pcm->stream); i++) {
+		pcm->stream[i].capture = i == SNDRV_PCM_STREAM_CAPTURE;
+		pcm->stream[i].dma = pcm->stream[i].capture ?
+				     ABOX_PCM_CAPTURE_DMA :
+				     ABOX_PCM_PLAYBACK_DMA;
+		INIT_WORK(&pcm->stream[i].period_work,
+			  exynos7885_abox_pcm_period_work);
+	}
 	platform_set_drvdata(pdev, pcm);
 
 	return devm_snd_soc_register_component(&pdev->dev,
@@ -739,5 +953,5 @@ static struct platform_driver exynos7885_abox_pcm_driver = {
 };
 module_platform_driver(exynos7885_abox_pcm_driver);
 
-MODULE_DESCRIPTION("Exynos7885 ABOX RDMA0 playback PCM");
+MODULE_DESCRIPTION("Exynos7885 ABOX RDMA0 playback and WDMA1 capture PCM");
 MODULE_LICENSE("GPL");
