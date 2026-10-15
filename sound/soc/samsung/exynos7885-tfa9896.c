@@ -2,7 +2,8 @@
 /*
  * Exynos7885 GTA3XL Wi-Fi card: UAIF3 to two TFA9896 speaker amplifiers and,
  * with a "headphone" node, UAIF0 to the COD3035X headphone codec. Both are
- * fed by the same playback stream.
+ * fed by the same playback stream. With a "microphone" node, a second,
+ * capture-only link records the codec microphones from the UAIF0 input.
  */
 
 #include <linux/module.h>
@@ -20,9 +21,11 @@
 
 struct exynos7885_tfa9896_card {
 	struct snd_soc_card card;
-	struct snd_soc_dai_link link;
+	struct snd_soc_dai_link links[2];
 	struct snd_soc_dai_link_component cpus[GTA3XL_MAX_CPUS];
 	struct snd_soc_dai_link_component codecs[GTA3XL_MAX_CODECS];
+	struct snd_soc_dai_link_component mic_cpu;
+	struct snd_soc_dai_link_component mic_codec;
 	struct snd_soc_dai_link_ch_map ch_maps[GTA3XL_MAX_CODECS];
 	struct snd_soc_jack hp_jack;
 	struct notifier_block hp_nb;
@@ -35,6 +38,7 @@ static struct snd_soc_jack_pin exynos7885_tfa9896_jack_pins[] = {
 static const struct snd_soc_dapm_widget exynos7885_tfa9896_widgets[] = {
 	SND_SOC_DAPM_SPK("Speaker", NULL),
 	SND_SOC_DAPM_HP("Headphone", NULL),
+	SND_SOC_DAPM_MIC("Main Mic", NULL),
 };
 
 /*
@@ -145,6 +149,20 @@ static int exynos7885_tfa9896_init(struct snd_soc_pcm_runtime *rtd)
 	return 0;
 }
 
+/* The microphones share the headphone codec's I2S frame on UAIF0. */
+static int exynos7885_tfa9896_mic_init(struct snd_soc_pcm_runtime *rtd)
+{
+	const unsigned int fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF;
+	int ret;
+
+	ret = snd_soc_dai_set_fmt(snd_soc_rtd_to_cpu(rtd, 0),
+				  fmt | SND_SOC_DAIFMT_BP_FP);
+	if (ret)
+		return ret;
+	return snd_soc_dai_set_fmt(snd_soc_rtd_to_codec(rtd, 0),
+				   fmt | SND_SOC_DAIFMT_CBC_CFC);
+}
+
 static void exynos7885_tfa9896_put_node(void *data)
 {
 	of_node_put(data);
@@ -186,7 +204,9 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *node = dev->of_node;
 	struct device_node *cpu_node, *codec_node, *hp_node, *hp_cpu, *hp_codec;
+	struct device_node *mic_node, *mic_cpu, *mic_codec;
 	struct exynos7885_tfa9896_card *priv;
+	struct snd_soc_dai_link *link, *mic;
 	struct snd_soc_card *card;
 	int num_codecs, i, ret;
 
@@ -195,7 +215,11 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 	hp_node = of_get_child_by_name(node, "headphone");
 	hp_cpu = hp_node ? of_get_child_by_name(hp_node, "cpu") : NULL;
 	hp_codec = hp_node ? of_get_child_by_name(hp_node, "codec") : NULL;
-	if (hp_node && (!hp_cpu || !hp_codec)) {
+	mic_node = of_get_child_by_name(node, "microphone");
+	mic_cpu = mic_node ? of_get_child_by_name(mic_node, "cpu") : NULL;
+	mic_codec = mic_node ? of_get_child_by_name(mic_node, "codec") : NULL;
+	if ((hp_node && (!hp_cpu || !hp_codec)) ||
+	    (mic_node && (!mic_cpu || !mic_codec))) {
 		ret = -EINVAL;
 		goto put_nodes;
 	}
@@ -232,9 +256,10 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 		};
 	}
 
-	priv->link.name = "UAIF3 Speaker";
-	priv->link.stream_name = "Speaker Playback";
-	priv->link.num_cpus = 1;
+	link = &priv->links[0];
+	link->name = "UAIF3 Speaker";
+	link->stream_name = "Speaker Playback";
+	link->num_cpus = 1;
 	if (hp_node) {
 		ret = exynos7885_tfa9896_get_dlc(dev, hp_cpu, "sound-dai", 0,
 						 &priv->cpus[1]);
@@ -248,32 +273,55 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 			.cpu = 1, .codec = num_codecs,
 		};
 		num_codecs++;
-		priv->link.num_cpus = 2;
-		priv->link.name = "Speaker and Headphone";
-		priv->link.stream_name = "Playback";
+		link->num_cpus = 2;
+		link->name = "Speaker and Headphone";
+		link->stream_name = "Playback";
 		/*
 		 * The codec MCLK comes from the ABOX firmware, which stops when
 		 * the PCM closes; power the codec down before that, not later.
 		 */
-		priv->link.ignore_pmdown_time = 1;
+		link->ignore_pmdown_time = 1;
 	}
-	priv->link.cpus = priv->cpus;
-	priv->link.codecs = priv->codecs;
-	priv->link.num_codecs = num_codecs;
-	priv->link.ch_maps = priv->ch_maps;
-	priv->link.init = exynos7885_tfa9896_init;
-	priv->link.exit = exynos7885_tfa9896_exit;
+	link->cpus = priv->cpus;
+	link->codecs = priv->codecs;
+	link->num_codecs = num_codecs;
+	link->ch_maps = priv->ch_maps;
+	link->init = exynos7885_tfa9896_init;
+	link->exit = exynos7885_tfa9896_exit;
 	/* Codec mute uses I2C in trigger context; ABOX also waits for IPC. */
-	priv->link.nonatomic = 1;
-	priv->link.playback_only = 1;
+	link->nonatomic = 1;
+	link->playback_only = 1;
+
+	if (mic_node) {
+		ret = exynos7885_tfa9896_get_dlc(dev, mic_cpu, "sound-dai", 0,
+						 &priv->mic_cpu);
+		if (ret)
+			goto put_nodes;
+		ret = exynos7885_tfa9896_get_dlc(dev, mic_codec, "sound-dai", 0,
+						 &priv->mic_codec);
+		if (ret)
+			goto put_nodes;
+		mic = &priv->links[1];
+		mic->name = "Microphone";
+		mic->stream_name = "Capture";
+		mic->cpus = &priv->mic_cpu;
+		mic->num_cpus = 1;
+		mic->codecs = &priv->mic_codec;
+		mic->num_codecs = 1;
+		mic->init = exynos7885_tfa9896_mic_init;
+		/* As for the headphones, the codec runs from the ABOX MCLK. */
+		mic->ignore_pmdown_time = 1;
+		mic->nonatomic = 1;
+		mic->capture_only = 1;
+	}
 
 	card = &priv->card;
 	card->dev = dev;
 	card->owner = THIS_MODULE;
 	/* ALSA driver ID, which UCM looks profiles up by. */
 	card->driver_name = "gta3xlwifi";
-	card->dai_link = &priv->link;
-	card->num_links = 1;
+	card->dai_link = priv->links;
+	card->num_links = mic_node ? 2 : 1;
 	ret = snd_soc_of_parse_card_name(card, "model");
 	if (ret)
 		goto put_nodes;
@@ -287,6 +335,9 @@ static int exynos7885_tfa9896_card_probe(struct platform_device *pdev)
 	ret = devm_snd_soc_register_card(dev, card);
 
 put_nodes:
+	of_node_put(mic_codec);
+	of_node_put(mic_cpu);
+	of_node_put(mic_node);
 	of_node_put(hp_codec);
 	of_node_put(hp_cpu);
 	of_node_put(hp_node);
@@ -310,5 +361,5 @@ static struct platform_driver exynos7885_tfa9896_card_driver = {
 };
 module_platform_driver(exynos7885_tfa9896_card_driver);
 
-MODULE_DESCRIPTION("Exynos7885 GTA3XL Wi-Fi speaker and headphone card");
+MODULE_DESCRIPTION("Exynos7885 GTA3XL Wi-Fi speaker, headphone and microphone card");
 MODULE_LICENSE("GPL");
