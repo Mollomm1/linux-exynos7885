@@ -37,6 +37,15 @@
 #define ABOX_DRAM_IOVA		0x80000000
 #define ABOX_PCM_IOVA		0x81000000
 #define ABOX_PCM_SIZE		SZ_128K
+/*
+ * The PCM region holds two rings: RDMA0 playback in its lower half, mapped at
+ * ABOX_PCM_IOVA, and WDMA1 capture in its upper half, mapped at the vendor
+ * WDMA1 address.
+ */
+#define ABOX_PCM_RING_SIZE	SZ_64K
+#define ABOX_CAPTURE_IOVA	0x82100000
+/* SIFM0, the output of the NSRC0 input chain, feeds WDMA1. */
+#define ABOX_CAPTURE_WDMA	1
 #define ABOX_RDMA_BASE		0x1000
 #define ABOX_RDMA_INTERVAL	0x100
 #define ABOX_RDMA_STATUS	0x30
@@ -44,9 +53,21 @@
 #define ABOX_RDMA_RBUF_OFFSET	GENMASK(28, 16)
 #define ABOX_RDMA_RBUF_CNT	GENMASK(12, 0)
 #define ABOX_IRQ_RDMA0_BUF_EMPTY	11
+#define ABOX_WDMA_BASE		0x2000
+#define ABOX_WDMA_INTERVAL	0x100
+#define ABOX_WDMA_STATUS	0x30
+#define ABOX_IRQ_WDMA1_BUF_FULL	9
 #define ABOX_ROUTE_CTRL0	0x0040
 #define ABOX_ROUTE_UAIF_SPK(n)	GENMASK(4 * (n) + 3, 4 * (n))
 #define ABOX_ROUTE_SIFS1	2
+#define ABOX_ROUTE_CTRL1	0x0044
+#define ABOX_ROUTE_NSRC0	GENMASK(3, 0)
+#define ABOX_ROUTE_NSRC_UAIF(n)	(8 + (n))
+#define ABOX_SPUM_CTRL0		0x0300
+#define ABOX_SPUM_NSRC0_ASRC	BIT(4)
+#define ABOX_SPUM_NSRC0_SIFMS	BIT(7)
+#define ABOX_SPUM_CTRL3		0x030c
+#define ABOX_SPUM_SIFM0_FLUSH	BIT(0)
 #define ABOX_SPUS_CTRL0		0x0200
 #define ABOX_SPUS_RDMA0_CHAIN	GENMASK(3, 0)
 #define ABOX_SPUS_RDMA0_ASRC	BIT(0)
@@ -97,6 +118,8 @@
 #define ABOX_IPC_CONFIG		0xa
 #define ABOX_SET_OUT1_SAMPLE_RATE	2
 #define ABOX_SET_OUT1_FORMAT	0x11
+#define ABOX_SET_INMUX0_SAMPLE_RATE	5
+#define ABOX_SET_INMUX0_FORMAT	0x14
 #define ABOX_SYSTEM_SUSPEND	1
 #define ABOX_BOOT_DONE		3
 #define ABOX_IPC_TIMEOUT_US	20000
@@ -140,7 +163,11 @@ struct exynos7885_abox_uaif {
 	struct clk *mux;
 	struct clk *bclk;
 	struct clk *sync;
+	/* Output (SPK) and input (MIC) directions; they share the clocks. */
 	bool enabled;
+	bool mic_enabled;
+	unsigned int rate;
+	unsigned int width;
 };
 
 struct exynos7885_abox_rproc {
@@ -187,6 +214,7 @@ struct exynos7885_abox_rproc {
 	bool pins_active_selected;
 	bool dram_requested;
 	bool pcm_mapped;
+	bool capture_mapped;
 	bool pcm_shutting_down;
 	/* Indexed by UAIF number; only UAIF0 and UAIF3 are wired up. */
 	struct exynos7885_abox_uaif uaif[ABOX_NUM_UAIF];
@@ -196,6 +224,8 @@ struct exynos7885_abox_rproc {
 	 */
 	struct clk_hw mclk_hw;
 	struct mutex mclk_lock;
+	/* Audio PLL rate set for the running UAIFs, under uaif_lock. */
+	unsigned long pll_rate;
 	bool mclk_allowed;
 	bool mclk_on;
 	bool firmware_running;
@@ -217,14 +247,20 @@ static void exynos7885_abox_handle_ipc(struct exynos7885_abox_rproc *abox, unsig
 
 	if (exynos7885_abox_is_dma_irq(irq)) {
 		/*
-		 * RDMA0 finished a period. This carries no payload; report it
-		 * as a POINTER message with a zero pointer, meaning "read the
-		 * position from RDMA0 STATUS".
+		 * RDMA0 or WDMA1 finished a period. This carries no payload;
+		 * report it as a POINTER message with a zero pointer, meaning
+		 * "read the position from the DMA STATUS".
 		 */
-		if (irq != ABOX_IRQ_RDMA0_BUF_EMPTY)
-			return;
 		memset(message, 0, sizeof(message));
-		message[0] = EXYNOS7885_ABOX_IPC_PCM_PLAYBACK;
+		if (irq == ABOX_IRQ_RDMA0_BUF_EMPTY) {
+			message[0] = EXYNOS7885_ABOX_IPC_PCM_PLAYBACK;
+		} else if (irq == ABOX_IRQ_WDMA1_BUF_FULL) {
+			message[0] = EXYNOS7885_ABOX_IPC_PCM_CAPTURE;
+			message[1] = ABOX_CAPTURE_WDMA;
+			message[3] = ABOX_CAPTURE_WDMA;
+		} else {
+			return;
+		}
 		message[2] = EXYNOS7885_ABOX_PCM_POINTER;
 		goto dispatch;
 	}
@@ -795,8 +831,9 @@ int exynos7885_abox_send_ipc(struct device *dev, const void *message,
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_send_ipc);
 
-int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
-			     u32 param0, u32 param1, u32 param2)
+int exynos7885_abox_send_pcm_stream(struct device *dev, bool capture,
+				    u32 channel, u32 type, u32 param0,
+				    u32 param1, u32 param2)
 {
 	u32 message[ABOX_IPC_WORDS] = {};
 
@@ -816,7 +853,8 @@ int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
 		return -EINVAL;
 	}
 
-	message[0] = EXYNOS7885_ABOX_IPC_PCM_PLAYBACK;
+	message[0] = capture ? EXYNOS7885_ABOX_IPC_PCM_CAPTURE :
+			      EXYNOS7885_ABOX_IPC_PCM_PLAYBACK;
 	message[1] = channel;
 	message[2] = type;
 	message[3] = channel;
@@ -825,6 +863,14 @@ int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
 	message[6] = param2;
 
 	return exynos7885_abox_send_ipc(dev, message, sizeof(message));
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_send_pcm_stream);
+
+int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
+			     u32 param0, u32 param1, u32 param2)
+{
+	return exynos7885_abox_send_pcm_stream(dev, false, channel, type,
+					       param0, param1, param2);
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_send_pcm);
 
@@ -870,7 +916,8 @@ int exynos7885_abox_get_pcm_buffer(struct device *dev, void **area,
 	if (!abox->pcm_area) {
 		/* No-map ring shared with non-coherent ABOX: uncached. */
 		pcm_area = devm_memremap(abox->dev, abox->pcm_rmem->base,
-					 ABOX_PCM_SIZE, MEMREMAP_WC);
+					 min_t(size_t, abox->pcm_rmem->size,
+					       ABOX_PCM_SIZE), MEMREMAP_WC);
 		if (!pcm_area) {
 			mutex_unlock(&abox->pcm_lock);
 			return -ENOMEM;
@@ -880,7 +927,7 @@ int exynos7885_abox_get_pcm_buffer(struct device *dev, void **area,
 
 	*area = abox->pcm_area;
 	*phys = abox->pcm_rmem->base;
-	*size = min_t(size_t, abox->pcm_rmem->size, ABOX_PCM_SIZE);
+	*size = min_t(size_t, abox->pcm_rmem->size, ABOX_PCM_RING_SIZE);
 	mutex_unlock(&abox->pcm_lock);
 
 	return 0;
@@ -907,7 +954,7 @@ int exynos7885_abox_map_pcm_buffer(struct device *dev)
 		ret = -EBUSY;
 	} else {
 		ret = iommu_map(rproc->domain, ABOX_PCM_IOVA,
-				abox->pcm_rmem->base, ABOX_PCM_SIZE,
+				abox->pcm_rmem->base, ABOX_PCM_RING_SIZE,
 				IOMMU_READ, GFP_KERNEL);
 		if (!ret)
 			abox->pcm_mapped = true;
@@ -993,11 +1040,12 @@ int exynos7885_abox_unmap_pcm_buffer(struct device *dev)
 		mutex_unlock(&abox->pcm_lock);
 		return ret;
 	}
-	unmapped = iommu_unmap(rproc->domain, ABOX_PCM_IOVA, ABOX_PCM_SIZE);
-	if (unmapped != ABOX_PCM_SIZE) {
+	unmapped = iommu_unmap(rproc->domain, ABOX_PCM_IOVA,
+			       ABOX_PCM_RING_SIZE);
+	if (unmapped != ABOX_PCM_RING_SIZE) {
 		mutex_unlock(&abox->pcm_lock);
 		dev_err(abox->dev, "PCM IOMMU unmap covered %zu of %u bytes\n",
-			unmapped, ABOX_PCM_SIZE);
+			unmapped, ABOX_PCM_RING_SIZE);
 		return -EIO;
 	}
 
@@ -1013,8 +1061,8 @@ int exynos7885_abox_sync_pcm_buffer(struct device *dev, size_t offset,
 	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
 	struct exynos7885_abox_rproc *abox;
 
-	if (!rproc || !size || offset > ABOX_PCM_SIZE ||
-	    size > ABOX_PCM_SIZE - offset)
+	if (!rproc || !size || offset > ABOX_PCM_RING_SIZE ||
+	    size > ABOX_PCM_RING_SIZE - offset)
 		return -EINVAL;
 
 	abox = rproc->priv;
@@ -1030,6 +1078,158 @@ int exynos7885_abox_sync_pcm_buffer(struct device *dev, size_t offset,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_sync_pcm_buffer);
+
+/* The WDMA1 capture ring: the upper half of the PCM region. */
+int exynos7885_abox_get_capture_buffer(struct device *dev, void **area,
+				       size_t *size)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	phys_addr_t phys;
+	size_t playback_size;
+	void *pcm_area;
+	int ret;
+
+	if (!rproc || !area || !size)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	if (!abox->pcm_rmem ||
+	    abox->pcm_rmem->size < ABOX_PCM_RING_SIZE * 2)
+		return -ENODEV;
+
+	ret = exynos7885_abox_get_pcm_buffer(dev, &pcm_area, &phys,
+					     &playback_size);
+	if (ret)
+		return ret;
+
+	*area = pcm_area + ABOX_PCM_RING_SIZE;
+	*size = ABOX_PCM_RING_SIZE;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_get_capture_buffer);
+
+int exynos7885_abox_map_capture_buffer(struct device *dev)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+
+	abox = rproc->priv;
+	if (!abox->pcm_rmem ||
+	    abox->pcm_rmem->size < ABOX_PCM_RING_SIZE * 2)
+		return -ENODEV;
+	mutex_lock(&abox->pcm_lock);
+	if (abox->pcm_shutting_down ||
+	    !READ_ONCE(abox->firmware_ready) || !rproc->domain) {
+		ret = -EHOSTDOWN;
+	} else if (abox->capture_mapped) {
+		ret = -EBUSY;
+	} else {
+		ret = iommu_map(rproc->domain, ABOX_CAPTURE_IOVA,
+				abox->pcm_rmem->base + ABOX_PCM_RING_SIZE,
+				ABOX_PCM_RING_SIZE, IOMMU_READ | IOMMU_WRITE,
+				GFP_KERNEL);
+		if (!ret)
+			abox->capture_mapped = true;
+	}
+	mutex_unlock(&abox->pcm_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_map_capture_buffer);
+
+ssize_t exynos7885_abox_wdma_pointer(struct device *dev, unsigned int channel,
+				     size_t buffer_bytes, size_t period_bytes)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	ssize_t offset, bytes;
+	u32 status;
+
+	if (!rproc || channel >= 5 || !period_bytes ||
+	    buffer_bytes < period_bytes)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	status = readl(abox->sfr + ABOX_WDMA_BASE +
+		       channel * ABOX_WDMA_INTERVAL + ABOX_WDMA_STATUS);
+	if (!(status & ABOX_RDMA_PROGRESS))
+		return 0;
+
+	/* WDMA STATUS has the RDMA layout; normalise it the same way. */
+	offset = FIELD_GET(ABOX_RDMA_RBUF_OFFSET, status) << 4;
+	bytes = buffer_bytes;
+	while ((offset % period_bytes) && bytes >= 0) {
+		bytes -= period_bytes;
+		if ((bytes & offset) == offset)
+			offset = bytes;
+	}
+	return offset + FIELD_GET(ABOX_RDMA_RBUF_CNT, status);
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_wdma_pointer);
+
+int exynos7885_abox_wait_wdma_idle(struct device *dev, unsigned int channel,
+				   unsigned int timeout_us)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	void __iomem *status_reg;
+	unsigned int status;
+
+	if (!rproc || channel >= 5 || !timeout_us || timeout_us > 1000000)
+		return -EINVAL;
+
+	abox = rproc->priv;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+	status_reg = abox->sfr + ABOX_WDMA_BASE +
+		     channel * ABOX_WDMA_INTERVAL + ABOX_WDMA_STATUS;
+
+	return readl_poll_timeout(status_reg, status,
+				  !(status & ABOX_RDMA_PROGRESS), 100,
+				  timeout_us);
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_wait_wdma_idle);
+
+int exynos7885_abox_unmap_capture_buffer(struct device *dev)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	size_t unmapped;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+
+	abox = rproc->priv;
+	mutex_lock(&abox->pcm_lock);
+	if (!abox->capture_mapped) {
+		mutex_unlock(&abox->pcm_lock);
+		return 0;
+	}
+	ret = exynos7885_abox_wait_wdma_idle(dev, ABOX_CAPTURE_WDMA,
+					     ABOX_STOP_TIMEOUT_US);
+	if (ret) {
+		mutex_unlock(&abox->pcm_lock);
+		return ret;
+	}
+	unmapped = iommu_unmap(rproc->domain, ABOX_CAPTURE_IOVA,
+			       ABOX_PCM_RING_SIZE);
+	if (unmapped != ABOX_PCM_RING_SIZE) {
+		mutex_unlock(&abox->pcm_lock);
+		dev_err(abox->dev, "capture IOMMU unmap covered %zu of %u bytes\n",
+			unmapped, ABOX_PCM_RING_SIZE);
+		return -EIO;
+	}
+
+	abox->capture_mapped = false;
+	mutex_unlock(&abox->pcm_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_unmap_capture_buffer);
 
 /* UAIF0 (headphone codec) is optional; take all four clocks or none. */
 static int exynos7885_abox_get_uaif0_clocks(struct exynos7885_abox_rproc *abox)
@@ -1068,14 +1268,44 @@ exynos7885_abox_get_uaif(struct exynos7885_abox_rproc *abox, unsigned int n)
 	return &abox->uaif[n];
 }
 
+static bool exynos7885_abox_uaif_running(const struct exynos7885_abox_uaif *uaif)
+{
+	return uaif->enabled || uaif->mic_enabled;
+}
+
 static bool exynos7885_abox_any_uaif_enabled(struct exynos7885_abox_rproc *abox)
 {
 	unsigned int n;
 
 	for (n = 0; n < ABOX_NUM_UAIF; n++)
-		if (abox->uaif[n].enabled)
+		if (exynos7885_abox_uaif_running(&abox->uaif[n]))
 			return true;
 	return false;
+}
+
+/* Start the UAIF clocks for its first running direction. */
+static int exynos7885_abox_uaif_clk_on(struct exynos7885_abox_uaif *uaif)
+{
+	int ret;
+
+	if (exynos7885_abox_uaif_running(uaif))
+		return 0;
+	ret = clk_prepare_enable(uaif->bclk);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(uaif->sync);
+	if (ret)
+		clk_disable_unprepare(uaif->bclk);
+	return ret;
+}
+
+/* Stop the UAIF clocks once neither direction runs. */
+static void exynos7885_abox_uaif_clk_off(struct exynos7885_abox_uaif *uaif)
+{
+	if (exynos7885_abox_uaif_running(uaif))
+		return;
+	clk_disable_unprepare(uaif->sync);
+	clk_disable_unprepare(uaif->bclk);
 }
 
 int exynos7885_abox_uaif_set_fmt(struct device *dev, unsigned int n,
@@ -1085,7 +1315,8 @@ int exynos7885_abox_uaif_set_fmt(struct device *dev, unsigned int n,
 	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
 	struct exynos7885_abox_rproc *abox;
 	struct exynos7885_abox_uaif *uaif;
-	u32 ctrl0, ctrl1;
+	u32 ctrl0, ctrl1, new0, new1;
+	int ret = 0;
 
 	if (!rproc)
 		return -ENODEV;
@@ -1102,30 +1333,35 @@ int exynos7885_abox_uaif_set_fmt(struct device *dev, unsigned int n,
 		return -EHOSTDOWN;
 
 	mutex_lock(&abox->uaif_lock);
-	if (uaif->enabled) {
-		mutex_unlock(&abox->uaif_lock);
-		return -EBUSY;
-	}
 	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(n));
 	ctrl1 = readl(abox->sfr + ABOX_UAIF_CTRL1(n));
-	ctrl0 &= ~(ABOX_UAIF_MODE | ABOX_UAIF_SPK_ENABLE);
+	new0 = ctrl0 & ~ABOX_UAIF_MODE;
 	if (abox_master)
-		ctrl0 |= ABOX_UAIF_MODE;
-	ctrl1 &= ~(ABOX_UAIF_BCLK_POLARITY | ABOX_UAIF_WS_MODE |
-		   ABOX_UAIF_WS_POLARITY);
+		new0 |= ABOX_UAIF_MODE;
+	new1 = ctrl1 & ~(ABOX_UAIF_BCLK_POLARITY | ABOX_UAIF_WS_MODE |
+			 ABOX_UAIF_WS_POLARITY);
 	if (!invert_bclk)
-		ctrl1 |= ABOX_UAIF_BCLK_POLARITY;
+		new1 |= ABOX_UAIF_BCLK_POLARITY;
 	if (format == EXYNOS7885_ABOX_UAIF3_DSP_A)
-		ctrl1 |= ABOX_UAIF_WS_MODE;
+		new1 |= ABOX_UAIF_WS_MODE;
 	if (invert_frame)
-		ctrl1 |= ABOX_UAIF_WS_POLARITY;
-	writel(ctrl0, abox->sfr + ABOX_UAIF_CTRL0(n));
-	writel(ctrl1, abox->sfr + ABOX_UAIF_CTRL1(n));
+		new1 |= ABOX_UAIF_WS_POLARITY;
+
+	/* The other direction may run already; it must use the same frame. */
+	if (exynos7885_abox_uaif_running(uaif)) {
+		if (new0 != ctrl0 || new1 != ctrl1)
+			ret = -EBUSY;
+		goto out_unlock;
+	}
+	new0 &= ~(ABOX_UAIF_SPK_ENABLE | ABOX_UAIF_MIC_ENABLE);
+	writel(new0, abox->sfr + ABOX_UAIF_CTRL0(n));
+	writel(new1, abox->sfr + ABOX_UAIF_CTRL1(n));
 	/* Publish frame format before a later clock enable starts the pins. */
 	wmb();
-	mutex_unlock(&abox->uaif_lock);
 
-	return 0;
+out_unlock:
+	mutex_unlock(&abox->uaif_lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_set_fmt);
 
@@ -1151,28 +1387,29 @@ static int exynos7885_abox_send_config(struct device *dev, u32 type,
 	return exynos7885_abox_send_ipc(dev, message, sizeof(message));
 }
 
-int exynos7885_abox_uaif_hw_params(struct device *dev, unsigned int n,
-				   unsigned int rate, unsigned int width,
-				   unsigned int channels)
+/*
+ * Set the clocks and slot format of UAIF @n. When its other direction runs,
+ * only check that it uses the same rate and width. The audio PLL and AUDIF
+ * are shared by every UAIF; while another UAIF runs they must not change.
+ * The UAIF dividers have no CLK_SET_RATE_PARENT, so only the PLL rate needs
+ * to match then.
+ */
+static int exynos7885_abox_uaif_config(struct exynos7885_abox_rproc *abox,
+				       unsigned int n,
+				       struct exynos7885_abox_uaif *uaif,
+				       unsigned int rate, unsigned int width,
+				       unsigned int channels)
 {
-	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
-	struct exynos7885_abox_rproc *abox;
-	struct exynos7885_abox_uaif *uaif;
 	unsigned int slot_width, sample_code;
 	unsigned long pll_rate, bclk_rate, bclk_div;
-	u32 ctrl1, spus0, spus1, route0;
+	u32 ctrl1;
 	int ret;
 
-	if (!rproc || channels != 2 || (width != 16 && width != 24 && width != 32) ||
-	    rate < 8000 || rate > 192000)
-		return -EINVAL;
+	lockdep_assert_held(&abox->uaif_lock);
 
-	abox = rproc->priv;
-	uaif = exynos7885_abox_get_uaif(abox, n);
-	if (!uaif)
-		return -ENODEV;
-	if (!READ_ONCE(abox->firmware_ready))
-		return -EHOSTDOWN;
+	if (exynos7885_abox_uaif_running(uaif))
+		return uaif->rate == rate && uaif->width == width ? 0 : -EBUSY;
+
 	slot_width = width == 24 ? 32 : width;
 	sample_code = slot_width / 8 - 1;
 	bclk_rate = (unsigned long)rate * channels * slot_width;
@@ -1188,35 +1425,31 @@ int exynos7885_abox_uaif_hw_params(struct device *dev, unsigned int n,
 	/* AUDIF runs a few Hz fast, so request the rounded-up quotient. */
 	bclk_rate = DIV_ROUND_UP(ABOX_AUDIF_RATE(pll_rate), bclk_div);
 
-	mutex_lock(&abox->uaif_lock);
-	/* The PLL and AUDIF are shared by every UAIF. */
 	if (exynos7885_abox_any_uaif_enabled(abox)) {
-		ret = -EBUSY;
-		goto out_unlock;
+		if (abox->pll_rate != pll_rate)
+			return -EBUSY;
+	} else {
+		ret = clk_set_rate(abox->clocks[ABOX_CLK_PLL].clk, pll_rate);
+		if (ret)
+			return ret;
+		ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk,
+				   ABOX_AUDIF_RATE(pll_rate));
+		if (ret)
+			return ret;
+		abox->pll_rate = pll_rate;
 	}
-	ret = clk_set_rate(abox->clocks[ABOX_CLK_PLL].clk, pll_rate);
-	if (ret)
-		goto out_unlock;
-	ret = clk_set_rate(abox->clocks[ABOX_CLK_AUDIF].clk,
-			   ABOX_AUDIF_RATE(pll_rate));
-	if (ret)
-		goto out_unlock;
 	ret = clk_set_parent(uaif->mux, uaif->div);
 	if (ret)
-		goto out_unlock;
+		return ret;
 	/* Consumer handles differ from the provider's; compare the clocks. */
-	if (!clk_is_match(clk_get_parent(uaif->mux), uaif->div)) {
-		ret = -EIO;
-		goto out_unlock;
-	}
+	if (!clk_is_match(clk_get_parent(uaif->mux), uaif->div))
+		return -EIO;
 	ret = clk_set_rate(uaif->div, bclk_rate);
 	if (ret)
-		goto out_unlock;
+		return ret;
 	if (clk_get_rate(uaif->div) != bclk_rate ||
-	    clk_get_rate(uaif->bclk) != bclk_rate) {
-		ret = -EINVAL;
-		goto out_unlock;
-	}
+	    clk_get_rate(uaif->bclk) != bclk_rate)
+		return -EINVAL;
 
 	ctrl1 = readl(abox->sfr + ABOX_UAIF_CTRL1(n));
 	ctrl1 &= ~(ABOX_UAIF_FORMAT | ABOX_UAIF_SLOT_MAX |
@@ -1227,6 +1460,49 @@ int exynos7885_abox_uaif_hw_params(struct device *dev, unsigned int n,
 	ctrl1 |= FIELD_PREP(ABOX_UAIF_SLOT_MAX, channels - 1);
 	ctrl1 |= FIELD_PREP(ABOX_UAIF_SBIT_MAX, slot_width - 1);
 	writel(ctrl1, abox->sfr + ABOX_UAIF_CTRL1(n));
+	uaif->rate = rate;
+	uaif->width = width;
+	return 0;
+}
+
+static int exynos7885_abox_uaif_check_params(unsigned int rate,
+					     unsigned int width,
+					     unsigned int channels)
+{
+	if (channels != 2 || (width != 16 && width != 24 && width != 32) ||
+	    rate < 8000 || rate > 192000)
+		return -EINVAL;
+	return 0;
+}
+
+int exynos7885_abox_uaif_hw_params(struct device *dev, unsigned int n,
+				   unsigned int rate, unsigned int width,
+				   unsigned int channels)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	struct exynos7885_abox_uaif *uaif;
+	u32 spus0, spus1, route0;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+	ret = exynos7885_abox_uaif_check_params(rate, width, channels);
+	if (ret)
+		return ret;
+
+	abox = rproc->priv;
+	uaif = exynos7885_abox_get_uaif(abox, n);
+	if (!uaif)
+		return -ENODEV;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+
+	mutex_lock(&abox->uaif_lock);
+	ret = exynos7885_abox_uaif_config(abox, n, uaif, rate, width,
+					  channels);
+	if (ret)
+		goto out_unlock;
 
 	/*
 	 * Route RDMA0 -> SPUS OUT0 -> SIFS1 -> this UAIF, with the SPUS ASRC
@@ -1300,21 +1576,15 @@ int exynos7885_abox_uaif_set_enabled(struct device *dev, unsigned int n,
 		goto out_unlock;
 	}
 	if (enable) {
-		ret = clk_prepare_enable(uaif->bclk);
+		ret = exynos7885_abox_uaif_clk_on(uaif);
 		if (ret)
 			goto out_unlock;
-		ret = clk_prepare_enable(uaif->sync);
-		if (ret) {
-			clk_disable_unprepare(uaif->bclk);
-			goto out_unlock;
-		}
 		ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(n));
 		writel(ctrl0 | ABOX_UAIF_SPK_ENABLE,
 		       abox->sfr + ABOX_UAIF_CTRL0(n));
 		/* Enable the output before asking firmware to start RDMA. */
 		wmb();
 		uaif->enabled = true;
-		ret = 0;
 		goto out_unlock;
 	}
 
@@ -1326,10 +1596,8 @@ int exynos7885_abox_uaif_set_enabled(struct device *dev, unsigned int n,
 	       abox->sfr + ABOX_UAIF_CTRL0(n));
 	/* Disable the output before removing its clocks. */
 	wmb();
-	clk_disable_unprepare(uaif->sync);
-	clk_disable_unprepare(uaif->bclk);
 	uaif->enabled = false;
-	ret = 0;
+	exynos7885_abox_uaif_clk_off(uaif);
 
 out_unlock:
 	mutex_unlock(&abox->uaif_lock);
@@ -1340,7 +1608,8 @@ EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_set_enabled);
 /*
  * Both UAIFs read SIFS1, so only one may run. Start the new output before
  * stopping the old one: SIFS1 is then read twice for a few microseconds
- * instead of stalling RDMA0, which keeps running throughout.
+ * instead of stalling RDMA0, which keeps running throughout. A UAIF keeps
+ * its clocks while its input runs.
  */
 int exynos7885_abox_uaif_switch(struct device *dev, unsigned int from,
 				unsigned int to)
@@ -1366,14 +1635,9 @@ int exynos7885_abox_uaif_switch(struct device *dev, unsigned int from,
 		ret = -EINVAL;
 		goto out_unlock;
 	}
-	ret = clk_prepare_enable(new->bclk);
+	ret = exynos7885_abox_uaif_clk_on(new);
 	if (ret)
 		goto out_unlock;
-	ret = clk_prepare_enable(new->sync);
-	if (ret) {
-		clk_disable_unprepare(new->bclk);
-		goto out_unlock;
-	}
 	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(to));
 	writel(ctrl0 | ABOX_UAIF_SPK_ENABLE, abox->sfr + ABOX_UAIF_CTRL0(to));
 	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(from));
@@ -1381,16 +1645,133 @@ int exynos7885_abox_uaif_switch(struct device *dev, unsigned int from,
 	       abox->sfr + ABOX_UAIF_CTRL0(from));
 	/* Stop the old output before removing its clocks. */
 	wmb();
-	clk_disable_unprepare(old->sync);
-	clk_disable_unprepare(old->bclk);
 	new->enabled = true;
 	old->enabled = false;
+	exynos7885_abox_uaif_clk_off(old);
 
 out_unlock:
 	mutex_unlock(&abox->uaif_lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_switch);
+
+/*
+ * Configure the input of UAIF @n and route it to WDMA1, as the vendor
+ * "route-ap-record" path: UAIF -> NSRC0 -> SPUM ASRC1 -> SIFM0 -> WDMA1.
+ */
+int exynos7885_abox_uaif_mic_hw_params(struct device *dev, unsigned int n,
+				       unsigned int rate, unsigned int width,
+				       unsigned int channels)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	struct exynos7885_abox_uaif *uaif;
+	u32 route1, spum0;
+	int ret;
+
+	if (!rproc)
+		return -ENODEV;
+	ret = exynos7885_abox_uaif_check_params(rate, width, channels);
+	if (ret)
+		return ret;
+
+	abox = rproc->priv;
+	uaif = exynos7885_abox_get_uaif(abox, n);
+	if (!uaif)
+		return -ENODEV;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+
+	mutex_lock(&abox->uaif_lock);
+	if (uaif->mic_enabled) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	ret = exynos7885_abox_uaif_config(abox, n, uaif, rate, width,
+					  channels);
+	if (ret)
+		goto out_unlock;
+
+	route1 = readl(abox->sfr + ABOX_ROUTE_CTRL1);
+	spum0 = readl(abox->sfr + ABOX_SPUM_CTRL0);
+	route1 &= ~ABOX_ROUTE_NSRC0;
+	route1 |= FIELD_PREP(ABOX_ROUTE_NSRC0, ABOX_ROUTE_NSRC_UAIF(n));
+	spum0 |= ABOX_SPUM_NSRC0_ASRC;
+	spum0 &= ~ABOX_SPUM_NSRC0_SIFMS;
+	writel(route1, abox->sfr + ABOX_ROUTE_CTRL1);
+	writel(spum0, abox->sfr + ABOX_SPUM_CTRL0);
+	/*
+	 * Drop what an earlier input left in SIFM0; the vendor flushes it
+	 * whenever its path powers down.
+	 */
+	writel(readl(abox->sfr + ABOX_SPUM_CTRL3) | ABOX_SPUM_SIFM0_FLUSH,
+	       abox->sfr + ABOX_SPUM_CTRL3);
+	dev_dbg(abox->dev, "UAIF%u capture route: ROUTE1 %#x SPUM %#x %#x\n", n,
+		route1, spum0, readl(abox->sfr + ABOX_SPUM_CTRL3));
+	/* Make the route visible before the PCM trigger. */
+	wmb();
+
+out_unlock:
+	mutex_unlock(&abox->uaif_lock);
+	if (ret)
+		return ret;
+
+	/* SIFM0 ("INMUX0") paces WDMA1, as SIFS1 paces RDMA0. */
+	ret = exynos7885_abox_send_config(dev, ABOX_SET_INMUX0_SAMPLE_RATE,
+					  rate, 0);
+	if (ret)
+		return ret;
+	return exynos7885_abox_send_config(dev, ABOX_SET_INMUX0_FORMAT, width,
+					   channels);
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_mic_hw_params);
+
+int exynos7885_abox_uaif_set_mic_enabled(struct device *dev, unsigned int n,
+					 bool enable)
+{
+	struct rproc *rproc = exynos7885_abox_get_rproc(dev);
+	struct exynos7885_abox_rproc *abox;
+	struct exynos7885_abox_uaif *uaif;
+	u32 ctrl0;
+	int ret = 0;
+
+	if (!rproc)
+		return -ENODEV;
+	abox = rproc->priv;
+	uaif = exynos7885_abox_get_uaif(abox, n);
+	if (!uaif)
+		return -ENODEV;
+	if (!READ_ONCE(abox->firmware_ready))
+		return -EHOSTDOWN;
+
+	mutex_lock(&abox->uaif_lock);
+	if (enable == uaif->mic_enabled)
+		goto out_unlock;
+	if (enable) {
+		ret = exynos7885_abox_uaif_clk_on(uaif);
+		if (ret)
+			goto out_unlock;
+		ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(n));
+		writel(ctrl0 | ABOX_UAIF_MIC_ENABLE,
+		       abox->sfr + ABOX_UAIF_CTRL0(n));
+		uaif->mic_enabled = true;
+		goto out_unlock;
+	}
+
+	/* As the vendor driver, stop the input while WDMA still runs. */
+	ctrl0 = readl(abox->sfr + ABOX_UAIF_CTRL0(n));
+	writel(ctrl0 & ~ABOX_UAIF_MIC_ENABLE,
+	       abox->sfr + ABOX_UAIF_CTRL0(n));
+	/* Disable the input before removing its clocks. */
+	wmb();
+	uaif->mic_enabled = false;
+	exynos7885_abox_uaif_clk_off(uaif);
+
+out_unlock:
+	mutex_unlock(&abox->uaif_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos7885_abox_uaif_set_mic_enabled);
 
 int exynos7885_abox_uaif3_set_enabled(struct device *dev, bool enable)
 {
@@ -1830,7 +2211,8 @@ static int exynos7885_abox_stop(struct rproc *rproc)
 	int ret;
 
 	mutex_lock(&abox->pcm_lock);
-	if (abox->pcm_mapped || abox->pcm_shutting_down) {
+	if (abox->pcm_mapped || abox->capture_mapped ||
+	    abox->pcm_shutting_down) {
 		mutex_unlock(&abox->pcm_lock);
 		return -EBUSY;
 	}

@@ -11,6 +11,7 @@
 enum exynos7885_abox_ipc_id {
 	EXYNOS7885_ABOX_IPC_SYSTEM = 1,
 	EXYNOS7885_ABOX_IPC_PCM_PLAYBACK = 2,
+	EXYNOS7885_ABOX_IPC_PCM_CAPTURE = 3,
 };
 
 enum exynos7885_abox_pcm_message_type {
@@ -31,7 +32,8 @@ enum exynos7885_abox_uaif3_format {
 
 /*
  * Called from the ABOX parent IRQ; handlers must not sleep. An RDMA0
- * buffer-empty interrupt arrives as a PCM_POINTER message with pointer 0.
+ * buffer-empty or WDMA1 buffer-full interrupt arrives as a PCM_POINTER
+ * message, for playback or capture, with pointer 0.
  */
 typedef void (*exynos7885_abox_ipc_handler_t)(struct device *dev,
 						      const u32 *message,
@@ -42,6 +44,10 @@ int exynos7885_abox_send_ipc(struct device *dev, const void *message,
 			     size_t size);
 int exynos7885_abox_send_pcm(struct device *dev, u32 channel, u32 type,
 			     u32 param0, u32 param1, u32 param2);
+/* Same, for the playback (RDMA) or capture (WDMA) PCM task. */
+int exynos7885_abox_send_pcm_stream(struct device *dev, bool capture,
+				    u32 channel, u32 type, u32 param0,
+				    u32 param1, u32 param2);
 int exynos7885_abox_boot(struct device *dev);
 int exynos7885_abox_shutdown(struct device *dev);
 int exynos7885_abox_get_pcm_buffer(struct device *dev, void **area,
@@ -74,6 +80,22 @@ int exynos7885_abox_uaif_set_enabled(struct device *dev, unsigned int n,
 /* Move a running stream from UAIF @from to UAIF @to, both configured. */
 int exynos7885_abox_uaif_switch(struct device *dev, unsigned int from,
 				unsigned int to);
+/* The input of UAIF @n, routed to WDMA1. */
+int exynos7885_abox_uaif_mic_hw_params(struct device *dev, unsigned int n,
+				       unsigned int rate, unsigned int width,
+				       unsigned int channels);
+int exynos7885_abox_uaif_set_mic_enabled(struct device *dev, unsigned int n,
+					 bool enable);
+/* The WDMA1 capture ring, mapped at its own IOVA. */
+int exynos7885_abox_get_capture_buffer(struct device *dev, void **area,
+				       size_t *size);
+int exynos7885_abox_map_capture_buffer(struct device *dev);
+int exynos7885_abox_unmap_capture_buffer(struct device *dev);
+int exynos7885_abox_wait_wdma_idle(struct device *dev, unsigned int channel,
+				   unsigned int timeout_us);
+/* Byte position of WDMA @channel in its ring; safe from the IPC handler. */
+ssize_t exynos7885_abox_wdma_pointer(struct device *dev, unsigned int channel,
+				     size_t buffer_bytes, size_t period_bytes);
 int exynos7885_abox_register_ipc_handler(struct device *dev,
 					 exynos7885_abox_ipc_handler_t handler,
 					 void *data);
