@@ -1346,14 +1346,15 @@ config REGULATOR_S2MPU08
 	 via I2C bus.
 
 config REGULATOR_S2MPU08_ACPM_BUCK
-	tristate "Samsung S2MPU08 buck voltage control over ACPM"
+	tristate "Samsung S2MPU08 buck and LDO control over ACPM"
 	depends on EXYNOS_ACPM_PROTOCOL
 	depends on OF
 	help
 	  Voltage control of the S2MPU08 BUCK2, BUCK3 and BUCK5 (the A73, A53
 	  and Mali GPU supplies) on Exynos7885 boards, where the PMIC is
 	  reached through ACPM. Lets cpufreq and the GPU driver scale their
-	  voltage with their clock.
+	  voltage with their clock. Also switches and sets LDO2 and LDO35,
+	  the SD card I/O and card supplies.
 
 config REGULATOR_S5M8767
 	tristate "Samsung S5M8767A voltage regulator"
