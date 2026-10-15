@@ -1241,12 +1241,16 @@ config TOUCHSCREEN_STMFTS
 	  module will be called stmfts.
 
 config TOUCHSCREEN_FTS1BA90A
-	tristate "STMicroelectronics FTS1BA90A touchscreen (minimal)"
+	tristate "STMicroelectronics FTS1BA90A touchscreen"
 	depends on I2C
+	depends on DRM || !DRM
 	help
-	  Minimal basic-touch driver for ST FTS1BA90A as found in
-	  Samsung Galaxy Tab A 10.1 2019 (T510/gta3xlwifi).
-	  Binds to "stm,fts_touch" on i2c_4 addr 0x49.
+	  Say Y here if you have the STMicroelectronics FTS1BA90A touchscreen
+	  controller, as found in the Samsung Galaxy Tab A 10.1 (2019,
+	  SM-T510). It is powered down while the panel is off, or kept in a
+	  low-power mode where a double tap wakes the system.
+
+	  If unsure, say N.
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called fts1ba90a.
