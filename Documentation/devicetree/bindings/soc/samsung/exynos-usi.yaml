@@ -39,6 +39,9 @@ properties:
               - samsung,exynosautov9-usi
               - samsung,exynosautov920-usi
           - const: samsung,exynos850-usi
+      - items:
+          - const: samsung,exynos7885-usi
+          - const: samsung,exynos8895-usi
       - enum:
           - samsung,exynos850-usi
           - samsung,exynos8895-usi
