@@ -53,6 +53,20 @@ static inline struct s2mm005_state s2mm005_decode(u32 func, u32 lp)
 		state.source = true;
 	return state;
 }
+
+/*
+ * A source attach is first reported in state 14. Supplying VBUS there makes
+ * the firmware drop the attach about 500 ms later. Like Samsung's driver,
+ * start VBUS only in the PD source states 3-7, or when a sink-to-source swap
+ * reaches its source-on step.
+ */
+static inline bool s2mm005_vbus_start(u32 func)
+{
+	u8 pd = FIELD_GET(S2MM005_STATE, func);
+
+	return (pd >= 3 && pd <= 7) || pd == 64;
+}
+
 /* Firmware message buffers have a four-byte header followed by PDOs. */
 static inline int s2mm005_pd_current(const u8 caps[32], const u8 request[8])
 {

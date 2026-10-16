@@ -67,6 +67,20 @@ static void s2mm005_fault_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s.role, USB_ROLE_NONE);
 }
 
+static void s2mm005_vbus_start_test(struct kunit *test)
+{
+	const u32 source = S2MM005_ATTACHED | S2MM005_SOURCE | S2MM005_DFP;
+
+	/* The first source attach report must not power the partner. */
+	KUNIT_EXPECT_FALSE(test, s2mm005_vbus_start(14 | source));
+	KUNIT_EXPECT_FALSE(test, s2mm005_vbus_start(2 | source));
+	KUNIT_EXPECT_TRUE(test, s2mm005_vbus_start(3 | source));
+	KUNIT_EXPECT_TRUE(test, s2mm005_vbus_start(6 | source));
+	KUNIT_EXPECT_TRUE(test, s2mm005_vbus_start(7 | source));
+	KUNIT_EXPECT_FALSE(test, s2mm005_vbus_start(8 | source));
+	KUNIT_EXPECT_TRUE(test, s2mm005_vbus_start(64 | S2MM005_DFP));
+}
+
 static void s2mm005_pd_contract_test(struct kunit *test)
 {
 	u8 caps[32] = {}, request[8] = {};
@@ -90,6 +104,7 @@ static struct kunit_case s2mm005_cases[] = {
 	KUNIT_CASE(s2mm005_roles_test),
 	KUNIT_CASE(s2mm005_power_swap_test),
 	KUNIT_CASE(s2mm005_fault_test),
+	KUNIT_CASE(s2mm005_vbus_start_test),
 	KUNIT_CASE(s2mm005_pd_contract_test),
 	{}
 };

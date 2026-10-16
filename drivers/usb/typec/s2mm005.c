@@ -23,6 +23,9 @@
 #define S2MM005_LP		0x0060
 #define S2MM005_REQUEST		0x0240
 #define S2MM005_SOURCE_CAPS	0x0260
+/* AP request status word in the interrupt buffer, and its alt-mode field. */
+#define S2MM005_IRQ_AP_REQ	28
+#define S2MM005_AP_ALT_MODE	GENMASK(29, 28)
 
 struct s2mm005 {
 	struct i2c_client *client;
@@ -89,6 +92,23 @@ static int s2mm005_command(struct s2mm005 *s, const u8 *data, size_t len)
 	memcpy(buf + 2, data, len);
 	ret = i2c_master_send(s->client, buf, len + 2);
 	return ret == len + 2 ? 0 : ret < 0 ? ret : -EIO;
+}
+
+/*
+ * Samsung's driver starts alternate mode and power negotiation once USB is
+ * ready. Without them the firmware never leaves state 14 as a source, so a
+ * sink is never powered.
+ */
+static int s2mm005_start_pd(struct s2mm005 *s, bool nego)
+{
+	const u8 alt_mode[] = { 0x03, 0x31 };
+	const u8 power_nego[] = { 0x03, 0x42 };
+	int ret;
+
+	ret = s2mm005_command(s, alt_mode, sizeof(alt_mode));
+	if (ret || !nego)
+		return ret;
+	return s2mm005_command(s, power_nego, sizeof(power_nego));
 }
 
 static void s2mm005_supply(struct s2mm005 *s, int uv, int ua)
@@ -197,6 +217,7 @@ static int s2mm005_update(struct s2mm005 *s)
 	const u8 wake_cable[] = { 0x0f, 0x0d };
 	const u8 drp[] = { 0x02, 0x01, 0x00, 0x50, 0x03 };
 	u32 func, lp;
+	bool supply;
 	int ret, ua = 0;
 
 	ret = s2mm005_read(s, S2MM005_FUNC, func_buf, sizeof(func_buf));
@@ -211,9 +232,10 @@ static int s2mm005_update(struct s2mm005 *s)
 	func = get_unaligned_le32(func_buf);
 	lp = get_unaligned_le32(lp_buf);
 	state = s2mm005_decode(func, lp);
+	/* Once started, VBUS stays on for as long as the port is a source. */
+	supply = state.source && (s->sourcing || s2mm005_vbus_start(func));
 	/* Supply the partner before acknowledging the source attach event. */
-	if (state.source && !s->sourcing &&
-	    !(lp & S2MM005_SLEEP_CABLE_DETECT)) {
+	if (supply && !s->sourcing && !(lp & S2MM005_SLEEP_CABLE_DETECT)) {
 		s2mm005_supply(s, 0, 0);
 		ret = regulator_enable(s->vbus);
 		if (ret)
@@ -230,6 +252,14 @@ static int s2mm005_update(struct s2mm005 *s)
 	}
 	if (func & S2MM005_RESET)
 		s->drp_restored = false;
+	/* Like Samsung's driver, restart PD after a reset or when it was lost. */
+	if ((func & S2MM005_RESET) ||
+	    !(get_unaligned_le32(irq_buf + S2MM005_IRQ_AP_REQ) &
+	      S2MM005_AP_ALT_MODE)) {
+		ret = s2mm005_start_pd(s, func & S2MM005_RESET);
+		if (ret)
+			return ret;
+	}
 	if (func != s->last_func || lp != s->last_lp) {
 		dev_info(&s->client->dev,
 			 "state=%u data=%s power=%s status=%#x lp=%#x\n",
@@ -270,7 +300,7 @@ static int s2mm005_update(struct s2mm005 *s)
 	if (state.source || FIELD_GET(S2MM005_STATE, func) == 52 ||
 	    (func & S2MM005_RESET))
 		s2mm005_supply(s, 0, 0);
-	if (s->sourcing && !state.source) {
+	if (s->sourcing && !supply) {
 		ret = regulator_disable(s->vbus);
 		if (ret)
 			return ret;
@@ -290,7 +320,7 @@ static int s2mm005_update(struct s2mm005 *s)
 		s->role = state.role;
 		s->role_dirty = false;
 	}
-	if (state.source && !s->sourcing) {
+	if (supply && !s->sourcing) {
 		ret = regulator_enable(s->vbus);
 		if (ret)
 			return ret;
@@ -512,6 +542,9 @@ static int s2mm005_probe(struct i2c_client *client)
 		return ret;
 	device_init_wakeup(dev, true);
 	dev_info(dev, "resident firmware %*ph\n", (int)sizeof(version), version);
+	ret = s2mm005_start_pd(s, true);
+	if (ret)
+		dev_warn(dev, "failed to start power negotiation: %d\n", ret);
 	/* Read initial state even when the cable was connected before boot. */
 	s2mm005_service(s);
 	return 0;
