@@ -636,6 +636,43 @@
 			status = "disabled";
 		};
 
+		csis0: csis@14400000 {
+			compatible = "samsung,exynos7885-csis";
+			reg = <0x14400000 0x2000>;
+			interrupts = <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>;
+			samsung,pmu-syscon = <&pmu_system_controller 0x67c>;
+			samsung,sysreg = <&syscon_cam 0x840 16>;
+			samsung,csis-dma = <&csis_dma 0>;
+			status = "disabled";
+
+			port {
+			};
+		};
+
+		csis1: csis@14410000 {
+			compatible = "samsung,exynos7885-csis";
+			reg = <0x14410000 0x2000>;
+			interrupts = <GIC_SPI 298 IRQ_TYPE_LEVEL_HIGH>;
+			samsung,pmu-syscon = <&pmu_system_controller 0x680>;
+			samsung,sysreg = <&syscon_cam 0x840 8>;
+			samsung,csis-dma = <&csis_dma 1>;
+			status = "disabled";
+
+			port {
+			};
+		};
+
+		/* DMA arbitration and SRAM shared by the CSIS instances */
+		csis_dma: syscon@14440000 {
+			compatible = "samsung,exynos7885-csis-dma", "syscon";
+			reg = <0x14440000 0x100>;
+		};
+
+		syscon_cam: syscon@14510000 {
+			compatible = "samsung,exynos7885-cam-sysreg", "syscon";
+			reg = <0x14510000 0x1000>;
+		};
+
 		pmu_system_controller: system-controller@11c80000 {
 			compatible = "samsung,exynos7885-pmu",
 				     "samsung,exynos7-pmu", "syscon";
@@ -830,6 +867,62 @@
 			pinctrl-0 = <&i2c6_bus>;
 			clocks = <&cmu_peri CLK_GOUT_I2C6_PCLK>;
 			clock-names = "i2c";
+			status = "disabled";
+		};
+
+		hsi2c_0: i2c@138a0000 {
+			compatible = "samsung,exynos7885-hsi2c",
+				     "samsung,exynos8895-hsi2c";
+			reg = <0x138a0000 0x1000>;
+			interrupts = <GIC_SPI 257 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&cmu_peri CLK_GOUT_HSI2C0_PCLK>;
+			clock-names = "hsi2c";
+			pinctrl-names = "default";
+			pinctrl-0 = <&hs_i2c0_bus>;
+			status = "disabled";
+		};
+
+		hsi2c_1: i2c@138b0000 {
+			compatible = "samsung,exynos7885-hsi2c",
+				     "samsung,exynos8895-hsi2c";
+			reg = <0x138b0000 0x1000>;
+			interrupts = <GIC_SPI 258 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&cmu_peri CLK_GOUT_HSI2C1_PCLK>;
+			clock-names = "hsi2c";
+			pinctrl-names = "default";
+			pinctrl-0 = <&hs_i2c1_bus>;
+			status = "disabled";
+		};
+
+		hsi2c_2: i2c@138c0000 {
+			compatible = "samsung,exynos7885-hsi2c",
+				     "samsung,exynos8895-hsi2c";
+			reg = <0x138c0000 0x1000>;
+			interrupts = <GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&cmu_peri CLK_GOUT_HSI2C2_PCLK>;
+			clock-names = "hsi2c";
+			pinctrl-names = "default";
+			pinctrl-0 = <&hs_i2c2_bus>;
+			status = "disabled";
+		};
+
+		hsi2c_3: i2c@138d0000 {
+			compatible = "samsung,exynos7885-hsi2c",
+				     "samsung,exynos8895-hsi2c";
+			reg = <0x138d0000 0x1000>;
+			interrupts = <GIC_SPI 260 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&cmu_peri CLK_GOUT_HSI2C3_PCLK>;
+			clock-names = "hsi2c";
+			pinctrl-names = "default";
+			pinctrl-0 = <&hs_i2c3_bus>;
 			status = "disabled";
 		};
 
