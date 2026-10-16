@@ -3,7 +3,8 @@
  * Himax HX8279D 1200x1920 video-mode DSI panel of the Samsung Galaxy Tab A
  * 10.1 (2019, SM-T510, "gta3xl").
  *
- * The bootloader powers and initializes the panel. This driver switches
+ * The bootloader powers and initializes the panel. This driver resets the
+ * controller and sends its setup again on the first enable, switches
  * the display on and off, puts the controller to sleep and switches the
  * panel supplies off while the display is off, and drives the backlight,
  * which the controller sets through a DSI register. The controller only
@@ -227,7 +228,6 @@ static int hx8279d_enable(struct drm_panel *panel)
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 	int ret;
 
-	/* The bootloader leaves the controller set up. */
 	if (ctx->asleep) {
 		ret = hx8279d_wake(ctx);
 		if (ret)
@@ -318,6 +318,13 @@ static int hx8279d_probe(struct mipi_dsi_device *dsi)
 
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
+
+	/*
+	 * The bootloader's controller setup garbles the bottom few lines of
+	 * the panel. Reset the controller and send the vendor setup on the
+	 * first enable, as after a sleep.
+	 */
+	ctx->asleep = true;
 
 	/* Keep the lines as the bootloader left them: powered, out of reset. */
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
