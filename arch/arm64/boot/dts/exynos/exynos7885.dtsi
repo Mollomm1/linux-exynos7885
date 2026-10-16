@@ -342,6 +342,12 @@
 				      "dout_peri_usi2";
 		};
 
+		syscon_peri: syscon@10030000 {
+			compatible = "samsung,exynos7885-peri-sysreg", "syscon";
+			reg = <0x10030000 0x10000>;
+			clocks = <&cmu_peri CLK_GOUT_SYSREG_PERI_PCLK>;
+		};
+
 		tmu_cpu: thermal-sensor@10070000 {
 			compatible = "samsung,exynos7885-tmu";
 			reg = <0x10070000 0x400>;
@@ -825,6 +831,47 @@
 			clocks = <&cmu_peri CLK_GOUT_I2C6_PCLK>;
 			clock-names = "i2c";
 			status = "disabled";
+		};
+
+		usi2: usi@13980000 {
+			compatible = "samsung,exynos7885-usi",
+				     "samsung,exynos8895-usi";
+			ranges = <0x0 0x13980000 0x20000>;
+			clocks = <&cmu_peri CLK_GOUT_USI2_PCLK>,
+				 <&cmu_peri CLK_GOUT_USI2_SCLK>;
+			clock-names = "pclk", "ipclk";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			samsung,sysreg = <&syscon_peri 0x2008>;
+			status = "disabled";
+
+			hsi2c_8: i2c@0 {
+				compatible = "samsung,exynos7885-hsi2c",
+					     "samsung,exynos8895-hsi2c";
+				reg = <0x0 0x1000>;
+				interrupts = <GIC_SPI 275 IRQ_TYPE_LEVEL_HIGH>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				clocks = <&cmu_peri CLK_GOUT_USI2_PCLK>;
+				clock-names = "hsi2c";
+				pinctrl-names = "default";
+				pinctrl-0 = <&hs_i2c8_bus>;
+				status = "disabled";
+			};
+
+			hsi2c_9: i2c@10000 {
+				compatible = "samsung,exynos7885-hsi2c",
+					     "samsung,exynos8895-hsi2c";
+				reg = <0x10000 0x1000>;
+				interrupts = <GIC_SPI 276 IRQ_TYPE_LEVEL_HIGH>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				clocks = <&cmu_peri CLK_GOUT_USI2_PCLK>;
+				clock-names = "hsi2c";
+				pinctrl-names = "default";
+				pinctrl-0 = <&hs_i2c9_bus>;
+				status = "disabled";
+			};
 		};
 
 		i2c_7: i2c@11cd0000 {
