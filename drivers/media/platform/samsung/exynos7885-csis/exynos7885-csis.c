@@ -14,6 +14,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -71,9 +72,12 @@
 #define  DMA_DATA_INPUT_PRL		BIT(0)
 #define CSIS_DMA_INT_MASK		0x1404
 #define CSIS_DMA_INT_SRC		0x1408
+#define  DMA_INT_ABORT_DONE		BIT(16)
 #define  DMA_INT_ERROR			BIT(12)
 #define  DMA_INT_FRM_END0		BIT(8)
 #define  DMA_INT_FRM_START0		BIT(4)
+#define CSIS_DMA_CMN_CTRL		0x1414
+#define  DMA_CMN_ABORT_REQ		BIT(0)
 #define CSIS_DMA_ERR_CODE		0x1418
 #define CSIS_OTF_FORMAT			0x141c
 
@@ -282,6 +286,21 @@ static int csis_phy_power(struct csis *csis, bool on)
 	return regmap_update_bits(csis->pmu, csis->iso_offset, BIT(0), 0);
 }
 
+/*
+ * A stream stopped in the middle of a frame leaves the DMA busy: every later
+ * frame start then only raises DMA_OTF_OVERLAP. Only an abort recovers it.
+ */
+static void csis_dma_abort(struct csis *csis)
+{
+	u32 src;
+
+	writel(DMA_CMN_ABORT_REQ, csis->base + CSIS_DMA_CMN_CTRL);
+	if (readl_poll_timeout(csis->base + CSIS_DMA_INT_SRC, src,
+			       src & DMA_INT_ABORT_DONE, 100, 100000))
+		dev_warn(csis->dev, "DMA abort timed out\n");
+	writel(DMA_INT_ABORT_DONE, csis->base + CSIS_DMA_INT_SRC);
+}
+
 static void csis_hw_reset(struct csis *csis)
 {
 	unsigned int i;
@@ -299,6 +318,7 @@ static void csis_hw_start(struct csis *csis, u32 settle)
 {
 	u32 width = csis->pix.width, height = csis->pix.height;
 
+	csis_dma_abort(csis);
 	csis_hw_reset(csis);
 
 	csis_rmw(csis, CSIS_PHY_CMN_CTRL,
@@ -345,6 +365,7 @@ static void csis_hw_stop(struct csis *csis)
 {
 	writel(0, csis->base + CSIS_INT_MSK0);
 	writel(0, csis->base + CSIS_DMA_INT_MASK);
+	csis_dma_abort(csis);
 	csis_rmw(csis, CSIS_PHY_CMN_CTRL, PHY_CMN_ENABLE_CLK |
 		 PHY_CMN_ENABLE_DAT, 0);
 	csis_rmw(csis, CSIS_CMN_CTRL, CMN_CTRL_CSI_EN, 0);
