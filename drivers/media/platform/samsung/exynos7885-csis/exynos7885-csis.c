@@ -715,11 +715,7 @@ static int csis_notify_bound(struct v4l2_async_notifier *notifier,
 static int csis_notify_complete(struct v4l2_async_notifier *notifier)
 {
 	struct csis *csis = container_of(notifier, struct csis, notifier);
-	int ret;
 
-	ret = video_register_device(&csis->vdev, VFL_TYPE_VIDEO, -1);
-	if (ret)
-		return ret;
 	return v4l2_device_register_subdev_nodes(&csis->v4l2_dev);
 }
 
@@ -879,6 +875,11 @@ static int csis_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_v4l2;
 
+	/* Links to the sensor need the video entity in the media device. */
+	ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
+	if (ret)
+		goto err_entity;
+
 	v4l2_async_nf_init(&csis->notifier, &csis->v4l2_dev);
 	ret = csis_parse_endpoint(csis);
 	if (ret)
@@ -897,6 +898,8 @@ err_unregister_nf:
 	v4l2_async_nf_unregister(&csis->notifier);
 err_notifier:
 	v4l2_async_nf_cleanup(&csis->notifier);
+	vb2_video_unregister_device(vdev);
+err_entity:
 	media_entity_cleanup(&vdev->entity);
 err_v4l2:
 	v4l2_device_unregister(&csis->v4l2_dev);
