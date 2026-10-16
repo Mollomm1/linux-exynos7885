@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIDEO_EXYNOS7885_CSIS
+	tristate "Samsung Exynos7885 MIPI CSI-2 receiver"
+	depends on V4L_PLATFORM_DRIVERS
+	depends on VIDEO_DEV && OF
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	select VIDEOBUF2_DMA_CONTIG
+	select MFD_SYSCON
+	help
+	  Driver for the CSIS v5 MIPI CSI-2 receivers of Samsung Exynos7885
+	  SoCs. Raw Bayer frames from a camera sensor are written to memory
+	  by the receiver's own DMA, without the camera ISP.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called exynos7885-csis.
