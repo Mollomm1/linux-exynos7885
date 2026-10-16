@@ -38,6 +38,9 @@ properties:
               - google,gs101-hsi2c
               - samsung,exynos850-hsi2c
           - const: samsung,exynosautov9-hsi2c
+      - items:
+          - const: samsung,exynos7885-hsi2c
+          - const: samsung,exynos8895-hsi2c
       - const: samsung,exynos5-hsi2c    # Exynos5250 and Exynos5420
         deprecated: true
 
