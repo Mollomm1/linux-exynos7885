@@ -36,7 +36,9 @@ properties:
   panel:
     description:
       The panel over which the touchscreen lies. The controller stops
-      sensing while the panel is off.
+      sensing while the panel is off. The touchscreen does not need the
+      panel to probe; list it in post-init-providers as well so that the
+      touchscreen works before the panel driver is loaded.
 
   pinctrl-0: true
   pinctrl-1: true
@@ -73,6 +75,7 @@ examples:
             avdd-supply = <&tsp_avdd>;
             vdd-supply = <&tsp_dvdd>;
             panel = <&panel>;
+            post-init-providers = <&panel>;
             touchscreen-size-x = <1200>;
             touchscreen-size-y = <1920>;
             wakeup-source;
