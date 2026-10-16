@@ -691,6 +691,18 @@ config VIDEO_S5K6A3
 	  This is a V4L2 sensor driver for Samsung S5K6A3 raw
 	  camera sensor.
 
+config VIDEO_S5K_SMIA
+	tristate "Samsung S5K4HA and S5K5E9 sensor support"
+	select V4L2_CCI_I2C
+	depends on OF && GPIOLIB
+	help
+	  This is a Video4Linux2 sensor driver for the Samsung S5K4HA and
+	  S5K5E9 raw Bayer camera sensors, as used in the Samsung Galaxy
+	  Tab A 10.1 (2019).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5k-smia.
+
 config VIDEO_VGXY61
 	tristate "ST VGXY61 sensor support"
 	select V4L2_CCI_I2C
