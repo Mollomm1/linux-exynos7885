@@ -26,6 +26,8 @@ properties:
               - samsung,exynos3-sysreg
               - samsung,exynos4-sysreg
               - samsung,exynos5-sysreg
+              - samsung,exynos7885-cam-sysreg
+              - samsung,exynos7885-csis-dma
               - samsung,exynos7885-peri-sysreg
               - samsung,exynos8895-fsys0-sysreg
               - samsung,exynos8895-fsys1-sysreg
