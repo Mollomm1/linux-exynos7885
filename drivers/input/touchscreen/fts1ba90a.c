@@ -98,8 +98,10 @@
 #define FTS_SPONGE_OFFSET_MODE		0x0000
 #define FTS_SPONGE_MODE_DOUBLETAP	BIT(2)
 
+/* Look for the panel every second for two minutes, then every 10 s. */
 #define FTS_PANEL_RETRY_MS		1000
 #define FTS_PANEL_RETRY_CNT		120
+#define FTS_PANEL_RETRY_SLOW_MS		10000
 
 enum fts1ba90a_state {
 	FTS_STATE_OFF,
@@ -755,11 +757,18 @@ static void fts1ba90a_panel_work(struct work_struct *work)
 	mutex_unlock(&ts->lock);
 	ret = drm_panel_add_follower(dev, &ts->follower);
 	if (ret == -EPROBE_DEFER) {
-		if (++ts->panel_retries < FTS_PANEL_RETRY_CNT)
-			schedule_delayed_work(&ts->panel_work,
-					      msecs_to_jiffies(FTS_PANEL_RETRY_MS));
-		else
-			dev_warn(dev, "panel not found, not following it\n");
+		/*
+		 * The panel driver may only load from the root filesystem,
+		 * after the touchscreen has served the initramfs (e.g. to
+		 * unlock an encrypted root), so never stop looking.
+		 */
+		if (ts->panel_retries < FTS_PANEL_RETRY_CNT &&
+		    ++ts->panel_retries == FTS_PANEL_RETRY_CNT)
+			dev_info(dev, "panel not found yet, still looking\n");
+		schedule_delayed_work(&ts->panel_work,
+				      msecs_to_jiffies(ts->panel_retries < FTS_PANEL_RETRY_CNT ?
+						       FTS_PANEL_RETRY_MS :
+						       FTS_PANEL_RETRY_SLOW_MS));
 		return;
 	}
 	if (ret) {
