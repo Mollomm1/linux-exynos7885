@@ -1249,6 +1249,7 @@ static const struct samsung_pll_rate_table cpucl0_pll_rates[] __initconst = {
 };
 
 static const struct samsung_pll_rate_table cpucl12_pll_rates[] __initconst = {
+	PLL_35XX_RATE(26 * MHZ, 1586000000U, 183, 3, 0),
 	PLL_35XX_RATE(26 * MHZ, 1482000000U, 171, 3, 0),
 	PLL_35XX_RATE(26 * MHZ, 1352000000U, 156, 3, 0),
 	PLL_35XX_RATE(26 * MHZ, 1248000000U, 144, 3, 0),
